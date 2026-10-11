@@ -7,12 +7,15 @@
  *   tiles      one thread per (entry, tile row): prefix-sum backdrops,
  *              allocate coverage masks for tiles with pieces, and set the
  *              entry's bit in each screen tile's z-ordered bitmap.
+ *   lists      one thread per screen tile: scan the bitmap once and write a
+ *              compact, ordered entry list, starting at the topmost opaque
+ *              fill that covers the whole tile (everything below is hidden).
  *   indirect   size the coverage dispatch from the GPU-side mask count.
  *   coverage   one workgroup per edge tile: exact signed-area coverage per
  *              pixel, fill rule applied, packed to 8-bit masks.
- *   composite  one workgroup per 16x16 screen tile: walk the bitmap in paint
- *              order, evaluate paints and blend premultiplied, with a small
- *              register stack for clip/opacity layers.
+ *   composite  one workgroup per 16x16 screen tile: walk the tile's list in
+ *              paint order, evaluate paints and blend premultiplied, with a
+ *              small register stack for clip/opacity layers.
  *
  * `packages/renderer/test/tile-reference.ts` mirrors `bin` and `coverage` in
  * TypeScript and is property-tested against exact polygon clipping.
@@ -26,6 +29,7 @@ const KIND_BEGIN: u32 = 1u;
 const KIND_END: u32 = 2u;
 const FLAG_EVENODD: u32 = 4u;
 const FLAG_CLIP: u32 = 8u;
+const FLAG_OPAQUE: u32 = 16u;
 
 struct Config {
   viewport: vec2<u32>,
@@ -79,7 +83,7 @@ struct Counters {
   pieces: atomic<u32>,
   edgeTiles: atomic<u32>,
   overflow: atomic<u32>,
-  _pad: u32,
+  lists: u32,
 }
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -273,7 +277,7 @@ struct Counters {
   pieces: u32,
   edgeTiles: atomic<u32>,
   overflow: atomic<u32>,
-  _pad: u32,
+  lists: u32,
 }
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -336,6 +340,79 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 `;
 
+export const listsShader = /* wgsl */ `
+${common}
+struct PathTile {
+  head: u32,
+  delta: i32,
+  backdrop: i32,
+  mask: u32,
+}
+
+struct Counters {
+  pieces: u32,
+  edgeTiles: u32,
+  overflow: u32,
+  lists: atomic<u32>,
+}
+
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> entries: array<Entry>;
+@group(0) @binding(2) var<storage, read> tiles: array<PathTile>;
+@group(0) @binding(3) var<storage, read> bitmaps: array<u32>;
+@group(0) @binding(4) var<storage, read_write> lists: array<u32>;
+@group(0) @binding(5) var<storage, read_write> ranges: array<vec2<u32>>;
+@group(0) @binding(6) var<storage, read_write> counters: Counters;
+
+// True when entry ei is an opaque fill (flagged on the CPU, never inside a
+// layer) that fully covers this tile, hiding everything painted before it.
+fn occludes(ei: u32, tile: vec2<u32>) -> bool {
+  let e = entries[ei];
+  if ((e.flags & FLAG_OPAQUE) == 0u) { return false; }
+  let t = tiles[e.tileOffset + (tile.y - e.bbox.y) * (e.bbox.z - e.bbox.x) + (tile.x - e.bbox.x)];
+  return t.mask == 0u && select(t.backdrop != 0, (t.backdrop & 1) != 0, (e.flags & FLAG_EVENODD) != 0u);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let t = gid.x + gid.y * nwg.x * 64u;
+  if (t >= config.tiles.x * config.tiles.y) { return; }
+  let tile = vec2<u32>(t % config.tiles.x, t / config.tiles.x);
+  let base = t * config.chunkCount * 8u;
+  let words = config.chunkCount * 8u;
+  var total = 0u;
+  var count = 0u;
+  for (var w = 0u; w < words; w++) {
+    var bits = bitmaps[base + w];
+    loop {
+      if (bits == 0u) { break; }
+      let ei = w * 32u + countTrailingZeros(bits);
+      bits &= bits - 1u;
+      if (occludes(ei, tile)) { count = 0u; }
+      count++;
+      total++;
+    }
+  }
+  let offset = atomicAdd(&counters.lists, count);
+  ranges[t] = vec2<u32>(offset, count);
+  var seen = 0u;
+  var n = 0u;
+  for (var w = 0u; w < words; w++) {
+    var bits = bitmaps[base + w];
+    loop {
+      if (bits == 0u) { break; }
+      let ei = w * 32u + countTrailingZeros(bits);
+      bits &= bits - 1u;
+      if (seen >= total - count) {
+        lists[offset + n] = ei;
+        n++;
+      }
+      seen++;
+    }
+  }
+}
+`;
+
 export const indirectShader = /* wgsl */ `
 struct Config {
   viewport: vec2<u32>,
@@ -354,7 +431,7 @@ struct Counters {
   pieces: u32,
   edgeTiles: u32,
   overflow: u32,
-  _pad: u32,
+  lists: u32,
 }
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> counters: Counters;
@@ -384,7 +461,7 @@ struct Counters {
   pieces: u32,
   edgeTiles: u32,
   overflow: u32,
-  _pad: u32,
+  lists: u32,
 }
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -482,11 +559,12 @@ const PAINT_LINEAR: u32 = 1u;
 @group(0) @binding(1) var<storage, read> entries: array<Entry>;
 @group(0) @binding(2) var<storage, read> tiles: array<PathTile>;
 @group(0) @binding(3) var<storage, read> masks: array<u32>;
-@group(0) @binding(4) var<storage, read> bitmaps: array<u32>;
-@group(0) @binding(5) var<storage, read> paints: array<Paint>;
-@group(0) @binding(6) var<storage, read> stops: array<vec4<f32>>;
-@group(0) @binding(7) var previous: texture_2d<f32>;
-@group(0) @binding(8) var outTex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(4) var<storage, read> lists: array<u32>;
+@group(0) @binding(5) var<storage, read> ranges: array<vec2<u32>>;
+@group(0) @binding(6) var<storage, read> paints: array<Paint>;
+@group(0) @binding(7) var<storage, read> stops: array<vec4<f32>>;
+@group(0) @binding(8) var previous: texture_2d<f32>;
+@group(0) @binding(9) var outTex: texture_storage_2d<rgba8unorm, write>;
 
 fn coverage(ti: u32, evenodd: bool, pixel: u32) -> f32 {
   let t = tiles[ti];
@@ -538,52 +616,43 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   var stackScale: array<f32, MAX_DEPTH>;
   var depth = 0u;
   var skip = 0u;
-  for (var chunk = 0u; chunk < config.chunkCount; chunk++) {
-    for (var w = 0u; w < 8u; w++) {
-      var bits = bitmaps[(screenTile * config.chunkCount + chunk) * 8u + w];
-      loop {
-        if (bits == 0u) { break; }
-        let b = countTrailingZeros(bits);
-        bits &= bits - 1u;
-        color += vec4<f32>(f32(b) * 1e-9);
-        if (config.firstPass == 1u) { continue; }
-        let e = entries[chunk * 256u + w * 32u + b];
-        let kind = e.flags & 3u;
-        if (skip > 0u) {
-          if (kind == KIND_BEGIN) { skip++; } else if (kind == KIND_END) { skip--; }
+  let range = ranges[screenTile];
+  for (var i = 0u; i < range.y; i++) {
+    let e = entries[lists[range.x + i]];
+    let kind = e.flags & 3u;
+    if (skip > 0u) {
+      if (kind == KIND_BEGIN) { skip++; } else if (kind == KIND_END) { skip--; }
+      continue;
+    }
+    let bw = e.bbox.z - e.bbox.x;
+    let ti = e.tileOffset + (wid.y - e.bbox.y) * bw + (wid.x - e.bbox.x);
+    let evenodd = (e.flags & FLAG_EVENODD) != 0u;
+    if (kind == KIND_FILL) {
+      let cov = coverage(ti, evenodd, pixel);
+      if (cov > 0.0) {
+        let src = paintColor(e, pos) * (cov * e.opacity);
+        color = src + color * (1.0 - src.a);
+      }
+    } else if (kind == KIND_BEGIN) {
+      var scale = e.opacity;
+      if ((e.flags & FLAG_CLIP) != 0u) {
+        let t = tiles[ti];
+        let empty = t.mask == 0u && select(t.backdrop == 0, (t.backdrop & 1) == 0, evenodd);
+        if (empty) {
+          // Nothing inside this clip reaches this tile.
+          skip = 1u;
           continue;
         }
-        let bw = e.bbox.z - e.bbox.x;
-        let ti = e.tileOffset + (wid.y - e.bbox.y) * bw + (wid.x - e.bbox.x);
-        let evenodd = (e.flags & FLAG_EVENODD) != 0u;
-        if (kind == KIND_FILL) {
-          let cov = coverage(ti, evenodd, pixel);
-          if (cov > 0.0) {
-            let src = paintColor(e, pos) * (cov * e.opacity);
-            color = src + color * (1.0 - src.a);
-          }
-        } else if (kind == KIND_BEGIN) {
-          var scale = e.opacity;
-          if ((e.flags & FLAG_CLIP) != 0u) {
-            let t = tiles[ti];
-            let empty = t.mask == 0u && select(t.backdrop == 0, (t.backdrop & 1) == 0, evenodd);
-            if (empty) {
-              // Nothing inside this clip reaches this tile.
-              skip = 1u;
-              continue;
-            }
-            scale *= coverage(ti, evenodd, pixel);
-          }
-          stack[depth] = color;
-          stackScale[depth] = scale;
-          depth++;
-          color = vec4<f32>(0.0);
-        } else {
-          depth--;
-          let src = color * stackScale[depth];
-          color = src + stack[depth] * (1.0 - src.a);
-        }
+        scale *= coverage(ti, evenodd, pixel);
       }
+      stack[depth] = color;
+      stackScale[depth] = scale;
+      depth++;
+      color = vec4<f32>(0.0);
+    } else {
+      depth--;
+      let src = color * stackScale[depth];
+      color = src + stack[depth] * (1.0 - src.a);
     }
   }
   if (all(pix < config.viewport)) {

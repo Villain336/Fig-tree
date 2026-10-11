@@ -4,9 +4,9 @@ import type { Backend, PixelData } from "../backend";
 import { ItemKind } from "../compile";
 import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
-import { premultiply } from "../paint";
+import { PaintKind, premultiply } from "../paint";
 import type { Color } from "../types";
-import { binShader, compositeShader, coverageShader, indirectShader, tilesShader } from "./shaders";
+import { binShader, compositeShader, coverageShader, indirectShader, listsShader, tilesShader } from "./shaders";
 import { GpuTimer, type Stage, type StageTimings } from "./timer";
 
 const TILE = 16;
@@ -22,6 +22,7 @@ const MAX_LINEAR_WORKGROUPS = 65535;
 
 const FLAG_EVENODD = 4;
 const FLAG_CLIP = 8;
+const FLAG_OPAQUE = 16;
 
 interface GeometryUpload {
   uploadId: number;
@@ -91,6 +92,7 @@ export class WebGPUBackend implements Backend {
   private readonly pipelines: {
     bin: GPUComputePipeline;
     tiles: GPUComputePipeline;
+    lists: GPUComputePipeline;
     indirect: GPUComputePipeline;
     coverage: GPUComputePipeline;
     composite: GPUComputePipeline;
@@ -114,6 +116,8 @@ export class WebGPUBackend implements Backend {
   private readonly edgeTiles: GrowableBuffer;
   private readonly masks: GrowableBuffer;
   private readonly bitmaps: GrowableBuffer;
+  private readonly lists: GrowableBuffer;
+  private readonly ranges: GrowableBuffer;
   private readonly readback: GPUBuffer;
   private readbackBusy = false;
   private readbackDone: Promise<void> = Promise.resolve();
@@ -141,6 +145,7 @@ export class WebGPUBackend implements Backend {
     this.pipelines = {
       bin: compute(binShader, "bin"),
       tiles: compute(tilesShader, "tiles"),
+      lists: compute(listsShader, "lists"),
       indirect: compute(indirectShader, "indirect"),
       coverage: compute(coverageShader, "coverage"),
       composite: compute(compositeShader, "composite"),
@@ -160,6 +165,8 @@ export class WebGPUBackend implements Backend {
     this.edgeTiles = new GrowableBuffer(device, "edge tiles", S, this.maskCapacity * 8);
     this.masks = new GrowableBuffer(device, "masks", S, this.maskCapacity * MASK_BYTES);
     this.bitmaps = new GrowableBuffer(device, "bitmaps", S | D, 1 << 16);
+    this.lists = new GrowableBuffer(device, "tile lists", S, 1 << 16);
+    this.ranges = new GrowableBuffer(device, "tile ranges", S | D, 1 << 16);
     this.readback = device.createBuffer({ label: "counters readback", size: SLOT_ALIGN * 64, usage: GPUBufferUsage.MAP_READ | D });
   }
 
@@ -218,6 +225,8 @@ export class WebGPUBackend implements Backend {
     const maxBitmap = Math.max(1, ...passes.map((p) => tilesX * tilesY * p.chunkCount * 32));
     this.pathTiles.ensure(maxTiles * PATH_TILE_BYTES, false);
     this.bitmaps.ensure(maxBitmap, false);
+    this.lists.ensure(maxTiles * 4, false);
+    this.ranges.ensure(tilesX * tilesY * 8, false);
     this.pieces.ensure(this.pieceCapacity * PIECE_BYTES, false);
     this.edgeTiles.ensure(this.maskCapacity * 8, false);
     this.masks.ensure(this.maskCapacity * MASK_BYTES, false);
@@ -398,6 +407,7 @@ export class WebGPUBackend implements Backend {
     const u = new Uint32Array(data);
     const f = new Float32Array(data);
     const passes = ranges.map((r, p): PassPlan => {
+      let depth = 0;
       let tileTotal = 0;
       let segmentTotal = 0;
       let rowTotal = 0;
@@ -413,6 +423,11 @@ export class WebGPUBackend implements Backend {
         let flags: number = e.kind;
         if (e.item.fillRule === "evenodd") flags |= FLAG_EVENODD;
         if (e.kind === ItemKind.BeginLayer && e.geometry) flags |= FLAG_CLIP;
+        if (e.kind === ItemKind.BeginLayer) depth++;
+        else if (e.kind === ItemKind.EndLayer) depth--;
+        else if (depth === 0 && e.item.alpha === 1 && e.paint && e.paint.paint.kind === PaintKind.Solid && e.paint.paint.color[3] === 1) {
+          flags |= FLAG_OPAQUE;
+        }
         u[k + 6] = flags;
         u[k + 7] = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : 0;
         u.set([tx0, ty0, tx1, ty1, tileTotal, segmentTotal, rowTotal], k + 8);
@@ -449,6 +464,7 @@ export class WebGPUBackend implements Backend {
     const tiles = { buffer: this.pathTiles.buffer, size: Math.max(1, pass.tileTotal) * PATH_TILE_BYTES };
     const bitmapBytes = Math.max(4, tilesX * tilesY * pass.chunkCount * 32);
     const bitmaps = { buffer: this.bitmaps.buffer, size: bitmapBytes };
+    const ranges = { buffer: this.ranges.buffer, size: tilesX * tilesY * 8 };
     const group = (pipeline: GPUComputePipeline, resources: GPUBindingResource[]): GPUBindGroup =>
       device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
@@ -474,6 +490,9 @@ export class WebGPUBackend implements Backend {
         cp.setPipeline(this.pipelines.tiles);
         cp.setBindGroup(0, group(this.pipelines.tiles, [config, entriesBinding, tiles, { buffer: this.edgeTiles.buffer }, bitmaps, counters]));
         dispatchLinear(cp, Math.ceil(pass.rowTotal / 256));
+        cp.setPipeline(this.pipelines.lists);
+        cp.setBindGroup(0, group(this.pipelines.lists, [config, entriesBinding, tiles, bitmaps, { buffer: this.lists.buffer }, ranges, counters]));
+        dispatchLinear(cp, Math.ceil((tilesX * tilesY) / 64));
         cp.setPipeline(this.pipelines.indirect);
         cp.setBindGroup(0, group(this.pipelines.indirect, [config, counters, indirect]));
         cp.dispatchWorkgroups(1);
@@ -483,12 +502,14 @@ export class WebGPUBackend implements Backend {
         cp.setBindGroup(0, group(this.pipelines.coverage, [config, tiles, { buffer: this.pieces.buffer }, { buffer: this.edgeTiles.buffer }, counters, { buffer: this.masks.buffer }]));
         cp.dispatchWorkgroupsIndirect(this.indirect.buffer, slot);
       });
+    } else {
+      enc.clearBuffer(this.ranges.buffer, 0, align(ranges.size, 4));
     }
     // Composite always runs: an empty frame still clears to the background.
     stage("composite", (cp) => {
       cp.setPipeline(this.pipelines.composite);
       cp.setBindGroup(0, group(this.pipelines.composite, [
-        config, entriesBinding, tiles, { buffer: this.masks.buffer }, bitmaps, { buffer: this.paints.buffer },
+        config, entriesBinding, tiles, { buffer: this.masks.buffer }, { buffer: this.lists.buffer }, ranges, { buffer: this.paints.buffer },
         { buffer: this.stops.buffer }, this.targets[(index + 1) % 2]!.createView(), this.targets[index % 2]!.createView(),
       ]));
       cp.dispatchWorkgroups(tilesX, tilesY);
