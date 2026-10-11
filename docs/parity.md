@@ -7,13 +7,13 @@ This table lists the core features Figma documents publicly, plus the features t
 - **partial**: the engine side exists and is tested, but the user-facing tool does not exist yet.
 - **planned**: not started.
 
-Module 1 built the geometry kernel and the renderer, so almost everything a designer touches is still planned. That is deliberate: this file only marks as done what actually works.
+Module 1 built the geometry kernel and the renderer. Module 2 built the document model: a Yjs CRDT of CSS-semantic nodes, the command API, per-user undo, reviewable proposals, the `.figtree` format and the bridge that renders a document. Most tools a designer touches are still planned. That is deliberate: this file only marks as done what actually works and is tested.
 
 ## Canvas and rendering
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Infinite canvas with pan and zoom | partial | Pan and zoom work in `/bench` (wheel and drag) with a retained renderer. The editor canvas is not wired up yet. Panning uploads nothing, and a screen-tile cache only rasterizes newly exposed tiles. |
+| Infinite canvas with pan and zoom | partial | The editor (`/`) renders a document through the bridge with wheel and drag pan, ctrl-wheel zoom and fit-to-page. Pan and zoom are benchmarked in `/bench`. The editor's pan and zoom interaction itself has no automated test yet. Panning uploads nothing, and a screen-tile cache only rasterizes newly exposed tiles. |
 | GPU rendering of vector content | done | Our own renderer: a WebGPU compute rasterizer with exact analytic coverage, and a WebGL2 stencil-then-cover fallback with MSAA. No Skia or CanvasKit. |
 | Anti-aliasing quality | done | WebGPU coverage matches exact area to within 8-bit rounding (max error 0.002 on a fractional rect). Curve accuracy is bounded by 0.1 px flattening. |
 | Solid fills | done | Premultiplied src-over in sRGB space. |
@@ -21,7 +21,7 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 | Angular and diamond gradients | planned | Same per-pixel paint stage; a new parameter-space mapping. |
 | Image fills | planned | Texture paint in the composite stage. |
 | Strokes: joins, caps, dashes | done | Miter (with limit), round and bevel joins; butt, round and square caps; SVG-style dashes with offset, including zero-length dots. |
-| Stroke alignment (inside/outside) | planned | Clip a doubled-width stroke with the fill path, using the existing clip layers. |
+| Stroke alignment (inside/outside) | done | Rectangles and frames: an exact stroke on the inset or outset rectangle, with no layer. Other shapes: a double-width stroke clipped by the outline, or by its even-odd complement for outside strokes. Pixel tests on both backends and a property test that both constructions cover the same band. Per-side weights are stored but not drawn yet (recorded as unsupported). |
 | Variable-width strokes and brushes | planned | |
 | Nonzero and even-odd fill rules | done | Both backends. |
 | Layer opacity (isolated groups) | done | Real isolation: overlapping children do not double-blend. Single-draw opacity is folded for free. |
@@ -29,7 +29,7 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 | Blend modes | planned | The composite stage already has an explicit layer stack. |
 | Effects: drop and inner shadow, layer and background blur | planned | Will sample layer textures in compute. |
 | Masks (alpha and luminance) | planned | Generalizes the clip layer: coverage from a rendered layer instead of a path. |
-| Hit-testing and selection | partial | `Renderer.hitTest`: topmost node, honoring transforms, strokes and clips, using the same flattened geometry the GPU draws. No selection UI yet. |
+| Hit-testing and selection | partial | `Renderer.hitTest` returns the topmost node, honoring transforms, strokes and clips, using the same flattened geometry the GPU draws. The bridge maps scene nodes back to document nodes. In the editor, clicking the canvas selects that node in the layer list (tested). There are no selection handles or multi-select yet. |
 | Pixel preview and pixel grid | planned | |
 | Rulers, guides and snapping | planned | |
 
@@ -41,9 +41,9 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 | Rectangle with per-corner radii | done | Radii are clamped like CSS `border-radius`. |
 | Corner smoothing (squircle-like) | partial | Engine done: our own G2 construction, with property tests for continuity and curvature. No UI. |
 | Ellipse | done | Arcs and pies are not done (see below). |
-| Arcs and pie ellipses, polygons, stars | planned | |
+| Arcs and pie ellipses, polygons, stars | done | Arcs, pies, ring segments and donuts; regular polygons and stars that fill their box; rounded corners on any polygon. Stored as node properties, rendered through the bridge and tested at the geometry, bridge and pixel levels. No drawing tools yet. |
 | Pen tool | planned | |
-| Vector networks (non-linear paths) | planned | |
+| Vector networks (non-linear paths) | partial | Data model done: vertices, Bézier segments, regions with their own fill rule and fills, validated loops. Rendering: regions are filled, and segment chains are stroked with joins, broken only at junctions. Per-vertex radii and caps are not drawn yet. There is no editing tool. |
 | Boolean operations | planned | A robust winding-number approach on our flattening and winding primitives. Penpot's booleans are fragile, so we use their tests only as regression vectors. |
 | Flatten, outline stroke | partial | Engine only: `flattenPath` and `strokePath` produce the polygons. No command exists to turn them into document geometry. |
 
@@ -51,7 +51,7 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Text layers with shaping | planned | harfbuzzjs shaping plus a glyph atlas rasterized by our own coverage engine. Text fits CSS semantics, so the code view matches the canvas. |
+| Text layers with shaping | partial | Content and style runs are stored as Yjs text (concurrent typing and styling merge) with CSS typography properties, and round-trip through files. They are not rendered yet: harfbuzzjs shaping plus a glyph atlas is module 4. |
 | Text styles, OpenType features, variable fonts | planned | |
 | Lists, links, rich text | planned | |
 
@@ -59,15 +59,15 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Auto layout | planned | We do not imitate auto layout: we implement real **CSS flexbox and grid**, checked against a Chromium conformance suite, so layout exports as working CSS. |
-| Constraints | planned | Expressed through CSS positioning. |
+| Auto layout | partial | We do not imitate auto layout: we implement real **CSS flexbox and grid**. All container and item properties (directions, wrapping, alignment, gaps, grid tracks with `repeat()`, `minmax()` and areas, fixed/hug/fill sizing) are stored, validated and mapped to CSS declarations, with tests. Computing boxes is the layout engine (module 3), checked against a Chromium conformance suite. |
+| Constraints | partial | Stored per axis (start, end, start-end, center, scale) and mapped to CSS insets (`calc(50% ± offset)` for center, percentages for scale), with tests. Resizing behaviour arrives with the layout engine. |
 | Layout grids | planned | |
 
 ## Components
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Components and instances, overrides | planned | |
+| Components and instances, overrides | planned | Fields are reserved in the schema: `componentRef` and overridden property groups on any node, component and instance ids, property definitions and values. The behaviour is module 7. |
 | Variants and component properties | planned | |
 | Libraries and publishing | planned | |
 
@@ -82,10 +82,10 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Real-time multiplayer editing | planned | Yjs CRDT document; the scene is a projection with per-aspect change tracking. |
+| Real-time multiplayer editing | partial | The document is a Yjs CRDT with deterministic tree repair for concurrent moves, cycles and deletes. A property test runs 50 seeds × 3 replicas × 2,000 random concurrent commands, with randomized delivery, and requires byte-identical results. The bridge applies remote updates incrementally. There is no network provider or server yet. |
 | Cursors, presence and observation | planned | Rendered as an overlay scene, so they never invalidate document tiles. |
 | Comments | planned | |
-| Version history and branching | planned | CRDT snapshots and branches. |
+| Version history and branching | partial | Binary Yjs history snapshots (`history.yjs` in `.figtree`, `encodeHistory`) keep the full CRDT history and can keep syncing. Proposals are short-lived branches: fork, diff, then accept or reject. There is no history UI. |
 
 ## Prototyping
 
@@ -99,7 +99,7 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Inspect panel (CSS, measurements) | planned | Code is the document's native form, not a translation. |
+| Inspect panel (CSS, measurements) | partial | The editor's inspector shows the selected node's CSS for layout, box, overflow, radii and compositing, from `cssDeclarations` (tested). Paints, effects and typography are not mapped to CSS yet. There are no measurements. |
 | Dev mode annotations and ready-for-dev status | planned | |
 | Code Connect-style component mapping | planned | |
 
@@ -115,16 +115,37 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| AI generation and editing | planned | **Sprout**, our agentic cursor, edits the canvas through the same document operations as people, visible as a collaborator. |
+| AI generation and editing | planned | **Sprout**, our agentic cursor, edits the canvas through the same command API as people, visible as a collaborator. Its edits can arrive as reviewable proposals (fork, structured diff, accept or reject), which are built and tested. |
 | Search and rename assistance | planned | |
 
 ## Paper-style code-native features
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Code-native canvas (HTML/CSS semantics) | planned | Layout and text follow CSS. The renderer was designed so that layout output (transforms and sizes) needs nothing new from it. |
+| Code-native canvas (HTML/CSS semantics) | partial | Every node property is CSS-semantic and validated (box model, sizing, positioning, flex and grid, overflow, radii, compositing, typography), with a tested mapping to CSS declarations for layout and box. Computing layout and text is modules 3 and 4. |
 | Shader fills and effects | planned | The WebGPU compute composite stage evaluates paints per pixel, so custom WGSL paints slot in there. |
-| MCP server | planned | Exposes document operations to external agents. |
+| MCP server | planned | Will expose the command API and proposals: typed, validated commands with useful errors, atomic batches and per-agent undo, all tested. |
+
+## Document and files
+
+| Feature | Status | Fig Tree angle |
+|---|---|---|
+| Document model with typed, validated properties | done | zod schemas for every node type and property group, a published JSON Schema, and useful errors (path and reason). |
+| Pages | done | Create, rename, reorder, delete (at least one page stays), and move nodes between pages keeping their canvas position. The editor shows the first page; there is no page switcher yet. |
+| Layer operations | done | Create, update, rename, reparent (keeping canvas position through rotated and flipped parents), reorder, delete, duplicate, group and ungroup, through one command API with atomic batches. These are API-level and tested; the editor's only UI for them is the layer list. |
+| Undo and redo per user | done | One undo stack per actor. Undo never reverts another person's or agent's edits (tested with interleaved edits and across replicas). |
+| Reviewable AI edits (proposals) | done | A batch is applied to a fork, shown as a structured diff (created, deleted, moved and updated nodes with before and after values), then accepted as one undoable step or rejected without touching the document. |
+| Save and open (`.figtree`) | partial | A deterministic zip of canonical JSON, content-addressed assets and optional CRDT history, with a migrations hook, a zip bomb guard and asset hash checks. Lossless round trips are fuzz-tested. There is no save or open UI in the editor yet. |
+| Import from other tools | planned | See `docs/reference/penpot.md` §1.12 for the `.penpot` importer plan. |
+
+## Document model limitations (honest list)
+
+1. **No layout yet.** Flex and grid children render at their stored `x`/`y`/`width`/`height`. Groups have no box of their own; their children live in the group's parent space.
+2. **Not drawn yet, and listed per node instead:** text, image bitmaps, angular, diamond, image and shader paints, blend modes (layer and paint), effects, per-side stroke weights, single-axis overflow (both axes clip), and vector vertex radii and caps.
+3. **Delete wins.** A node created inside a container that someone deleted concurrently is dropped. A node moved there goes back to its previous parent. Undoing your own creation of a container also hides what others put in it meanwhile, until redone.
+4. **Undo can resurrect cycles.** Undo restores old placement values without re-validating them. If the restored placement conflicts with a concurrent move, tree repair resolves it deterministically, which can move the other user's node back.
+5. **Structural edits rebuild the tree.** Creating, moving or deleting nodes rebuilds the effective tree in O(n) (milliseconds at 10k nodes). Property edits do not.
+6. **Order keys grow** by about one digit per 30 appends to the same parent, and logarithmically for batches.
 
 ## Renderer limitations (honest list)
 
@@ -137,3 +158,4 @@ Module 1 built the geometry kernel and the renderer, so almost everything a desi
 7. **Single float precision on the GPU.** Local-space segments keep precision near each node. Extreme zoom on very large coordinates is untested beyond ±1e5.
 8. **Not implemented in the renderer yet:** blend modes, effects, image fills, angular and diamond gradients, and text.
 9. **Performance numbers are software-rendered.** All measurements come from SwiftShader on a CPU. Real-GPU numbers are pending; see `benchmarks.md`.
+10. **WebGL2 layers are expensive on SwiftShader.** Each clip or group-opacity layer resolves and composites through an offscreen MSAA target. With hundreds of layers on screen (for example 100 clipping frames and 400 clipped ellipse strokes in the 10k-node document), a full WebGL2 frame blocks for about 1 s on this machine, most of it waiting for SwiftShader. WebGPU's CPU time for the same frame is about 0.04 s; its GPU time, also on SwiftShader, is not in that number. A stencil-only clip path (no offscreen target when there is no group opacity) is the planned fix.

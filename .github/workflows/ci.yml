@@ -23,6 +23,8 @@ jobs:
 
       - name: Typecheck
         run: npm run typecheck
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
 
       - name: Unit tests
         run: npm test
@@ -35,10 +37,10 @@ jobs:
 
       # GitHub runners have no GPU: WebGPU and WebGL2 run on SwiftShader with
       # --enable-unsafe-webgpu (flags live in playwright.config.ts).
-      - name: Pixel-quality tests (WebGPU + WebGL2)
+      - name: Pixel-quality and editor tests (WebGPU + WebGL2)
         run: npx playwright test --project=render
 
-      - name: Benchmark (pan/zoom, both backends)
+      - name: Benchmarks (pan/zoom, 10k-node document updates; both backends)
         run: npx playwright test --project=bench
 
       - name: Upload test results
