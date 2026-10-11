@@ -7,6 +7,7 @@ import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
 import { premultiply } from "../paint";
 import type { Color } from "../types";
 import { binShader, compositeShader, coverageShader, indirectShader, tilesShader } from "./shaders";
+import { GpuTimer, type Stage, type StageTimings } from "./timer";
 
 const TILE = 16;
 const ENTRY_WORDS = 20; // 80 bytes, matches `Entry` in WGSL
@@ -119,6 +120,7 @@ export class WebGPUBackend implements Backend {
   private pieceCapacity = 1 << 18;
   private maskCapacity = 1 << 14;
   private overflowed = false;
+  private readonly timer: GpuTimer | null;
 
   private targets: GPUTexture[] = [];
   private finalTarget = 0;
@@ -129,6 +131,7 @@ export class WebGPUBackend implements Backend {
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
   ) {
+    this.timer = device.features.has("timestamp-query") ? new GpuTimer(device) : null;
     const compute = (code: string, label: string): GPUComputePipeline =>
       device.createComputePipeline({
         label,
@@ -166,6 +169,7 @@ export class WebGPUBackend implements Backend {
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
     if (!adapter) return null;
     const device = await adapter.requestDevice({
+      requiredFeatures: adapter.features.has("timestamp-query") ? ["timestamp-query"] : [],
       requiredLimits: {
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
         maxBufferSize: adapter.limits.maxBufferSize,
@@ -223,6 +227,7 @@ export class WebGPUBackend implements Backend {
 
     const bg = premultiply(background);
     const enc = device.createCommandEncoder({ label: "frame" });
+    this.timer?.beginFrame();
     passes.forEach((pass, i) => {
       const config = new ArrayBuffer(64);
       const u = new Uint32Array(config);
@@ -241,9 +246,15 @@ export class WebGPUBackend implements Backend {
     );
     const readCounters = !this.readbackBusy && passes.length <= 64;
     if (readCounters) enc.copyBufferToBuffer(this.counters.buffer, 0, this.readback, 0, passes.length * SLOT_ALIGN);
+    this.timer?.endFrame(enc);
     device.queue.submit([enc.finish()]);
     if (readCounters) this.checkCapacity(passes.length);
+    this.timer?.collect();
     return uploaded;
+  }
+
+  get gpuTimings(): StageTimings | null {
+    return this.timer?.last ?? null;
   }
 
   async settle(): Promise<boolean> {
@@ -438,51 +449,50 @@ export class WebGPUBackend implements Backend {
     const tiles = { buffer: this.pathTiles.buffer, size: Math.max(1, pass.tileTotal) * PATH_TILE_BYTES };
     const bitmapBytes = Math.max(4, tilesX * tilesY * pass.chunkCount * 32);
     const bitmaps = { buffer: this.bitmaps.buffer, size: bitmapBytes };
+    const group = (pipeline: GPUComputePipeline, resources: GPUBindingResource[]): GPUBindGroup =>
+      device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: resources.map((resource, binding) => ({ binding, resource })),
+      });
+    const stage = (name: Stage, run: (cp: GPUComputePassEncoder) => void): void => {
+      const cp = enc.beginComputePass(this.timer?.pass(`${name} ${index}`, name) ?? { label: `${name} ${index}` });
+      run(cp);
+      cp.end();
+    };
     enc.clearBuffer(this.counters.buffer, slot, SLOT_ALIGN);
     if (entryCount > 0) {
       enc.clearBuffer(this.pathTiles.buffer, 0, align(tiles.size, 4));
       enc.clearBuffer(this.bitmaps.buffer, 0, align(bitmapBytes, 4));
-      const group = (pipeline: GPUComputePipeline, resources: GPUBindingResource[]): GPUBindGroup =>
-        device.createBindGroup({
-          layout: pipeline.getBindGroupLayout(0),
-          entries: resources.map((resource, binding) => ({ binding, resource })),
-        });
-      const cp = enc.beginComputePass({ label: `pass ${index}` });
       if (pass.segmentTotal > 0) {
-        cp.setPipeline(this.pipelines.bin);
-        cp.setBindGroup(0, group(this.pipelines.bin, [config, entriesBinding, { buffer: this.segments.buffer }, tiles, { buffer: this.pieces.buffer }, counters]));
-        dispatchLinear(cp, Math.ceil(pass.segmentTotal / 256));
+        stage("bin", (cp) => {
+          cp.setPipeline(this.pipelines.bin);
+          cp.setBindGroup(0, group(this.pipelines.bin, [config, entriesBinding, { buffer: this.segments.buffer }, tiles, { buffer: this.pieces.buffer }, counters]));
+          dispatchLinear(cp, Math.ceil(pass.segmentTotal / 256));
+        });
       }
-      cp.setPipeline(this.pipelines.tiles);
-      cp.setBindGroup(0, group(this.pipelines.tiles, [config, entriesBinding, tiles, { buffer: this.edgeTiles.buffer }, bitmaps, counters]));
-      dispatchLinear(cp, Math.ceil(pass.rowTotal / 256));
-      cp.setPipeline(this.pipelines.indirect);
-      cp.setBindGroup(0, group(this.pipelines.indirect, [config, counters, indirect]));
-      cp.dispatchWorkgroups(1);
-      cp.setPipeline(this.pipelines.coverage);
-      cp.setBindGroup(0, group(this.pipelines.coverage, [config, tiles, { buffer: this.pieces.buffer }, { buffer: this.edgeTiles.buffer }, counters, { buffer: this.masks.buffer }]));
-      cp.dispatchWorkgroupsIndirect(this.indirect.buffer, slot);
+      stage("tiles", (cp) => {
+        cp.setPipeline(this.pipelines.tiles);
+        cp.setBindGroup(0, group(this.pipelines.tiles, [config, entriesBinding, tiles, { buffer: this.edgeTiles.buffer }, bitmaps, counters]));
+        dispatchLinear(cp, Math.ceil(pass.rowTotal / 256));
+        cp.setPipeline(this.pipelines.indirect);
+        cp.setBindGroup(0, group(this.pipelines.indirect, [config, counters, indirect]));
+        cp.dispatchWorkgroups(1);
+      });
+      stage("coverage", (cp) => {
+        cp.setPipeline(this.pipelines.coverage);
+        cp.setBindGroup(0, group(this.pipelines.coverage, [config, tiles, { buffer: this.pieces.buffer }, { buffer: this.edgeTiles.buffer }, counters, { buffer: this.masks.buffer }]));
+        cp.dispatchWorkgroupsIndirect(this.indirect.buffer, slot);
+      });
+    }
+    // Composite always runs: an empty frame still clears to the background.
+    stage("composite", (cp) => {
       cp.setPipeline(this.pipelines.composite);
       cp.setBindGroup(0, group(this.pipelines.composite, [
         config, entriesBinding, tiles, { buffer: this.masks.buffer }, bitmaps, { buffer: this.paints.buffer },
         { buffer: this.stops.buffer }, this.targets[(index + 1) % 2]!.createView(), this.targets[index % 2]!.createView(),
       ]));
       cp.dispatchWorkgroups(tilesX, tilesY);
-      cp.end();
-      return;
-    }
-    // An empty frame still has to clear to the background: run composite with no entries.
-    const cp = enc.beginComputePass({ label: `pass ${index} (empty)` });
-    cp.setPipeline(this.pipelines.composite);
-    cp.setBindGroup(0, device.createBindGroup({
-      layout: this.pipelines.composite.getBindGroupLayout(0),
-      entries: [
-        config, entriesBinding, tiles, { buffer: this.masks.buffer }, bitmaps, { buffer: this.paints.buffer },
-        { buffer: this.stops.buffer }, this.targets[(index + 1) % 2]!.createView(), this.targets[index % 2]!.createView(),
-      ].map((resource, binding) => ({ binding, resource })),
-    }));
-    cp.dispatchWorkgroups(tilesX, tilesY);
-    cp.end();
+    });
   }
 
   /** Reads the GPU counters back and grows capacities for the next frame if they overflowed. */

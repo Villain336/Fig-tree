@@ -1,5 +1,6 @@
 import type { FramePlan } from "./frame";
 import type { BackendKind, Color } from "./types";
+import type { StageTimings } from "./webgpu/timer";
 
 export interface FrameStats {
   readonly backend: BackendKind;
@@ -30,6 +31,8 @@ export interface Backend {
    * hit an internal capacity limit and has to be rendered again.
    */
   settle(): Promise<boolean>;
+  /** Latest per-stage GPU timings, when the backend can measure them (lags a frame or two). */
+  readonly gpuTimings: StageTimings | null;
   /** Reads back the last rendered frame. */
   readPixels(): Promise<PixelData>;
   destroy(): void;

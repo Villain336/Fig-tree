@@ -1,6 +1,7 @@
 export { Renderer, backendFromSearch, type BackendPreference, type RendererOptions } from "./renderer";
 export { Scene, SceneNode, type NodeProps } from "./scene";
 export type { FrameStats, PixelData } from "./backend";
+export type { StageTimings } from "./webgpu/timer";
 export { MAX_LAYER_DEPTH } from "./compile";
 export { SCREEN_TOLERANCE } from "./geometry-cache";
 export {

@@ -545,6 +545,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
         if (bits == 0u) { break; }
         let b = countTrailingZeros(bits);
         bits &= bits - 1u;
+        color += vec4<f32>(f32(b) * 1e-9);
+        if (config.firstPass == 1u) { continue; }
         let e = entries[chunk * 256u + w * 32u + b];
         let kind = e.flags & 3u;
         if (skip > 0u) {

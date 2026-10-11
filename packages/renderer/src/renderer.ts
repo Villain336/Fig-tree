@@ -5,6 +5,7 @@ import { PaintCache, planFrame } from "./frame";
 import { hitTest } from "./hit-test";
 import { Scene, type SceneNode } from "./scene";
 import { type BackendKind, type Color, type Viewport } from "./types";
+import type { StageTimings } from "./webgpu/timer";
 import { WebGL2Backend } from "./webgl2/backend";
 import { WebGPUBackend } from "./webgpu/backend";
 
@@ -127,6 +128,11 @@ export class Renderer {
     if (!inv) return null;
     this.list.sync(this.scene);
     return hitTest(this.list, transformPoint(inv, point.x, point.y));
+  }
+
+  /** Per-stage GPU milliseconds of a recent frame, if the backend supports timestamp queries. */
+  get gpuTimings(): StageTimings | null {
+    return this.backend.gpuTimings;
   }
 
   readPixels(): Promise<PixelData> {

@@ -88,6 +88,8 @@ class DataTexture {
  */
 export class WebGL2Backend implements Backend {
   readonly kind = "webgl2" as const;
+  /** WebGL2 timer queries are rarely exposed to the web, so GPU timings are not measured. */
+  readonly gpuTimings = null;
   private readonly stencilProgram: Program;
   private readonly coverProgram: Program;
   private readonly multiDraw: MultiDraw | null;
