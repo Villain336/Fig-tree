@@ -1,10 +1,11 @@
 /// <reference types="@webgpu/types" />
 import { RangeAllocator, type Range } from "../arena";
-import type { Backend, PixelData } from "../backend";
-import { ItemKind } from "../compile";
+import type { Backend, PixelData, TileJob } from "../backend";
+import { ItemKind, type DrawList } from "../compile";
 import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
 import { PaintKind, premultiply } from "../paint";
+import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
 import { binShader, compositeShader, coverageShader, indirectShader, listsShader, tilesShader } from "./shaders";
 import { GpuTimer, type Stage, type StageTimings } from "./timer";
@@ -127,9 +128,10 @@ export class WebGPUBackend implements Backend {
   private readonly timer: GpuTimer | null;
 
   private targets: GPUTexture[] = [];
-  private finalTarget = 0;
-  private width = 0;
-  private height = 0;
+  private atlas: GPUTexture | null = null;
+  private present: GPUTexture | null = null;
+  /** The texture and size readPixels returns: the last frame shown on the canvas. */
+  private output: { texture: GPUTexture; width: number; height: number } | null = null;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -203,61 +205,133 @@ export class WebGPUBackend implements Backend {
   }
 
   render(plan: FramePlan, background: Color): number {
+    return this.encodeJobs([plan], background, (enc, _job, texture) => {
+      enc.copyTextureToTexture({ texture }, { texture: this.context.getCurrentTexture() }, { width: plan.width, height: plan.height });
+      this.output = { texture, width: plan.width, height: plan.height };
+    });
+  }
+
+  renderTiles(jobs: readonly TileJob[], background: Color): number {
+    this.ensureAtlas();
+    return this.encodeJobs(jobs.map((j) => j.plan), background, (enc, job, texture) => {
+      for (const c of jobs[job]!.copies) {
+        enc.copyTextureToTexture(
+          { texture, origin: { x: c.dx, y: c.dy } },
+          { texture: this.atlas!, origin: slotOrigin(c.slot) },
+          { width: TILE_SIZE, height: TILE_SIZE },
+        );
+      }
+    });
+  }
+
+  presentTiles(placements: readonly TilePlacement[], width: number, height: number): void {
+    const atlas = this.ensureAtlas();
+    if (!this.present || this.present.width < width || this.present.height < height) {
+      this.present?.destroy();
+      this.present = this.device.createTexture({
+        label: "present",
+        size: { width: Math.max(width, this.present?.width ?? 0), height: Math.max(height, this.present?.height ?? 0) },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+      });
+    }
+    const enc = this.device.createCommandEncoder({ label: "present tiles" });
+    for (const p of placements) {
+      const x0 = Math.max(0, p.x), y0 = Math.max(0, p.y);
+      const x1 = Math.min(width, p.x + TILE_SIZE), y1 = Math.min(height, p.y + TILE_SIZE);
+      if (x1 <= x0 || y1 <= y0) continue;
+      const o = slotOrigin(p.slot);
+      enc.copyTextureToTexture(
+        { texture: atlas, origin: { x: o.x + x0 - p.x, y: o.y + y0 - p.y } },
+        { texture: this.present, origin: { x: x0, y: y0 } },
+        { width: x1 - x0, height: y1 - y0 },
+      );
+    }
+    enc.copyTextureToTexture({ texture: this.present }, { texture: this.context.getCurrentTexture() }, { width, height });
+    this.device.queue.submit([enc.finish()]);
+    this.output = { texture: this.present, width, height };
+  }
+
+  /**
+   * Rasterizes each plan in one command buffer. `after` runs once per plan,
+   * right after its passes, with the texture holding its result.
+   */
+  private encodeJobs(
+    plans: readonly FramePlan[],
+    background: Color,
+    after: (enc: GPUCommandEncoder, job: number, texture: GPUTexture) => void,
+  ): number {
     const device = this.device;
-    this.ensureTargets(plan.width, plan.height);
-    if (plan.list.generation !== this.cacheGeneration) {
-      this.sweep(plan);
-      this.cacheGeneration = plan.list.generation;
+    const list = plans[0]?.list;
+    if (list && list.generation !== this.cacheGeneration) {
+      this.sweep(list);
+      this.cacheGeneration = list.generation;
     }
     let uploaded = 0;
-    for (const e of plan.entries) {
-      if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
-      if (e.paint) uploaded += this.uploadPaint(e.paint);
+    for (const plan of plans) {
+      for (const e of plan.entries) {
+        if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
+        if (e.paint) uploaded += this.uploadPaint(e.paint);
+      }
     }
+    this.ensureTargets(Math.max(...plans.map((p) => p.width)), Math.max(...plans.map((p) => p.height)));
 
-    const tilesX = Math.ceil(plan.width / TILE);
-    const tilesY = Math.ceil(plan.height / TILE);
-    const { data, passes } = this.encodeEntries(plan.entries, this.planPasses(plan.entries, tilesX * tilesY), tilesX, tilesY);
-    this.entries.ensure(data.byteLength, false);
+    // Encode every plan's entries into one upload, each pass at an aligned offset.
+    const encoded = plans.map((plan) => {
+      const tilesX = Math.ceil(plan.width / TILE);
+      const tilesY = Math.ceil(plan.height / TILE);
+      return { plan, tilesX, tilesY, ...this.encodeEntries(plan.entries, this.planPasses(plan.entries, tilesX * tilesY), tilesX, tilesY) };
+    });
+    const totalBytes = encoded.reduce((sum, e) => sum + e.data.byteLength, 0);
+    const data = new Uint8Array(totalBytes);
+    let base = 0;
+    const jobs = encoded.map((e) => {
+      data.set(new Uint8Array(e.data), base);
+      const passes = e.passes.map((p) => ({ ...p, entryByteOffset: p.entryByteOffset + base }));
+      base += e.data.byteLength;
+      return { ...e, passes };
+    });
+    this.entries.ensure(totalBytes, false);
     device.queue.writeBuffer(this.entries.buffer, 0, data);
 
-    const maxTiles = Math.max(1, ...passes.map((p) => p.tileTotal));
-    const maxBitmap = Math.max(1, ...passes.map((p) => tilesX * tilesY * p.chunkCount * 32));
+    const allPasses = jobs.flatMap((j) => j.passes.map((p) => ({ p, j })));
+    const maxTiles = Math.max(1, ...allPasses.map(({ p }) => p.tileTotal));
+    const maxBitmap = Math.max(1, ...allPasses.map(({ p, j }) => j.tilesX * j.tilesY * p.chunkCount * 32));
+    const maxScreenTiles = Math.max(...jobs.map((j) => j.tilesX * j.tilesY));
     this.pathTiles.ensure(maxTiles * PATH_TILE_BYTES, false);
     this.bitmaps.ensure(maxBitmap, false);
     this.lists.ensure(maxTiles * 4, false);
-    this.ranges.ensure(tilesX * tilesY * 8, false);
+    this.ranges.ensure(maxScreenTiles * 8, false);
     this.pieces.ensure(this.pieceCapacity * PIECE_BYTES, false);
     this.edgeTiles.ensure(this.maskCapacity * 8, false);
     this.masks.ensure(this.maskCapacity * MASK_BYTES, false);
-    this.config.ensure(passes.length * SLOT_ALIGN, false);
-    this.counters.ensure(passes.length * SLOT_ALIGN, false);
-    this.indirect.ensure(passes.length * SLOT_ALIGN, false);
+    this.config.ensure(allPasses.length * SLOT_ALIGN, false);
+    this.counters.ensure(allPasses.length * SLOT_ALIGN, false);
+    this.indirect.ensure(allPasses.length * SLOT_ALIGN, false);
 
     const bg = premultiply(background);
     const enc = device.createCommandEncoder({ label: "frame" });
     this.timer?.beginFrame();
-    passes.forEach((pass, i) => {
-      const config = new ArrayBuffer(64);
-      const u = new Uint32Array(config);
-      const f = new Float32Array(config);
-      u.set([plan.width, plan.height, tilesX, tilesY, pass.end - pass.start, pass.chunkCount, pass.segmentTotal, pass.rowTotal,
-        this.pieceCapacity, this.maskCapacity, i === 0 ? 1 : 0, 0]);
-      f.set(bg, 12);
-      device.queue.writeBuffer(this.config.buffer, i * SLOT_ALIGN, config);
-      this.encodePass(enc, pass, i, tilesX, tilesY);
+    let slot = 0;
+    jobs.forEach((job, jobIndex) => {
+      job.passes.forEach((pass, i) => {
+        const config = new ArrayBuffer(64);
+        const u = new Uint32Array(config);
+        const f = new Float32Array(config);
+        u.set([job.plan.width, job.plan.height, job.tilesX, job.tilesY, pass.end - pass.start, pass.chunkCount, pass.segmentTotal,
+          pass.rowTotal, this.pieceCapacity, this.maskCapacity, i === 0 ? 1 : 0, 0]);
+        f.set(bg, 12);
+        device.queue.writeBuffer(this.config.buffer, slot * SLOT_ALIGN, config);
+        this.encodePass(enc, pass, slot, i, job.tilesX, job.tilesY);
+        slot++;
+      });
+      after(enc, jobIndex, this.targets[(job.passes.length - 1) % 2]!);
     });
-    this.finalTarget = (passes.length - 1) % 2;
-    enc.copyTextureToTexture(
-      { texture: this.targets[this.finalTarget]! },
-      { texture: this.context.getCurrentTexture() },
-      { width: plan.width, height: plan.height },
-    );
-    const readCounters = !this.readbackBusy && passes.length <= 64;
-    if (readCounters) enc.copyBufferToBuffer(this.counters.buffer, 0, this.readback, 0, passes.length * SLOT_ALIGN);
+    const readCounters = !this.readbackBusy && slot <= 64;
+    if (readCounters) enc.copyBufferToBuffer(this.counters.buffer, 0, this.readback, 0, slot * SLOT_ALIGN);
     this.timer?.endFrame(enc);
     device.queue.submit([enc.finish()]);
-    if (readCounters) this.checkCapacity(passes.length);
+    if (readCounters) this.checkCapacity(slot);
     this.timer?.collect();
     return uploaded;
   }
@@ -275,11 +349,12 @@ export class WebGPUBackend implements Backend {
   }
 
   async readPixels(): Promise<PixelData> {
-    const { width, height } = this;
+    if (!this.output) throw new Error("nothing rendered yet");
+    const { texture, width, height } = this.output;
     const bytesPerRow = align(width * 4, 256);
     const buffer = this.device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: this.targets[this.finalTarget]! }, { buffer, bytesPerRow }, { width, height });
+    enc.copyTextureToBuffer({ texture }, { buffer, bytesPerRow }, { width, height });
     this.device.queue.submit([enc.finish()]);
     await buffer.mapAsync(GPUMapMode.READ);
     const src = new Uint8Array(buffer.getMappedRange());
@@ -292,18 +367,32 @@ export class WebGPUBackend implements Backend {
 
   destroy(): void {
     for (const t of this.targets) t.destroy();
+    this.atlas?.destroy();
+    this.present?.destroy();
     this.device.destroy();
   }
 
+  private ensureAtlas(): GPUTexture {
+    this.atlas ??= this.device.createTexture({
+      label: "tile atlas",
+      size: { width: ATLAS_SLOTS_PER_ROW * TILE_SIZE, height: ATLAS_SLOTS_PER_ROW * TILE_SIZE },
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    });
+    return this.atlas;
+  }
+
+  /** Ping-pong targets only grow, so tile regions of varying size never reallocate them. */
   private ensureTargets(width: number, height: number): void {
-    if (width === this.width && height === this.height && this.targets.length === 2) return;
+    const current = this.targets[0];
+    if (current && current.width >= width && current.height >= height) return;
+    const w = Math.max(1, width, current?.width ?? 0);
+    const h = Math.max(1, height, current?.height ?? 0);
     for (const t of this.targets) t.destroy();
-    this.width = width;
-    this.height = height;
     this.targets = [0, 1].map((i) =>
       this.device.createTexture({
         label: `target ${i}`,
-        size: { width: Math.max(1, width), height: Math.max(1, height) },
+        size: { width: w, height: h },
         format: "rgba8unorm",
         usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
       }),
@@ -311,14 +400,14 @@ export class WebGPUBackend implements Backend {
   }
 
   /** Frees GPU data of nodes no longer in the scene. */
-  private sweep(plan: FramePlan): void {
+  private sweep(list: DrawList): void {
     for (const [slot, up] of this.geometryCache) {
-      if (plan.list.liveSlots.has(slot)) continue;
+      if (list.liveSlots.has(slot)) continue;
       this.segmentAlloc.release(up.range);
       this.geometryCache.delete(slot);
     }
     for (const [key, up] of this.paintCache) {
-      if (plan.list.liveNodeIds.has(Math.floor(key / 2))) continue;
+      if (list.liveNodeIds.has(Math.floor(key / 2))) continue;
       this.paintAlloc.release(up.slot);
       this.stopAlloc.release(up.stops);
       this.paintCache.delete(key);
@@ -453,9 +542,10 @@ export class WebGPUBackend implements Backend {
     return { data, passes };
   }
 
-  private encodePass(enc: GPUCommandEncoder, pass: PassPlan, index: number, tilesX: number, tilesY: number): void {
+  /** Encodes one pass; `slotIndex` picks its uniform/counter slots, `index` its place in the plan. */
+  private encodePass(enc: GPUCommandEncoder, pass: PassPlan, slotIndex: number, index: number, tilesX: number, tilesY: number): void {
     const device = this.device;
-    const slot = index * SLOT_ALIGN;
+    const slot = slotIndex * SLOT_ALIGN;
     const entryCount = pass.end - pass.start;
     const entriesBinding = { buffer: this.entries.buffer, offset: pass.entryByteOffset, size: Math.max(1, entryCount) * ENTRY_WORDS * 4 };
     const config = { buffer: this.config.buffer, offset: slot, size: 64 };

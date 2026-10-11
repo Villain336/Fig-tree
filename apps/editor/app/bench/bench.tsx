@@ -111,6 +111,7 @@ export function Bench() {
           `${renderer.backendKind}  ·  ${SHAPES.toLocaleString()} shapes`,
           `${avg > 0 ? (1000 / avg).toFixed(1) : "–"} fps   ${avg.toFixed(1)} ms avg   ${percentile(intervals, 95).toFixed(1)} ms p95`,
           `cpu ${percentile(cpu, 50).toFixed(1)} ms   ${stats.entries.toLocaleString()} draws   ${stats.segments.toLocaleString()} segments`,
+          stats.mode === "tiles" ? `tiles: ${stats.tilesRendered} rasterized, rest cached` : "direct frame",
           gpuLine(renderer.gpuTimings),
           `zoom ${(zoom * 100).toFixed(0)}%`,
         ].join("\n");

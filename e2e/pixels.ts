@@ -14,13 +14,13 @@ export interface Image {
 }
 
 /** Renders a scene from apps/editor/app/render-test/scenes.ts and returns its pixels. */
-export async function renderScene(page: Page, scene: string, backend: BackendName): Promise<Image> {
-  await page.goto(`/render-test?scene=${scene}&renderer=${backend}`);
+export async function renderScene(page: Page, scene: string, backend: BackendName, mode: "direct" | "tiled" = "direct"): Promise<Image & { mode: string }> {
+  await page.goto(`/render-test?scene=${scene}&renderer=${backend}&mode=${mode}`);
   await page.waitForFunction(() => window.__renderTest !== undefined, null, { timeout: 90_000 });
   const result = await page.evaluate(() => window.__renderTest!);
   if ("error" in result) throw new Error(result.error);
   expect(result.backend).toBe(backend);
-  return { width: result.width, height: result.height, data: new Uint8Array(Buffer.from(result.pixels, "base64")) };
+  return { mode: result.mode, width: result.width, height: result.height, data: new Uint8Array(Buffer.from(result.pixels, "base64")) };
 }
 
 export function pixel(img: Image, x: number, y: number): [number, number, number, number] {

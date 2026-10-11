@@ -145,7 +145,19 @@ for (const backend of backends) {
     });
 
     test("renders the mixed reference scene", async ({ page }) => {
-      expectGolden(`mixed.${backend}`, await renderScene(page, "mixed", backend));
+      const img = await renderScene(page, "mixed", backend);
+      expect(img.mode).toBe("direct");
+      expectGolden(`mixed.${backend}`, img);
+    });
+
+    test("tile-cached frames match direct rendering after a pan", async ({ page }) => {
+      const direct = await renderScene(page, "mixed", backend);
+      const tiled = await renderScene(page, "mixed", backend, "tiled");
+      expect(tiled.mode).toBe("tiles");
+      // Same math at integer offsets; only float rounding of shifted coordinates differs.
+      const d = diff(direct, tiled, 2);
+      expect(d.fractionOver).toBeLessThan(0.001);
+      expect(d.maxDelta).toBeLessThanOrEqual(8);
     });
   });
 }

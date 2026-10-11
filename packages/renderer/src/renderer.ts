@@ -1,8 +1,9 @@
-import { invert, multiply, scaling, transformPoint, type Point } from "@fig-tree/geometry";
+import { invert, multiply, scaling, transformPoint, translation, type Mat2D, type Point } from "@fig-tree/geometry";
 import type { Backend, FrameStats, PixelData } from "./backend";
 import { DrawList } from "./compile";
-import { PaintCache, planFrame } from "./frame";
+import { PaintCache, planFrame, type FramePlan } from "./frame";
 import { hitTest } from "./hit-test";
+import { ATLAS_SLOTS, TILE_SIZE, TileCache } from "./tile-cache";
 import { Scene, type SceneNode } from "./scene";
 import { type BackendKind, type Color, type Viewport } from "./types";
 import type { StageTimings } from "./webgpu/timer";
@@ -16,6 +17,11 @@ export interface RendererOptions {
   readonly backend?: BackendPreference;
   /** Canvas clear color; defaults to opaque white. */
   readonly background?: Color;
+  /**
+   * Cache rendered 256 px screen tiles while scale and scene are unchanged,
+   * so panning only rasterizes newly exposed tiles. Defaults to true.
+   */
+  readonly tileCache?: boolean;
 }
 
 /**
@@ -40,6 +46,9 @@ export class Renderer {
   private height = 0;
   private pixelRatio = 1;
   private lastViewport: Viewport | null = null;
+  private lastView: Mat2D | null = null;
+  private lastSceneVersion = -1;
+  private readonly tiles: TileCache | null;
   background: Color;
 
   private constructor(
@@ -48,6 +57,7 @@ export class Renderer {
     options: RendererOptions,
   ) {
     this.background = options.background ?? { r: 1, g: 1, b: 1, a: 1 };
+    this.tiles = options.tileCache === false ? null : new TileCache(ATLAS_SLOTS);
     this.setSize(canvas.width, canvas.height, 1);
   }
 
@@ -75,6 +85,7 @@ export class Renderer {
     if (scene === this.scene) return;
     this.scene = scene;
     this.list = new DrawList();
+    this.lastSceneVersion = -1;
   }
 
   /** Sets the drawing size in CSS pixels; the canvas backing store uses `pixelRatio`. */
@@ -84,24 +95,53 @@ export class Renderer {
     this.height = Math.max(1, Math.round(height * pixelRatio));
     if (this.canvas.width !== this.width) this.canvas.width = this.width;
     if (this.canvas.height !== this.height) this.canvas.height = this.height;
+    this.lastView = null;
   }
 
   render(viewport: Viewport): FrameStats {
     const start = performance.now();
     this.lastViewport = viewport;
     this.list.sync(this.scene);
-    const view = multiply(scaling(this.pixelRatio), viewport.transform);
-    const plan = planFrame(this.list, this.paints, view, this.width, this.height);
-    const uploadedBytes = this.backend.render(plan, this.background);
+    const raw = multiply(scaling(this.pixelRatio), viewport.transform);
+    // Whole-device-pixel translation keeps cached tiles aligned and makes
+    // direct and tiled frames identical.
+    const view: Mat2D = [raw[0], raw[1], raw[2], raw[3], Math.round(raw[4]), Math.round(raw[5])];
+    const prev = this.lastView;
+    const sameScale = prev !== null && prev[0] === view[0] && prev[1] === view[1] && prev[2] === view[2] && prev[3] === view[3];
+    const sameScene = this.scene.version === this.lastSceneVersion;
+    const viewMoving = !sameScale || prev[4] !== view[4] || prev[5] !== view[5];
+    this.lastView = view;
+    this.lastSceneVersion = this.scene.version;
+    if (!sameScale || !sameScene) this.tiles?.invalidate();
+
+    // Zooming or editing changes every tile, so those frames render directly;
+    // once scale and scene hold still, panning only rasterizes new tiles.
+    const tilesAcross = (Math.ceil(this.width / TILE_SIZE) + 1) * (Math.ceil(this.height / TILE_SIZE) + 1);
+    if (!this.tiles || !sameScale || !sameScene || tilesAcross * 2 > this.tiles.capacity) {
+      const plan = planFrame(this.list, this.paints, view, this.width, this.height);
+      const uploadedBytes = this.backend.render(plan, this.background);
+      return this.stats("direct", [plan], uploadedBytes, 0, start);
+    }
+    const frame = this.tiles.schedule(view[4], view[5], this.width, this.height, viewMoving);
+    const linear: Mat2D = [view[0], view[1], view[2], view[3], 0, 0];
+    const jobs = frame.regions.map((r) => ({
+      plan: planFrame(this.list, this.paints, multiply(translation(-r.x, -r.y), linear), r.width, r.height),
+      copies: r.copies,
+    }));
+    const uploadedBytes = jobs.length > 0 ? this.backend.renderTiles(jobs, this.background) : 0;
+    this.backend.presentTiles(frame.placements, this.width, this.height);
+    const tilesRendered = frame.regions.reduce((n, r) => n + r.copies.length, 0);
+    return this.stats("tiles", jobs.map((j) => j.plan), uploadedBytes, tilesRendered, start);
+  }
+
+  private stats(mode: FrameStats["mode"], plans: readonly FramePlan[], uploadedBytes: number, tilesRendered: number, start: number): FrameStats {
+    let entries = 0;
     let segments = 0;
-    for (const e of plan.entries) segments += e.geometry?.segmentCount ?? 0;
-    return {
-      backend: this.backend.kind,
-      entries: plan.entries.length,
-      segments,
-      uploadedBytes,
-      cpuMs: performance.now() - start,
-    };
+    for (const plan of plans) {
+      entries += plan.entries.length;
+      for (const e of plan.entries) segments += e.geometry?.segmentCount ?? 0;
+    }
+    return { backend: this.backend.kind, mode, entries, segments, uploadedBytes, tilesRendered, cpuMs: performance.now() - start };
   }
 
   /**

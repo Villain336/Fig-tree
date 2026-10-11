@@ -1,6 +1,7 @@
 /** Hooks the editor test pages expose to Playwright. */
 interface RenderTestResult {
   readonly backend: string;
+  readonly mode: string;
   readonly width: number;
   readonly height: number;
   readonly pixels: string;

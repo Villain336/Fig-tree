@@ -1,10 +1,11 @@
 import { intersectRect, transformRect, type Rect } from "@fig-tree/geometry";
 import { RangeAllocator, type Range } from "../arena";
-import type { Backend, PixelData } from "../backend";
+import type { Backend, PixelData, TileJob } from "../backend";
 import { ItemKind } from "../compile";
 import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
 import { premultiply } from "../paint";
+import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
 import {
   coverFragmentShader,
@@ -108,8 +109,15 @@ export class WebGL2Backend implements Backend {
   private entryRows = 0;
   private cacheGeneration = -1;
   private targets: Target[] = [];
+  private capacityWidth = 0;
+  private capacityHeight = 0;
+  /** Size of the frame being drawn (targets may be larger). */
   private width = 0;
   private height = 0;
+  private atlas: { fbo: WebGLFramebuffer; texture: WebGLTexture } | null = null;
+  private present: { fbo: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
+  /** What readPixels returns: the framebuffer last shown on the canvas. */
+  private output: { fbo: WebGLFramebuffer; width: number; height: number } | null = null;
 
   private constructor(private readonly gl: WebGL2RenderingContext) {
     this.multiDraw = gl.getExtension("WEBGL_multi_draw") as MultiDraw | null;
@@ -140,6 +148,65 @@ export class WebGL2Backend implements Backend {
   }
 
   render(plan: FramePlan, background: Color): number {
+    const gl = this.gl;
+    const uploaded = this.draw(plan, background);
+    const main = this.targets[0]!;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.resolveFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, plan.width, plan.height, 0, 0, plan.width, plan.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.output = { fbo: main.resolveFbo, width: plan.width, height: plan.height };
+    return uploaded;
+  }
+
+  renderTiles(jobs: readonly TileJob[], background: Color): number {
+    const gl = this.gl;
+    const atlas = this.ensureAtlas();
+    let uploaded = 0;
+    for (const job of jobs) {
+      uploaded += this.draw(job.plan, background);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.targets[0]!.resolveFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, atlas.fbo);
+      const h = job.plan.height;
+      for (const c of job.copies) {
+        // Atlas slots keep GL's bottom-up row order.
+        const o = slotOrigin(c.slot);
+        gl.blitFramebuffer(c.dx, h - c.dy - TILE_SIZE, c.dx + TILE_SIZE, h - c.dy, o.x, o.y, o.x + TILE_SIZE, o.y + TILE_SIZE, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      }
+    }
+    return uploaded;
+  }
+
+  presentTiles(placements: readonly TilePlacement[], width: number, height: number): void {
+    const gl = this.gl;
+    const atlas = this.ensureAtlas();
+    if (!this.present || this.present.width < width || this.present.height < height) {
+      if (this.present) {
+        gl.deleteFramebuffer(this.present.fbo);
+        gl.deleteTexture(this.present.texture);
+      }
+      this.present = createColorTarget(gl, Math.max(width, this.present?.width ?? 0), Math.max(height, this.present?.height ?? 0));
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, atlas.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.present.fbo);
+    for (const p of placements) {
+      const o = slotOrigin(p.slot);
+      // Clip in software: blits outside the destination would be dropped anyway,
+      // but the source rect must shrink with it to keep a 1:1 copy.
+      const x0 = Math.max(0, p.x), x1 = Math.min(width, p.x + TILE_SIZE);
+      const top = Math.max(0, p.y), bottom = Math.min(height, p.y + TILE_SIZE);
+      if (x1 <= x0 || bottom <= top) continue;
+      const sx = o.x + (x0 - p.x);
+      const sy = o.y + (p.y + TILE_SIZE - bottom);
+      gl.blitFramebuffer(sx, sy, sx + (x1 - x0), sy + (bottom - top), x0, height - bottom, x1, height - top, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.present.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.output = { fbo: this.present.fbo, width, height };
+  }
+
+  /** Rasterizes `plan` into the main MSAA target and resolves it; returns bytes uploaded. */
+  private draw(plan: FramePlan, background: Color): number {
     const gl = this.gl;
     this.ensureTargets(plan.width, plan.height);
     if (plan.list.generation !== this.cacheGeneration) {
@@ -205,13 +272,9 @@ export class WebGL2Backend implements Backend {
     gl.disable(gl.STENCIL_TEST);
     gl.disable(gl.BLEND);
 
-    // Resolve MSAA and present.
     const main = this.targets[0]!;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.msaaFbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, main.resolveFbo);
-    gl.blitFramebuffer(0, 0, plan.width, plan.height, 0, 0, plan.width, plan.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.resolveFbo);
-    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.blitFramebuffer(0, 0, plan.width, plan.height, 0, 0, plan.width, plan.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     return uploaded;
 
@@ -239,9 +302,10 @@ export class WebGL2Backend implements Backend {
 
   async readPixels(): Promise<PixelData> {
     const gl = this.gl;
-    const { width, height } = this;
+    if (!this.output) throw new Error("nothing rendered yet");
+    const { fbo, width, height } = this.output;
     const raw = new Uint8Array(width * height * 4);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.targets[0]!.resolveFbo);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo);
     gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, raw);
     // GL rows are bottom-up.
     const data = new Uint8Array(raw.length);
@@ -490,20 +554,28 @@ export class WebGL2Backend implements Backend {
     return r;
   }
 
+  /** Targets only grow, so tile regions of varying size never reallocate them. */
   private ensureTargets(width: number, height: number): void {
-    if (width === this.width && height === this.height && this.targets.length > 0) return;
+    this.width = width;
+    this.height = height;
+    if (width <= this.capacityWidth && height <= this.capacityHeight && this.targets.length > 0) return;
     const gl = this.gl;
     for (const t of this.targets) deleteTarget(gl, t);
     this.targets = [];
-    this.width = width;
-    this.height = height;
+    this.capacityWidth = Math.max(width, this.capacityWidth);
+    this.capacityHeight = Math.max(height, this.capacityHeight);
     this.target(0);
+  }
+
+  private ensureAtlas(): { fbo: WebGLFramebuffer; texture: WebGLTexture } {
+    this.atlas ??= createColorTarget(this.gl, ATLAS_SLOTS_PER_ROW * TILE_SIZE, ATLAS_SLOTS_PER_ROW * TILE_SIZE);
+    return this.atlas;
   }
 
   /** Framebuffers for layer `depth` (0 is the main target), created on first use. */
   private target(depth: number): Target {
     if (depth > MAX_LAYERS) throw new Error(`layer depth ${depth} exceeds ${MAX_LAYERS}`);
-    while (this.targets.length <= depth) this.targets.push(createTarget(this.gl, this.width, this.height, this.samples));
+    while (this.targets.length <= depth) this.targets.push(createTarget(this.gl, this.capacityWidth, this.capacityHeight, this.samples));
     return this.targets[depth]!;
   }
 }
@@ -536,6 +608,17 @@ function createTarget(gl: WebGL2RenderingContext, width: number, height: number,
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, resolveTexture, 0);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   return { msaaFbo, color, depthStencil, resolveFbo, resolveTexture };
+}
+
+function createColorTarget(gl: WebGL2RenderingContext, width: number, height: number) {
+  const texture = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+  const fbo = gl.createFramebuffer()!;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { fbo, texture, width, height };
 }
 
 function deleteTarget(gl: WebGL2RenderingContext, t: Target): void {

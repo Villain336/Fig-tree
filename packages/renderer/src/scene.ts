@@ -91,6 +91,7 @@ export class SceneNode {
     this._fill = p;
     this.paintVersion++;
     if (structural) this.scene.markStructure();
+    else this.scene.markPaint();
   }
 
   get fillRule(): FillRule {
@@ -118,6 +119,8 @@ export class SceneNode {
     if (s && prev && !sameStrokeStyle(s, prev)) {
       this.geometryVersion++;
       this.scene.markGeometry(this);
+    } else {
+      this.scene.markPaint();
     }
   }
 
@@ -208,6 +211,8 @@ export class Scene {
   structureVersion = 0;
   /** @internal Any transform changed. */
   transformVersion = 0;
+  /** Bumped by every change to the scene, including paint-only edits. */
+  version = 0;
   /** @internal Nodes whose geometry changed since the last {@link takeDirty}. Paint edits are picked up lazily via `paintVersion`. */
   private dirty = new Set<SceneNode>();
 
@@ -222,16 +227,24 @@ export class Scene {
   /** @internal */
   markStructure(): void {
     this.structureVersion++;
+    this.version++;
   }
 
   /** @internal */
   markTransform(): void {
     this.transformVersion++;
+    this.version++;
   }
 
   /** @internal */
   markGeometry(node: SceneNode): void {
     this.dirty.add(node);
+    this.version++;
+  }
+
+  /** @internal */
+  markPaint(): void {
+    this.version++;
   }
 
   /**

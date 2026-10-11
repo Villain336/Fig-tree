@@ -1,12 +1,14 @@
 "use client";
 
-import { IDENTITY } from "@fig-tree/geometry";
+import { IDENTITY, translation } from "@fig-tree/geometry";
 import { Renderer, Scene, backendFromSearch } from "@fig-tree/renderer";
 import { useEffect, useRef, useState } from "react";
 import { testScenes } from "./scenes";
 
 export interface RenderTestResult {
   readonly backend: string;
+  /** How the final frame was produced ("direct" or "tiles"). */
+  readonly mode: string;
   readonly width: number;
   readonly height: number;
   /** Base64 RGBA8, premultiplied, rows top to bottom. */
@@ -40,11 +42,18 @@ export function RenderTest() {
       const scene = new Scene();
       spec.build(scene);
       renderer.setScene(scene);
-      await renderer.renderComplete({ transform: IDENTITY });
+      if (params.get("mode") === "tiled") {
+        // Exercise the tile cache: populate tiles at a panned view, then pan
+        // back so the final frame mixes moved cached tiles with new ones.
+        const panned = { transform: translation(-93, -41) };
+        await renderer.renderComplete(panned);
+        await renderer.renderComplete(panned);
+      }
+      const stats = await renderer.renderComplete({ transform: IDENTITY });
       const px = await renderer.readPixels();
       let binary = "";
       for (let i = 0; i < px.data.length; i += 0x8000) binary += String.fromCharCode(...px.data.subarray(i, i + 0x8000));
-      window.__renderTest = { backend: renderer.backendKind, width: px.width, height: px.height, pixels: btoa(binary) };
+      window.__renderTest = { backend: renderer.backendKind, mode: stats.mode, width: px.width, height: px.height, pixels: btoa(binary) };
       setStatus(`done (${renderer.backendKind})`);
     })().catch((err: unknown) => {
       window.__renderTest = { error: String(err) };

@@ -1,9 +1,14 @@
 import type { FramePlan } from "./frame";
+import type { TilePlacement } from "./tile-cache";
 import type { BackendKind, Color } from "./types";
 import type { StageTimings } from "./webgpu/timer";
 
 export interface FrameStats {
   readonly backend: BackendKind;
+  /** "direct" rasterizes the whole screen; "tiles" reuses cached tiles and rasterizes only new ones. */
+  readonly mode: "direct" | "tiles";
+  /** Tiles rasterized this frame (tiles mode). */
+  readonly tilesRendered: number;
   /** Visible draw steps (fills and layer brackets) in the frame. */
   readonly entries: number;
   /** Line segments rasterized this frame. */
@@ -21,11 +26,21 @@ export interface PixelData {
   readonly data: Uint8Array;
 }
 
+/** A region of the tile grid rendered as one plan, then split into atlas slots. */
+export interface TileJob {
+  readonly plan: FramePlan;
+  readonly copies: readonly { readonly slot: number; readonly dx: number; readonly dy: number }[];
+}
+
 /** A GPU implementation of the frame renderer. Both backends share the CPU-side plan. */
 export interface Backend {
   readonly kind: BackendKind;
   /** Renders `plan` to the canvas; returns bytes uploaded for geometry and paint. */
   render(plan: FramePlan, background: Color): number;
+  /** Rasterizes tile regions into the tile atlas (not shown until `presentTiles`). */
+  renderTiles(jobs: readonly TileJob[], background: Color): number;
+  /** Assembles cached tiles onto the canvas at whole-pixel positions. */
+  presentTiles(placements: readonly TilePlacement[], width: number, height: number): void;
   /**
    * Resolves once the GPU finished the last frame. Returns true if that frame
    * hit an internal capacity limit and has to be rendered again.
