@@ -32,3 +32,4 @@ export { decodeHistory, encodeHistory } from "./format/history";
 export { DEFAULT_LIMITS, readFigtree, writeFigtree, type FigtreeArchive, type ReadLimits, type ReadOptions, type WriteOptions } from "./format/zip";
 export { figtreeJsonSchema } from "./format/json-schema";
 export { SceneBridge } from "./bridge/bridge";
+export { cssDeclarations } from "./css";
