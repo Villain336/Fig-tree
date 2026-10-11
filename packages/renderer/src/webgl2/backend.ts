@@ -224,7 +224,16 @@ export class WebGL2Backend implements Backend {
     }
   }
 
+  /** Waits for the GPU via a fence, polled so the main thread never blocks. */
   async settle(): Promise<boolean> {
+    const gl = this.gl;
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) return false;
+    gl.flush();
+    while (gl.clientWaitSync(sync, 0, 0) === gl.TIMEOUT_EXPIRED) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    gl.deleteSync(sync);
     return false;
   }
 

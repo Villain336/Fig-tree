@@ -11,7 +11,7 @@ interface BenchHarness {
   readonly shapes: number;
   /** Starts recording frame times. */
   startRecording(): void;
-  /** Stops recording and returns frame intervals (ms) and GPU-complete latencies (ms). */
+  /** Stops recording and returns frame intervals and per-frame CPU time (ms) plus bytes uploaded. */
   stopRecording(): { frameIntervals: number[]; cpuMs: number[]; uploadedBytes: number };
 }
 
