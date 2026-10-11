@@ -259,11 +259,11 @@ Measured on this machine (4 vCPU Xeon, Node 22 and Chromium on SwiftShader), wit
 | | Median | Max |
 |---|---|---|
 | Apply one property update, Node: command, Yjs transaction, change event, bridge recompile, draw-list update | 0.13–0.30 ms | 2.7 ms |
-| Apply one property update, Chromium: the same without the draw list (it updates in the next frame) | 0.4–0.9 ms | 6.9 ms |
+| Apply one property update, Chromium: the same without the draw list (it updates in the next frame) | 0.3–0.9 ms | 7.0 ms |
 | Next frame CPU, zoomed in (one frame on screen), WebGPU / WebGL2 | 1.0 / 1.3–1.9 ms | |
 | Next frame CPU, overview with all 10k nodes visible, WebGPU | 34–44 ms | |
 
-At the overview, WebGL2 frames take about 1 s. That is SwiftShader rasterizing the full screen, which blocks the GL command stream; `/bench` documents the same cost. Initial load: about 0.7 s to create the 10k nodes with commands, 0.4 s to build the scene, and 0.15 s for the first draw-list compile. See `docs/benchmarks.md`.
+At the overview, WebGL2 frames take 1.0–1.2 s. That is SwiftShader rasterizing the full screen, which blocks the GL command stream; `/bench` documents the same cost. Initial load: about 0.7 s to create the 10k nodes with commands, 0.4 s to build the scene, and 0.15 s for the first draw-list compile. See `docs/benchmarks.md`.
 
 ### 3.8 The `.figtree` format
 

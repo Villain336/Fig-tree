@@ -63,7 +63,7 @@ What one update costs, measured on 2026-10-11 on the machine above:
 | Where | What is timed | Median | Max |
 |---|---|---|---|
 | Node 22 (Vitest), 3 runs × 41 updates per kind | `doc.apply` (zod validation, draft, one Yjs transaction), the change event, the bridge recompiling the one node, and `DrawList.sync` (incremental) | 0.13–0.30 ms | 2.7 ms |
-| Chromium, 9–21 updates per kind and view | `apply` through the page harness, including the bridge (the draw list updates during the next frame) | 0.4–0.9 ms | 6.9 ms |
+| Chromium, 9–21 updates per kind and view | `apply` through the page harness, including the bridge (the draw list updates during the next frame) | 0.3–0.9 ms | 7.0 ms |
 
 Every update recompiles exactly one node (`bridge.lastCompiled === 1`, asserted). The test requires the median to stay under 16 ms.
 
@@ -74,11 +74,11 @@ The frame after an update renders directly, because the tile cache is invalidate
 | WebGPU | zoomed in (one frame on screen) | 1.0 ms |
 | WebGL2 | zoomed in | 1.3–1.9 ms |
 | WebGPU | overview, all 10k nodes visible | 34–44 ms (frame planning of about 11k draws, plus encoding) |
-| WebGL2 | overview | about 1,000 ms (blocked on SwiftShader; see below) |
+| WebGL2 | overview | 1,000–1,200 ms (blocked on SwiftShader; see below) |
 
 At the overview, the WebGL2 frame waits on SwiftShader. Its 500 clip layers (100 clipping frames, and 400 inside strokes on ellipses, which need a clip) each resolve and composite an offscreen MSAA target. Rectangles' inside strokes need no layer since this module, which cut this frame from about 1,240 ms. Full-screen WebGL2 frames in `/bench` cost about the same.
 
-Loading the same document: creating 10k nodes with one command batch takes about 0.7 s, building the scene through the bridge about 0.4 s, and the first draw-list compile about 0.15 s (Node). The editor page is ready in 1.2–1.4 s on WebGPU and 2.9–3.3 s on WebGL2.
+Loading the same document: creating 10k nodes with one command batch takes about 0.7 s, building the scene through the bridge about 0.4 s, and the first draw-list compile about 0.15 s (Node). The editor page is ready in 1.1–1.4 s on WebGPU and 2.9–3.3 s on WebGL2.
 
 Two renderer changes made these numbers possible:
 - Transform and geometry edits update the draw list incrementally: 0.2–1.7 ms instead of an 80–130 ms recompile at 10k nodes.
