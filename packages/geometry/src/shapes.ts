@@ -146,3 +146,184 @@ export function ellipsePath(cx: number, cy: number, rx: number, ry: number): Pat
     .cubicTo(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy)
     .close();
 }
+
+/**
+ * Appends an elliptical arc as cubic segments of at most 90° each, starting
+ * at the current point (which must already be at the arc's start). Angles
+ * are in radians, measured clockwise from +x in y-down coordinates.
+ */
+function appendArc(path: Path, cx: number, cy: number, rx: number, ry: number, start: number, sweep: number): void {
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2) - 1e-9));
+  const step = sweep / n;
+  const k = (4 / 3) * Math.tan(step / 4);
+  let a0 = start;
+  for (let i = 0; i < n; i++) {
+    const a1 = a0 + step;
+    const c0 = Math.cos(a0), s0 = Math.sin(a0);
+    const c1 = Math.cos(a1), s1 = Math.sin(a1);
+    path.cubicTo(
+      cx + rx * (c0 - k * s0), cy + ry * (s0 + k * c0),
+      cx + rx * (c1 + k * s1), cy + ry * (s1 - k * c1),
+      cx + rx * c1, cy + ry * s1,
+    );
+    a0 = a1;
+  }
+}
+
+/**
+ * Ellipse in the box `(x, y, width, height)` with optional arc data: a pie or
+ * ring segment from `start` sweeping `sweep` radians (clockwise, y down), and
+ * an inner radius as a fraction of the outer one. A full sweep with an inner
+ * radius is a donut (two oppositely wound contours, correct under nonzero).
+ */
+export function ellipseArcPath(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  start = 0,
+  sweep = Math.PI * 2,
+  innerRatio = 0,
+): Path {
+  const rx = width / 2, ry = height / 2;
+  const cx = x + rx, cy = y + ry;
+  const inner = Math.min(1, Math.max(0, Number.isFinite(innerRatio) ? innerRatio : 0));
+  const full = !(Math.abs(sweep) < Math.PI * 2 - 1e-9);
+  const sw = full ? Math.PI * 2 : sweep;
+  const path = new Path();
+  const at = (r: number, a: number): [number, number] => [cx + rx * r * Math.cos(a), cy + ry * r * Math.sin(a)];
+  if (full && inner === 0) return ellipsePath(cx, cy, rx, ry);
+  if (full) {
+    path.moveTo(...at(1, start));
+    appendArc(path, cx, cy, rx, ry, start, sw);
+    path.close();
+    path.moveTo(...at(inner, start));
+    appendArc(path, cx, cy, rx * inner, ry * inner, start, -sw);
+    return path.close();
+  }
+  if (sw === 0) return path;
+  path.moveTo(...at(1, start));
+  appendArc(path, cx, cy, rx, ry, start, sw);
+  if (inner === 0) {
+    path.lineTo(cx, cy);
+  } else {
+    path.lineTo(...at(inner, start + sw));
+    appendArc(path, cx, cy, rx * inner, ry * inner, start + sw, -sw);
+  }
+  return path.close();
+}
+
+/**
+ * Closed polygon through `points` with every corner rounded by a circular
+ * arc tangent to both edges. Each corner's radius is reduced so its tangent
+ * points never pass the middle of an adjacent edge. Zero-length edges and
+ * straight corners are left sharp.
+ */
+export function roundedPolygonPath(points: readonly (readonly [number, number])[], radius = 0): Path {
+  const path = new Path();
+  const n = points.length;
+  if (n === 0) return path;
+  const r = Number.isFinite(radius) && radius > 1e-9 ? radius : 0;
+  if (r === 0 || n < 3) {
+    path.moveTo(points[0]![0], points[0]![1]);
+    for (let i = 1; i < n; i++) path.lineTo(points[i]![0], points[i]![1]);
+    return path.close();
+  }
+  interface Corner { inX: number; inY: number; outX: number; outY: number; c1x: number; c1y: number; c2x: number; c2y: number; sharp: boolean; vx: number; vy: number }
+  const corners: Corner[] = [];
+  for (let i = 0; i < n; i++) {
+    const [px, py] = points[(i + n - 1) % n]!;
+    const [vx, vy] = points[i]!;
+    const [nx, ny] = points[(i + 1) % n]!;
+    const l1 = Math.hypot(px - vx, py - vy);
+    const l2 = Math.hypot(nx - vx, ny - vy);
+    const sharp = { inX: vx, inY: vy, outX: vx, outY: vy, c1x: vx, c1y: vy, c2x: vx, c2y: vy, sharp: true, vx, vy };
+    if (l1 < 1e-12 || l2 < 1e-12) {
+      corners.push(sharp);
+      continue;
+    }
+    const ux = (px - vx) / l1, uy = (py - vy) / l1;
+    const wx = (nx - vx) / l2, wy = (ny - vy) / l2;
+    const cos = Math.max(-1, Math.min(1, ux * wx + uy * wy));
+    const angle = Math.acos(cos); // interior angle between the edges
+    if (angle < 1e-6 || Math.PI - angle < 1e-6) {
+      corners.push(sharp);
+      continue;
+    }
+    const tanHalf = Math.tan(angle / 2);
+    // Tangent distance from the vertex for radius r: r / tan(angle/2).
+    const maxT = Math.min(l1, l2) / 2;
+    const t = Math.min(r / tanHalf, maxT);
+    const rr = t * tanHalf;
+    const turn = Math.PI - angle; // arc angle
+    const h = (4 / 3) * Math.tan(turn / 4) * rr;
+    const inX = vx + ux * t, inY = vy + uy * t;
+    const outX = vx + wx * t, outY = vy + wy * t;
+    corners.push({ inX, inY, outX, outY, c1x: inX - ux * h, c1y: inY - uy * h, c2x: outX - wx * h, c2y: outY - wy * h, sharp: false, vx, vy });
+  }
+  const first = corners[0]!;
+  path.moveTo(first.outX, first.outY);
+  for (let k = 1; k <= n; k++) {
+    const c = corners[k % n]!;
+    if (c.sharp) {
+      path.lineTo(c.vx, c.vy);
+      continue;
+    }
+    path.lineTo(c.inX, c.inY);
+    path.cubicTo(c.c1x, c.c1y, c.c2x, c.c2y, c.outX, c.outY);
+  }
+  return path.close();
+}
+
+/** Vertices of a regular polygon or star, stretched so their bounding box fills `(x, y, width, height)`. */
+function fitToBox(raw: [number, number][], x: number, y: number, width: number, height: number): [number, number][] {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [px, py] of raw) {
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  }
+  const sx = maxX - minX > 0 ? width / (maxX - minX) : 0;
+  const sy = maxY - minY > 0 ? height / (maxY - minY) : 0;
+  return raw.map(([px, py]) => [x + (px - minX) * sx, y + (py - minY) * sy]);
+}
+
+/**
+ * Regular polygon with `sides` vertices (at least 3), first vertex at the top
+ * centre, stretched so it exactly fills the box. Corners are rounded by
+ * `cornerRadius` (see {@link roundedPolygonPath}).
+ */
+export function polygonPath(x: number, y: number, width: number, height: number, sides: number, cornerRadius = 0): Path {
+  const n = Math.max(3, Math.floor(sides));
+  const raw: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+    raw.push([Math.cos(a), Math.sin(a)]);
+  }
+  return roundedPolygonPath(fitToBox(raw, x, y, width, height), cornerRadius);
+}
+
+/**
+ * Star with `points` tips (at least 3) and inner vertices at `innerRatio` of
+ * the outer radius, first tip at the top centre, stretched to fill the box.
+ */
+export function starPath(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  points: number,
+  innerRatio: number,
+  cornerRadius = 0,
+): Path {
+  const n = Math.max(3, Math.floor(points));
+  const inner = Math.min(1, Math.max(0, Number.isFinite(innerRatio) ? innerRatio : 0.5));
+  const raw: [number, number][] = [];
+  for (let i = 0; i < n * 2; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / n;
+    const r = i % 2 === 0 ? 1 : inner;
+    raw.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  return roundedPolygonPath(fitToBox(raw, x, y, width, height), cornerRadius);
+}

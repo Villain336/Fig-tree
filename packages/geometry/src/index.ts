@@ -35,4 +35,12 @@ export {
   type Polylines,
 } from "./flatten";
 export { dashPolylines, strokePath, strokePolylines, type LineCap, type LineJoin, type StrokeStyle } from "./stroke";
-export { ellipsePath, roundedRectPath, type CornerRadii } from "./shapes";
+export {
+  ellipseArcPath,
+  ellipsePath,
+  polygonPath,
+  roundedPolygonPath,
+  roundedRectPath,
+  starPath,
+  type CornerRadii,
+} from "./shapes";
