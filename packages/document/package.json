@@ -1,0 +1,19 @@
+{
+  "name": "@fig-tree/document",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Fig Tree document model: a Yjs CRDT of CSS-semantic nodes, the command API, undo, proposals, the .figtree format and the renderer bridge.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fig-tree/geometry": "0.1.0",
+    "@fig-tree/renderer": "0.1.0",
+    "fflate": "0.8.3",
+    "yjs": "13.6.33",
+    "zod": "4.6.5"
+  }
+}
