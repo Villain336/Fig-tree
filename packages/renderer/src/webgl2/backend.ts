@@ -1,0 +1,552 @@
+import { intersectRect, transformRect, type Rect } from "@fig-tree/geometry";
+import { RangeAllocator, type Range } from "../arena";
+import type { Backend, PixelData } from "../backend";
+import { ItemKind } from "../compile";
+import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
+import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
+import { premultiply } from "../paint";
+import type { Color } from "../types";
+import {
+  coverFragmentShader,
+  coverVertexShader,
+  stencilFragmentShader,
+  stencilVertexShader,
+} from "./shaders";
+
+const DATA_WIDTH = 1024; // texels per row of the data textures
+const ENTRY_TEXELS = 4;
+const PAINT_TEXELS = 4;
+const MAX_LAYERS = 8;
+/** Cell size of the occupancy grid used to find non-overlapping draws to batch. */
+const BATCH_CELL = 32;
+
+interface Target {
+  msaaFbo: WebGLFramebuffer;
+  color: WebGLRenderbuffer;
+  depthStencil: WebGLRenderbuffer;
+  resolveFbo: WebGLFramebuffer;
+  resolveTexture: WebGLTexture;
+}
+
+interface Program {
+  program: WebGLProgram;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+}
+
+interface MultiDraw {
+  multiDrawArraysWEBGL(
+    mode: GLenum, firsts: Int32Array, firstsOffset: number, counts: Int32Array, countsOffset: number, drawCount: number,
+  ): void;
+}
+
+/** A persistent RGBA32F texture with a CPU mirror, grown by whole rows. */
+class DataTexture {
+  readonly texture: WebGLTexture;
+  private data: Float32Array;
+  private rows = 0;
+
+  constructor(private readonly gl: WebGL2RenderingContext, initialRows: number) {
+    this.texture = gl.createTexture()!;
+    this.data = new Float32Array(0);
+    this.resize(initialRows);
+  }
+
+  /** Writes texels starting at `texel` (must not cross a row for single uploads). */
+  write(texel: number, values: Float32Array): void {
+    const neededRows = Math.ceil((texel + values.length / 4) / DATA_WIDTH);
+    if (neededRows > this.rows) this.resize(Math.max(neededRows, this.rows * 2));
+    this.data.set(values, texel * 4);
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    const firstRow = Math.floor(texel / DATA_WIDTH);
+    const lastRow = Math.floor((texel + values.length / 4 - 1) / DATA_WIDTH);
+    if (firstRow === lastRow) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, texel % DATA_WIDTH, firstRow, values.length / 4, 1, gl.RGBA, gl.FLOAT, values);
+    } else {
+      const rows = this.data.subarray(firstRow * DATA_WIDTH * 4, (lastRow + 1) * DATA_WIDTH * 4);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, firstRow, DATA_WIDTH, lastRow - firstRow + 1, gl.RGBA, gl.FLOAT, rows);
+    }
+  }
+
+  private resize(rows: number): void {
+    const gl = this.gl;
+    const next = new Float32Array(rows * DATA_WIDTH * 4);
+    next.set(this.data.subarray(0, Math.min(this.data.length, next.length)));
+    this.data = next;
+    this.rows = rows;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, DATA_WIDTH, rows, 0, gl.RGBA, gl.FLOAT, next);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+}
+
+/**
+ * WebGL2 fallback: stencil-then-cover with MSAA. Consecutive fills whose
+ * bounds do not overlap are batched into one multi-draw stencil call and one
+ * instanced cover call; layers render into an MSAA framebuffer stack.
+ */
+export class WebGL2Backend implements Backend {
+  readonly kind = "webgl2" as const;
+  private readonly stencilProgram: Program;
+  private readonly coverProgram: Program;
+  private readonly multiDraw: MultiDraw | null;
+  private readonly samples: number;
+  private vertexBuffer: WebGLBuffer;
+  private readonly vertexAlloc = new RangeAllocator(1 << 16);
+  private readonly geometryVao: WebGLVertexArrayObject;
+  private readonly emptyVao: WebGLVertexArrayObject;
+  private readonly geometryCache = new Map<GeometrySlot, { uploadId: number; range: Range }>();
+  private readonly paintCache = new Map<number, { uploadId: number; slot: Range; stops: Range }>();
+  private readonly paintAlloc = new RangeAllocator(256);
+  private readonly stopAlloc = new RangeAllocator(1024);
+  private readonly paints: DataTexture;
+  private readonly stops: DataTexture;
+  private readonly entryTexture: WebGLTexture;
+  private entryRows = 0;
+  private cacheGeneration = -1;
+  private targets: Target[] = [];
+  private width = 0;
+  private height = 0;
+
+  private constructor(private readonly gl: WebGL2RenderingContext) {
+    this.multiDraw = gl.getExtension("WEBGL_multi_draw") as MultiDraw | null;
+    this.samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) as number);
+    this.stencilProgram = link(gl, stencilVertexShader(this.multiDraw !== null), stencilFragmentShader, ["u_entryBase", "u_viewport", "u_entries"]);
+    this.coverProgram = link(gl, coverVertexShader, coverFragmentShader, ["u_entryBase", "u_viewport", "u_entries", "u_paints", "u_stops", "u_layer"]);
+    this.vertexBuffer = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.vertexAlloc.capacity * 8, gl.STATIC_DRAW);
+    this.geometryVao = gl.createVertexArray()!;
+    this.bindGeometryVao();
+    this.emptyVao = gl.createVertexArray()!;
+    this.paints = new DataTexture(gl, 1);
+    this.stops = new DataTexture(gl, 1);
+    this.entryTexture = gl.createTexture()!;
+  }
+
+  static create(canvas: HTMLCanvasElement | OffscreenCanvas): WebGL2Backend | null {
+    const gl = canvas.getContext("webgl2", {
+      antialias: false,
+      alpha: true,
+      premultipliedAlpha: true,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
+    }) as WebGL2RenderingContext | null;
+    return gl ? new WebGL2Backend(gl) : null;
+  }
+
+  render(plan: FramePlan, background: Color): number {
+    const gl = this.gl;
+    this.ensureTargets(plan.width, plan.height);
+    if (plan.list.generation !== this.cacheGeneration) {
+      this.sweep(plan);
+      this.cacheGeneration = plan.list.generation;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    let uploaded = 0;
+    for (const e of plan.entries) {
+      if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
+      if (e.paint) uploaded += this.uploadPaint(e.paint);
+    }
+    // Cover the whole geometry, not just its clipped bounds: every stencil
+    // sample a path touches must be reset by its own cover.
+    const screen: Rect = { minX: 0, minY: 0, maxX: plan.width, maxY: plan.height };
+    const rects = plan.entries.map((e) =>
+      e.kind === ItemKind.Fill && e.geometry ? intersectRect(transformRect(e.matrix, e.geometry.bounds), screen) : e.bounds,
+    );
+    this.uploadEntries(plan.entries, rects);
+
+    gl.viewport(0, 0, plan.width, plan.height);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.targets[0]!.msaaFbo);
+    const bg = premultiply(background);
+    gl.clearColor(bg[0], bg[1], bg[2], bg[3]);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.enable(gl.STENCIL_TEST);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    this.bindTextures();
+
+    const entries = plan.entries;
+    const layerStack: number[] = [];
+    let batchStart = -1;
+    const occupied = new Set<number>();
+    const flush = (end: number): void => {
+      if (batchStart >= 0 && end > batchStart) this.drawBatch(entries, batchStart, end);
+      batchStart = -1;
+      occupied.clear();
+    };
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i]!;
+      if (e.kind === ItemKind.Fill) {
+        const cells = cellsOf(rects[i]!);
+        const rule = e.item.fillRule;
+        const conflicts =
+          batchStart >= 0 && (entries[batchStart]!.item.fillRule !== rule || cells.some((c) => occupied.has(c)));
+        if (conflicts) flush(i);
+        if (batchStart < 0) batchStart = i;
+        for (const c of cells) occupied.add(c);
+      } else if (e.kind === ItemKind.BeginLayer) {
+        flush(i);
+        layerStack.push(i);
+        this.beginLayer(layerStack.length, e);
+      } else {
+        flush(i);
+        const begin = entries[layerStack.pop()!]!;
+        this.endLayer(layerStack.length + 1, begin, i);
+      }
+    }
+    flush(entries.length);
+    gl.disable(gl.STENCIL_TEST);
+    gl.disable(gl.BLEND);
+
+    // Resolve MSAA and present.
+    const main = this.targets[0]!;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.msaaFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, main.resolveFbo);
+    gl.blitFramebuffer(0, 0, plan.width, plan.height, 0, 0, plan.width, plan.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.resolveFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(0, 0, plan.width, plan.height, 0, 0, plan.width, plan.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    return uploaded;
+
+    function cellsOf(r: Rect): number[] {
+      const out: number[] = [];
+      const x0 = Math.floor((r.minX - 1) / BATCH_CELL), x1 = Math.floor((r.maxX + 1) / BATCH_CELL);
+      const y0 = Math.floor((r.minY - 1) / BATCH_CELL), y1 = Math.floor((r.maxY + 1) / BATCH_CELL);
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) out.push(y * 65536 + x);
+      return out;
+    }
+  }
+
+  async settle(): Promise<boolean> {
+    return false;
+  }
+
+  async readPixels(): Promise<PixelData> {
+    const gl = this.gl;
+    const { width, height } = this;
+    const raw = new Uint8Array(width * height * 4);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.targets[0]!.resolveFbo);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, raw);
+    // GL rows are bottom-up.
+    const data = new Uint8Array(raw.length);
+    for (let y = 0; y < height; y++) data.set(raw.subarray((height - 1 - y) * width * 4, (height - y) * width * 4), y * width * 4);
+    return { width, height, data };
+  }
+
+  destroy(): void {
+    this.gl.getExtension("WEBGL_lose_context")?.loseContext();
+  }
+
+  /** Stencil all fills in [start, end) at once, then cover them with one instanced draw. */
+  private drawBatch(entries: readonly FrameEntry[], start: number, end: number): void {
+    const firsts = new Int32Array(end - start);
+    const counts = new Int32Array(end - start);
+    for (let i = start; i < end; i++) {
+      const up = this.geometryCache.get(entries[i]!.item.geometry!)!;
+      firsts[i - start] = up.range.offset;
+      counts[i - start] = up.range.size;
+    }
+    this.stencil(start, firsts, counts, entries[start]!.item.fillRule === "evenodd");
+    this.cover(start, end - start);
+  }
+
+  private stencil(entryBase: number, firsts: Int32Array, counts: Int32Array, evenodd: boolean): void {
+    const gl = this.gl;
+    gl.useProgram(this.stencilProgram.program);
+    gl.uniform1i(this.stencilProgram.uniforms["u_entryBase"]!, entryBase);
+    gl.uniform2f(this.stencilProgram.uniforms["u_viewport"]!, this.width, this.height);
+    gl.bindVertexArray(this.geometryVao);
+    gl.colorMask(false, false, false, false);
+    gl.disable(gl.BLEND);
+    gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+    if (evenodd) {
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+    } else {
+      gl.stencilOpSeparate(gl.FRONT, gl.KEEP, gl.KEEP, gl.INCR_WRAP);
+      gl.stencilOpSeparate(gl.BACK, gl.KEEP, gl.KEEP, gl.DECR_WRAP);
+    }
+    if (this.multiDraw) {
+      this.multiDraw.multiDrawArraysWEBGL(gl.TRIANGLES, firsts, 0, counts, 0, firsts.length);
+    } else {
+      for (let i = 0; i < firsts.length; i++) {
+        gl.uniform1i(this.stencilProgram.uniforms["u_entryBase"]!, entryBase + i);
+        gl.drawArrays(gl.TRIANGLES, firsts[i]!, counts[i]!);
+      }
+    }
+  }
+
+  /** Draws cover quads where the stencil is non-zero, resetting it to zero. */
+  private cover(entryBase: number, count: number, useStencil = true): void {
+    const gl = this.gl;
+    gl.useProgram(this.coverProgram.program);
+    gl.uniform1i(this.coverProgram.uniforms["u_entryBase"]!, entryBase);
+    gl.uniform2f(this.coverProgram.uniforms["u_viewport"]!, this.width, this.height);
+    gl.bindVertexArray(this.emptyVao);
+    gl.colorMask(true, true, true, true);
+    gl.enable(gl.BLEND);
+    if (useStencil) {
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+      gl.stencilOp(gl.KEEP, gl.ZERO, gl.ZERO);
+    } else {
+      gl.disable(gl.STENCIL_TEST);
+    }
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
+    gl.enable(gl.STENCIL_TEST);
+  }
+
+  private beginLayer(depth: number, e: FrameEntry): void {
+    const gl = this.gl;
+    const t = this.target(depth);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.msaaFbo);
+    gl.enable(gl.SCISSOR_TEST);
+    const r = scissorRect(e, this.height);
+    gl.scissor(r[0], r[1], r[2], r[3]);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
+  }
+
+  /** Resolves layer `depth` and composites it into its parent, clipped by the begin entry's path. */
+  private endLayer(depth: number, begin: FrameEntry, endIndex: number): void {
+    const gl = this.gl;
+    const layer = this.target(depth);
+    const parent = this.targets[depth - 1]!;
+    const r = scissorRect(begin, this.height);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(r[0], r[1], r[2], r[3]);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, layer.msaaFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, layer.resolveFbo);
+    gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, parent.msaaFbo);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, layer.resolveTexture);
+    const clip = begin.geometry && begin.item.geometry ? this.geometryCache.get(begin.item.geometry) : undefined;
+    if (clip) {
+      this.stencil(endIndex, Int32Array.of(clip.range.offset), Int32Array.of(clip.range.size), begin.item.fillRule === "evenodd");
+      this.cover(endIndex, 1);
+    } else {
+      this.cover(endIndex, 1, false);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, null);
+  }
+
+  private bindTextures(): void {
+    const gl = this.gl;
+    const bind = (unit: number, tex: WebGLTexture | null): void => {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+    };
+    bind(0, this.entryTexture);
+    bind(1, this.paints.texture);
+    bind(2, this.stops.texture);
+    gl.useProgram(this.stencilProgram.program);
+    gl.uniform1i(this.stencilProgram.uniforms["u_entries"]!, 0);
+    gl.useProgram(this.coverProgram.program);
+    gl.uniform1i(this.coverProgram.uniforms["u_entries"]!, 0);
+    gl.uniform1i(this.coverProgram.uniforms["u_paints"]!, 1);
+    gl.uniform1i(this.coverProgram.uniforms["u_stops"]!, 2);
+    gl.uniform1i(this.coverProgram.uniforms["u_layer"]!, 3);
+  }
+
+  private uploadEntries(entries: readonly FrameEntry[], rects: readonly Rect[]): void {
+    const gl = this.gl;
+    const rows = Math.max(1, Math.ceil((entries.length * ENTRY_TEXELS) / DATA_WIDTH));
+    const data = new Float32Array(rows * DATA_WIDTH * 4);
+    entries.forEach((e, i) => {
+      const k = i * ENTRY_TEXELS * 4;
+      const m = e.matrix;
+      const paint = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : 0;
+      const pad = 1; // cover one extra pixel so every MSAA sample the stencil touched is reset
+      data.set([m[0], m[1], m[2], m[3], m[4], m[5], e.item.alpha, paint], k);
+      const r = rects[i]!;
+      data.set([
+        Math.max(0, r.minX - pad), Math.max(0, r.minY - pad),
+        Math.min(this.width, r.maxX + pad), Math.min(this.height, r.maxY + pad),
+        e.kind === ItemKind.EndLayer ? 1 : 0, 0, 0, 0,
+      ], k + 8);
+    });
+    gl.bindTexture(gl.TEXTURE_2D, this.entryTexture);
+    if (rows > this.entryRows) {
+      this.entryRows = Math.max(rows, this.entryRows * 2);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, DATA_WIDTH, this.entryRows, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, DATA_WIDTH, rows, gl.RGBA, gl.FLOAT, data);
+  }
+
+  private sweep(plan: FramePlan): void {
+    for (const [slot, up] of this.geometryCache) {
+      if (plan.list.liveSlots.has(slot)) continue;
+      this.vertexAlloc.release(up.range);
+      this.geometryCache.delete(slot);
+    }
+    for (const [key, up] of this.paintCache) {
+      if (plan.list.liveNodeIds.has(Math.floor(key / 2))) continue;
+      this.paintAlloc.release(up.slot);
+      this.stopAlloc.release(up.stops);
+      this.paintCache.delete(key);
+    }
+  }
+
+  /** Uploads geometry as triangles fanned from the first vertex (valid for stencil winding counts). */
+  private uploadGeometry(slot: GeometrySlot, level: GeometryLevel): number {
+    const cached = this.geometryCache.get(slot);
+    if (cached && cached.uploadId === level.uploadId) return 0;
+    if (cached) this.vertexAlloc.release(cached.range);
+    const segs = level.segments;
+    const n = level.segmentCount;
+    const verts = new Float32Array(n * 6);
+    const ax = segs[0] ?? 0, ay = segs[1] ?? 0;
+    for (let i = 0; i < n; i++) {
+      verts.set([ax, ay, segs[i * 4]!, segs[i * 4 + 1]!, segs[i * 4 + 2]!, segs[i * 4 + 3]!], i * 6);
+    }
+    let range = this.vertexAlloc.allocate(n * 3);
+    while (!range) {
+      this.growVertices(Math.max(this.vertexAlloc.capacity * 2, this.vertexAlloc.used + n * 3));
+      range = this.vertexAlloc.allocate(n * 3);
+    }
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    if (n > 0) gl.bufferSubData(gl.ARRAY_BUFFER, range.offset * 8, verts);
+    this.geometryCache.set(slot, { uploadId: level.uploadId, range });
+    return verts.byteLength;
+  }
+
+  private growVertices(capacity: number): void {
+    const gl = this.gl;
+    const next = gl.createBuffer()!;
+    gl.bindBuffer(gl.COPY_WRITE_BUFFER, next);
+    gl.bufferData(gl.COPY_WRITE_BUFFER, capacity * 8, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.COPY_READ_BUFFER, this.vertexBuffer);
+    gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, this.vertexAlloc.capacity * 8);
+    gl.deleteBuffer(this.vertexBuffer);
+    this.vertexBuffer = next;
+    this.vertexAlloc.grow(capacity);
+    this.bindGeometryVao();
+  }
+
+  private bindGeometryVao(): void {
+    const gl = this.gl;
+    gl.bindVertexArray(this.geometryVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
+    gl.bindVertexArray(null);
+  }
+
+  private uploadPaint(record: PaintRecord): number {
+    const cached = this.paintCache.get(record.key);
+    if (cached && cached.uploadId === record.uploadId) return 0;
+    const paint = record.paint;
+    const stopCount = paint.stops.length / 5;
+    const slot = cached?.slot ?? this.allocate(this.paintAlloc, 1);
+    if (cached) this.stopAlloc.release(cached.stops);
+    const stops = this.allocate(this.stopAlloc, stopCount);
+    const m = paint.matrix;
+    this.paints.write(slot.offset * PAINT_TEXELS, Float32Array.of(
+      paint.kind, stops.offset, stopCount, 0,
+      ...paint.color,
+      m[0], m[1], m[2], m[3],
+      m[4], m[5], 0, 0,
+    ));
+    if (stopCount > 0) {
+      const sd = new Float32Array(stopCount * 8);
+      for (let i = 0; i < stopCount; i++) {
+        sd[i * 8] = paint.stops[i * 5]!;
+        sd.set(paint.stops.subarray(i * 5 + 1, i * 5 + 5), i * 8 + 4);
+      }
+      this.stops.write(stops.offset * 2, sd);
+    }
+    this.paintCache.set(record.key, { uploadId: record.uploadId, slot, stops });
+    return 64 + stopCount * 32;
+  }
+
+  /** Paint and stop data textures grow on write, so their allocators can always grow. */
+  private allocate(alloc: RangeAllocator, size: number): Range {
+    let r = alloc.allocate(size);
+    while (!r) {
+      alloc.grow(Math.max(alloc.capacity * 2, alloc.used + size));
+      r = alloc.allocate(size);
+    }
+    return r;
+  }
+
+  private ensureTargets(width: number, height: number): void {
+    if (width === this.width && height === this.height && this.targets.length > 0) return;
+    const gl = this.gl;
+    for (const t of this.targets) deleteTarget(gl, t);
+    this.targets = [];
+    this.width = width;
+    this.height = height;
+    this.target(0);
+  }
+
+  /** Framebuffers for layer `depth` (0 is the main target), created on first use. */
+  private target(depth: number): Target {
+    if (depth > MAX_LAYERS) throw new Error(`layer depth ${depth} exceeds ${MAX_LAYERS}`);
+    while (this.targets.length <= depth) this.targets.push(createTarget(this.gl, this.width, this.height, this.samples));
+    return this.targets[depth]!;
+  }
+}
+
+function scissorRect(e: FrameEntry, height: number): [number, number, number, number] {
+  const x0 = Math.max(0, Math.floor(e.bounds.minX) - 1);
+  const x1 = Math.ceil(e.bounds.maxX) + 1;
+  const y0 = Math.max(0, Math.floor(e.bounds.minY) - 1);
+  const y1 = Math.ceil(e.bounds.maxY) + 1;
+  return [x0, height - y1, x1 - x0, y1 - y0];
+}
+
+function createTarget(gl: WebGL2RenderingContext, width: number, height: number, samples: number): Target {
+  const w = Math.max(1, width), h = Math.max(1, height);
+  const color = gl.createRenderbuffer()!;
+  gl.bindRenderbuffer(gl.RENDERBUFFER, color);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, w, h);
+  const depthStencil = gl.createRenderbuffer()!;
+  gl.bindRenderbuffer(gl.RENDERBUFFER, depthStencil);
+  gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.DEPTH24_STENCIL8, w, h);
+  const msaaFbo = gl.createFramebuffer()!;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, msaaFbo);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depthStencil);
+  const resolveTexture = gl.createTexture()!;
+  gl.bindTexture(gl.TEXTURE_2D, resolveTexture);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+  const resolveFbo = gl.createFramebuffer()!;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, resolveFbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, resolveTexture, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { msaaFbo, color, depthStencil, resolveFbo, resolveTexture };
+}
+
+function deleteTarget(gl: WebGL2RenderingContext, t: Target): void {
+  gl.deleteFramebuffer(t.msaaFbo);
+  gl.deleteFramebuffer(t.resolveFbo);
+  gl.deleteRenderbuffer(t.color);
+  gl.deleteRenderbuffer(t.depthStencil);
+  gl.deleteTexture(t.resolveTexture);
+}
+
+function link(gl: WebGL2RenderingContext, vs: string, fs: string, uniforms: string[]): Program {
+  const compile = (type: GLenum, src: string): WebGLShader => {
+    const s = gl.createShader(type)!;
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(`shader compile failed: ${gl.getShaderInfoLog(s)}`);
+    return s;
+  };
+  const program = gl.createProgram()!;
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, vs));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`program link failed: ${gl.getProgramInfoLog(program)}`);
+  return { program, uniforms: Object.fromEntries(uniforms.map((u) => [u, gl.getUniformLocation(program, u)])) };
+}

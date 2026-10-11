@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@fig-tree/geometry": "0.1.0",
-    "rbush": "4.0.1"
+    "rbush": "4.0.1",
+    "@types/rbush": "4.0.0"
   },
   "devDependencies": {
     "@webgpu/types": "0.1.74"
