@@ -142,4 +142,18 @@ export const testScenes: Record<string, TestScene> = {
       root.appendChild(frame);
     },
   },
+  // A layer created mid-frame followed by a gradient: creating the layer's
+  // render target must not disturb the textures gradients read.
+  "layer-then-gradient": {
+    width: 160,
+    height: 80,
+    build(scene) {
+      const group = scene.createNode({ opacity: 0.5 });
+      group.appendChild(scene.createNode({ path: rect(8, 8, 40, 40), fill: solid(rgba(1, 0, 0, 1)) }));
+      group.appendChild(scene.createNode({ path: rect(24, 24, 56, 56), fill: solid(rgba(0, 0, 1, 1)) }));
+      scene.root.appendChild(group);
+      scene.root.appendChild(scene.createNode({ path: rect(80, 8, 152, 72), fill: { type: "linear-gradient", start: { x: 80, y: 0 }, end: { x: 152, y: 0 }, stops } }));
+    },
+  },
 };
+

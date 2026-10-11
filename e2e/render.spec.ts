@@ -157,6 +157,26 @@ for (const backend of backends) {
       near(pixel(img, 76, 30), [255, 0, 0]); // circle outside every occluder
     });
 
+    test("keeps gradient data bound when a layer target is created mid-frame", async ({ page }) => {
+      const img = await renderScene(page, "layer-then-gradient", backend);
+      const encoded = encodePaint({ type: "linear-gradient", start: { x: 80, y: 0 }, end: { x: 152, y: 0 }, stops: [
+        { offset: 0, color: hexColor("#ff0000") },
+        { offset: 0.5, color: rgba(0, 0, 1, 0.5) },
+        { offset: 1, color: hexColor("#00ff00") },
+      ] }).stops;
+      for (const x of [84, 100, 116, 132, 148]) {
+        const c = sampleStops(encoded, (x + 0.5 - 80) / 72);
+        const want = c.slice(0, 3).map((v) => (v + (1 - c[3])) * 255);
+        const got = pixel(img, x, 40);
+        for (let k = 0; k < 3; k++) expect(Math.abs(got[k]! - want[k]!), `gradient at x=${x}`).toBeLessThanOrEqual(3);
+      }
+      // The group itself: isolated 50% opacity.
+      const near = (got: number[], want: number[]): void => {
+        for (let k = 0; k < 3; k++) expect(Math.abs(got[k]! - want[k]!)).toBeLessThanOrEqual(2);
+      };
+      near(pixel(img, 30, 30), [127.5, 127.5, 255]);
+    });
+
     test("renders the mixed reference scene", async ({ page }) => {
       const img = await renderScene(page, "mixed", backend);
       expect(img.mode).toBe("direct");

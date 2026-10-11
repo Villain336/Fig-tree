@@ -400,7 +400,7 @@ export class WebGL2Backend implements Backend {
     gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, parent.msaaFbo);
-    gl.activeTexture(gl.TEXTURE3);
+    gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, layer.resolveTexture);
     const clip = begin.geometry && begin.item.geometry ? this.geometryCache.get(begin.item.geometry) : undefined;
     if (clip) {
@@ -427,7 +427,7 @@ export class WebGL2Backend implements Backend {
     gl.uniform1i(this.coverProgram.uniforms["u_entries"]!, 0);
     gl.uniform1i(this.coverProgram.uniforms["u_paints"]!, 1);
     gl.uniform1i(this.coverProgram.uniforms["u_stops"]!, 2);
-    gl.uniform1i(this.coverProgram.uniforms["u_layer"]!, 3);
+    gl.uniform1i(this.coverProgram.uniforms["u_layer"]!, LAYER_UNIT);
   }
 
   private uploadEntries(entries: readonly FrameEntry[], rects: readonly Rect[]): void {
@@ -588,6 +588,25 @@ function scissorRect(e: FrameEntry, height: number): [number, number, number, nu
   return [x0, height - y1, x1 - x0, y1 - y0];
 }
 
+/**
+ * Texture unit used for layer compositing; `endLayer` binds it before every
+ * use, so render-target setup may clobber it. Setup must not bind on other
+ * units: targets are created lazily mid-frame, while units 0-2 hold the
+ * entry, paint and gradient-stop textures the cover pass reads.
+ */
+const LAYER_UNIT = 3;
+
+/** Allocates RGBA8 storage for a new texture on the layer unit, keeping the active unit. */
+function allocateTexture(gl: WebGL2RenderingContext, width: number, height: number): WebGLTexture {
+  const texture = gl.createTexture()!;
+  const active = gl.getParameter(gl.ACTIVE_TEXTURE) as number;
+  gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+  gl.activeTexture(active);
+  return texture;
+}
+
 function createTarget(gl: WebGL2RenderingContext, width: number, height: number, samples: number): Target {
   const w = Math.max(1, width), h = Math.max(1, height);
   const color = gl.createRenderbuffer()!;
@@ -600,9 +619,7 @@ function createTarget(gl: WebGL2RenderingContext, width: number, height: number,
   gl.bindFramebuffer(gl.FRAMEBUFFER, msaaFbo);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
   gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depthStencil);
-  const resolveTexture = gl.createTexture()!;
-  gl.bindTexture(gl.TEXTURE_2D, resolveTexture);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+  const resolveTexture = allocateTexture(gl, w, h);
   const resolveFbo = gl.createFramebuffer()!;
   gl.bindFramebuffer(gl.FRAMEBUFFER, resolveFbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, resolveTexture, 0);
@@ -611,9 +628,7 @@ function createTarget(gl: WebGL2RenderingContext, width: number, height: number,
 }
 
 function createColorTarget(gl: WebGL2RenderingContext, width: number, height: number) {
-  const texture = gl.createTexture()!;
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+  const texture = allocateTexture(gl, width, height);
   const fbo = gl.createFramebuffer()!;
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
