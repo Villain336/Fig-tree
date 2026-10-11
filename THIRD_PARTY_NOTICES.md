@@ -15,6 +15,7 @@ license at file level, are marked with a header naming their origin, and live un
 | Fig Tree file | Ported from | What was taken |
 |---|---|---|
 | `packages/renderer/src/ported/penpot/tiles.ts` | `render-wasm/src/tiles.rs` | Tile rect math, visible/interest viewbox, and pending-tile prioritization (visible first, center-out ordering, deferred interest ring, visible-only during interaction). |
+| `packages/geometry/test/ported/penpot/path-vectors.test.ts` | `common/test/common_tests/types/path_data_test.cljc` | Path test vectors (sample contents, selrect regressions, transform cases); assertions rewritten for our API. |
 
 These files remain available under MPL-2.0. Fig Tree's own code that imports them
 forms a Larger Work (MPL-2.0 section 3.3) distributed under AGPL-3.0.
