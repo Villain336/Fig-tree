@@ -91,16 +91,6 @@ for (const backend of backends) {
     }
     const rec = await page.evaluate(() => window.__bench!.stopRecording());
     const mixedGpu = await readGpu();
-    if (process.env.UPDATE_DOCS === "1") {
-      // A close-up shows edge quality, gradients and strokes at 4x zoom.
-      await page.evaluate(() => window.__bench!.startRecording());
-      for (let i = 0; i < 6; i++) await page.mouse.wheel(0, -300);
-      await page.waitForTimeout(500);
-      await page.evaluate(() => window.__bench!.stopRecording());
-      await page.waitForTimeout(8000);
-      await hudShowsFrames();
-      await page.screenshot({ path: join(docsImg, `bench-${backend}-zoomed.png`), timeout: 120_000 });
-    }
     const intervals = rec.frameIntervals;
     expect(intervals.length, "frames rendered while recording").toBeGreaterThan(1);
     expect(errors).toEqual([]);
@@ -121,9 +111,11 @@ for (const backend of backends) {
         (mixedGpu ? `, gpu ${JSON.stringify(mixedGpu)}` : ""),
     );
 
-    // Sustained panning at a fixed zoom: the tile cache only rasterizes
-    // tiles that scroll into view.
+    // Sustained panning at the overview zoom (all 10k shapes visible): the
+    // tile cache only rasterizes tiles that scroll into view.
+    await page.evaluate(() => window.__bench!.resetView());
     await page.mouse.move(cx, cy);
+    await page.waitForTimeout(3000);
     await page.evaluate(() => window.__bench!.startRecording());
     const panStart = Date.now();
     let dir = 1;
@@ -150,6 +142,13 @@ for (const backend of backends) {
       `[bench] ${panResult.backend}: ${panResult.frames} frames, avg ${panResult.avgMs.toFixed(1)} ms, ` +
         `p95 ${panResult.p95Ms.toFixed(1)} ms, uploaded ${panResult.uploadedBytes} B`,
     );
+    if (process.env.UPDATE_DOCS === "1") {
+      // A close-up shows edge quality, gradients and strokes at 4x zoom.
+      for (let i = 0; i < 6; i++) await page.mouse.wheel(0, -300);
+      await page.waitForTimeout(8000);
+      await hudShowsFrames();
+      await page.screenshot({ path: join(docsImg, `bench-${backend}-zoomed.png`), timeout: 120_000 });
+    }
   });
 }
 

@@ -144,6 +144,19 @@ for (const backend of backends) {
       expectGolden(`layers.${backend}`, img);
     });
 
+    test("skips draws hidden by opaque fills without losing what is visible", async ({ page }) => {
+      const img = await renderScene(page, "occlusion", backend);
+      const near = (got: number[], want: number[]): void => {
+        for (let c = 0; c < 3; c++) expect(Math.abs(got[c]! - want[c]!)).toBeLessThanOrEqual(2);
+      };
+      near(pixel(img, 40, 40), [0, 0, 255]); // red circle fully hidden
+      near(pixel(img, 40, 16), [0, 127.5, 127.5]); // translucent green over blue
+      near(pixel(img, 70, 16), [127.5, 127.5, 0]); // green over the part of the circle outside the blue rect
+      near(pixel(img, 70, 40), [127.5, 0, 0]); // the group's opaque black is 50%: the circle still shows
+      near(pixel(img, 88, 56), [255, 255, 255]); // white at 50% over white
+      near(pixel(img, 76, 30), [255, 0, 0]); // circle outside every occluder
+    });
+
     test("renders the mixed reference scene", async ({ page }) => {
       const img = await renderScene(page, "mixed", backend);
       expect(img.mode).toBe("direct");

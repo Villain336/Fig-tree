@@ -19,6 +19,7 @@ declare global {
     __bench?: {
       readonly backend: string;
       readonly shapes: number;
+      resetView(): void;
       startRecording(): void;
       stopRecording(): Recording;
     };
@@ -135,6 +136,7 @@ export function Bench() {
       window.__bench = {
         backend: renderer.backendKind,
         shapes: SHAPES,
+        resetView: fit,
         startRecording: () => {
           recording = { frameIntervals: [], cpuMs: [], uploadedBytes: 0 };
         },

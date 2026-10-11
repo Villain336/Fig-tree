@@ -97,6 +97,22 @@ export const testScenes: Record<string, TestScene> = {
       scene.root.appendChild(frame);
     },
   },
+  occlusion: {
+    width: 96,
+    height: 64,
+    build(scene) {
+      // Hidden under an opaque rect that fully covers several tiles.
+      scene.root.appendChild(scene.createNode({ path: ellipsePath(48, 32, 30, 30), fill: solid(hexColor("#ff0000")) }));
+      scene.root.appendChild(scene.createNode({ path: rect(0, 0, 64, 64), fill: solid(hexColor("#0000ff")) }));
+      // Above it: translucent paint must still blend with the occluder.
+      scene.root.appendChild(scene.createNode({ path: rect(8, 8, 88, 24), fill: solid(rgba(0, 1, 0, 0.5)) }));
+      // An opaque occluder inside an opacity group must not cull what is below the group.
+      const group = scene.createNode({ opacity: 0.5 });
+      group.appendChild(scene.createNode({ path: rect(64, 32, 96, 64), fill: solid(hexColor("#000000")) }));
+      group.appendChild(scene.createNode({ path: rect(80, 48, 96, 64), fill: solid(hexColor("#ffffff")) }));
+      scene.root.appendChild(group);
+    },
+  },
   mixed: {
     width: 256,
     height: 192,

@@ -10,6 +10,8 @@ interface RenderTestResult {
 interface BenchHarness {
   readonly backend: string;
   readonly shapes: number;
+  /** Fits the whole scene in view again. */
+  resetView(): void;
   /** Starts recording frame times. */
   startRecording(): void;
   /** Stops recording and returns frame intervals and per-frame CPU time (ms) plus bytes uploaded. */
