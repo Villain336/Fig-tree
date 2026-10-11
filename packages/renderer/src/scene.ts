@@ -68,7 +68,7 @@ export class SceneNode {
 
   set transform(m: Mat2D) {
     this._transform = m;
-    this.scene.markTransform();
+    this.scene.markTransform(this);
   }
 
   get path(): Path | null {
@@ -77,8 +77,11 @@ export class SceneNode {
 
   /** Paths are treated as immutable once assigned; assign a new path to change geometry. */
   set path(p: Path | null) {
+    const structural = (p === null) !== (this._path === null);
     this._path = p;
     this.geometryVersion++;
+    // Gaining or losing a path changes which draws exist.
+    if (structural) this.scene.markStructure();
     this.scene.markGeometry(this);
   }
 
@@ -215,6 +218,8 @@ export class Scene {
   version = 0;
   /** @internal Nodes whose geometry changed since the last {@link takeDirty}. Paint edits are picked up lazily via `paintVersion`. */
   private dirty = new Set<SceneNode>();
+  /** @internal Nodes whose transform changed since the last {@link takeDirtyTransforms}. */
+  private dirtyTransforms = new Set<SceneNode>();
 
   constructor() {
     this.root = new SceneNode(this, 0, { name: "root" });
@@ -231,7 +236,8 @@ export class Scene {
   }
 
   /** @internal */
-  markTransform(): void {
+  markTransform(node: SceneNode): void {
+    this.dirtyTransforms.add(node);
     this.transformVersion++;
     this.version++;
   }
@@ -254,6 +260,13 @@ export class Scene {
   takeDirty(): Set<SceneNode> {
     const d = this.dirty;
     this.dirty = new Set();
+    return d;
+  }
+
+  /** @internal Returns and clears the set of nodes whose transform changed. */
+  takeDirtyTransforms(): Set<SceneNode> {
+    const d = this.dirtyTransforms;
+    this.dirtyTransforms = new Set();
     return d;
   }
 }
