@@ -212,3 +212,24 @@ describe("hitTest", () => {
     expect(hitTest(list, { x: 190, y: 20 })).toBeNull(); // clipped away
   });
 });
+
+describe("SceneNode.replaceChildren", () => {
+  it("reorders, adopts and detaches children in one step", () => {
+    const scene = new Scene();
+    const a = scene.createNode();
+    const b = scene.createNode();
+    const c = scene.createNode();
+    const other = scene.createNode();
+    scene.root.appendChild(a).appendChild(b);
+    other.appendChild(c);
+    const v = scene.structureVersion;
+    scene.root.replaceChildren([c, a]);
+    expect(scene.root.children).toEqual([c, a]);
+    expect(c.parent).toBe(scene.root);
+    expect(other.children).toEqual([]);
+    expect(b.parent).toBeNull();
+    expect(scene.structureVersion).toBeGreaterThan(v);
+    expect(() => a.replaceChildren([scene.root])).toThrow(/own subtree/);
+    expect(() => scene.root.replaceChildren([a, a])).toThrow(/duplicate/);
+  });
+});

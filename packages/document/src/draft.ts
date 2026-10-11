@@ -34,6 +34,8 @@ export class Draft {
   private newName: string | null = null;
   private readonly touchedParents = new Set<string>();
   private readonly childCache = new Map<string, string[]>();
+  /** Nodes the draft placed under each parent (created or moved there). */
+  private readonly incoming = new Map<string, Set<string>>();
   private clock: number;
   /** Every node id the draft created, changed, moved or removed. */
   readonly written = new Set<string>();
@@ -73,14 +75,42 @@ export class Draft {
     if (!this.touchedParents.has(parent)) return this.doc.tree.childrenOf(parent);
     let list = this.childCache.get(parent);
     if (list) return list;
-    list = this.doc.tree.childrenOf(parent).filter((c) => this.parentOf(c) === parent);
-    for (const [id, n] of this.created) if (!this.removed.has(id) && n.placement.parent === parent) list.push(id);
-    for (const [id, p] of this.placements) {
-      if (p.parent === parent && !this.removed.has(id) && this.doc.tree.parentOf(id) !== parent) list.push(id);
+    const seen = new Set<string>();
+    list = [];
+    for (const c of this.doc.tree.childrenOf(parent)) {
+      if (this.parentOf(c) === parent) {
+        list.push(c);
+        seen.add(c);
+      }
+    }
+    for (const c of this.incoming.get(parent) ?? []) {
+      if (!seen.has(c) && this.parentOf(c) === parent) list.push(c);
     }
     list.sort((a, b) => compareOrder(this.keyOf(a)!, a, this.keyOf(b)!, b));
     this.childCache.set(parent, list);
     return list;
+  }
+
+  /** Keeps a cached child list sorted after `id` joined it. */
+  private cacheInsert(parent: string, id: string): void {
+    const list = this.childCache.get(parent);
+    if (!list) return;
+    const key = this.keyOf(id)!;
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (compareOrder(this.keyOf(list[mid]!)!, list[mid]!, key, id) < 0) lo = mid + 1;
+      else hi = mid;
+    }
+    list.splice(lo, 0, id);
+  }
+
+  private cacheRemove(parent: string, id: string): void {
+    const list = this.childCache.get(parent);
+    if (!list) return;
+    const i = list.indexOf(id);
+    if (i >= 0) list.splice(i, 1);
   }
 
   indexOf(id: string): number {
@@ -193,7 +223,15 @@ export class Draft {
     for (const [k, v] of Object.entries(props)) if (v !== undefined && v !== null) map.set(k, frozenCopy(v));
     this.created.set(id, { type, props: map, placement: { parent, key, clock: ++this.clock }, spans });
     this.written.add(id);
-    this.touch(parent);
+    this.addIncoming(parent, id);
+    this.touchedParents.add(parent);
+    this.cacheInsert(parent, id);
+  }
+
+  private addIncoming(parent: string, id: string): void {
+    let set = this.incoming.get(parent);
+    if (!set) this.incoming.set(parent, (set = new Set()));
+    set.add(id);
   }
 
   set(id: string, key: string, value: unknown): void {
@@ -213,27 +251,42 @@ export class Draft {
   place(id: string, parent: string, key: string): void {
     this.written.add(id);
     const oldParent = this.parentOf(id)!;
+    // Child lists are computed from current placements: materialize both before changing them.
+    if (this.touchedParents.has(oldParent)) this.childrenOf(oldParent);
+    if (this.touchedParents.has(parent)) this.childrenOf(parent);
+    this.cacheRemove(oldParent, id);
     const c = this.created.get(id);
     if (c) {
       c.placement = { parent, key, clock: ++this.clock };
     } else {
-      const prev = { parent: oldParent, key: this.keyOf(id)! };
+      // Moving again within one draft keeps the placement from before the draft as `prev`.
+      const prev = this.placements.get(id)?.prev ?? { parent: oldParent, key: this.keyOf(id)! };
       this.placements.set(id, { parent, key, clock: ++this.clock, prev });
     }
-    this.touch(oldParent);
-    this.touch(parent);
+    this.incoming.get(oldParent)?.delete(id);
+    this.addIncoming(parent, id);
+    this.touchedParents.add(oldParent);
+    this.touchedParents.add(parent);
+    this.cacheInsert(parent, id);
   }
 
   /** Removes a node and its subtree; returns the removed ids. */
   remove(id: string): string[] {
     const ids = this.subtree(id);
     const parent = this.parentOf(id);
+    if (parent !== undefined && this.touchedParents.has(parent)) this.childrenOf(parent);
     for (const r of ids) {
       this.removed.add(r);
       this.written.add(r);
     }
-    if (parent !== undefined) this.touch(parent);
-    for (const r of ids) this.touch(r);
+    if (parent !== undefined) {
+      this.touchedParents.add(parent);
+      this.cacheRemove(parent, id);
+    }
+    for (const r of ids) {
+      this.touchedParents.add(r);
+      this.childCache.set(r, []);
+    }
     return ids;
   }
 
@@ -256,11 +309,6 @@ export class Draft {
 
   setName(name: string): void {
     this.newName = name;
-  }
-
-  private touch(parent: string): void {
-    this.touchedParents.add(parent);
-    this.childCache.delete(parent);
   }
 
   // ── Flush ────────────────────────────────────────────────────────────

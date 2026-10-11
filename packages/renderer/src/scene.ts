@@ -171,6 +171,31 @@ export class SceneNode {
     return this;
   }
 
+  /**
+   * Replaces the whole child list in one step (O(children)), moving nodes
+   * from other parents as needed. Former children not in `children` are
+   * detached.
+   */
+  replaceChildren(children: readonly SceneNode[]): this {
+    const next = new Set(children);
+    if (next.size !== children.length) throw new Error("duplicate child");
+    for (const child of children) {
+      if (child.scene !== this.scene) throw new Error("cannot move nodes between scenes");
+      for (let n: SceneNode | null = this; n; n = n._parent) {
+        if (n === child) throw new Error("cannot insert a node into its own subtree");
+      }
+    }
+    for (const old of this._children) if (!next.has(old)) old._parent = null;
+    for (const child of children) {
+      if (child._parent && child._parent !== this) child._parent.removeChild(child);
+      child._parent = this;
+    }
+    this._children.length = 0;
+    this._children.push(...children);
+    this.scene.markStructure();
+    return this;
+  }
+
   removeChild(child: SceneNode): this {
     const i = this._children.indexOf(child);
     if (i < 0) return this;
