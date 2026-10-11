@@ -15,3 +15,13 @@ export { keyBetween, keysBetween, spacedKeys, isOrderKey, compareOrder, type Ran
 export { newId, seededRandom, cryptoRandom } from "./ids";
 export { canonicalJson, jsonEqual } from "./json";
 export { boxMatrix, boxFromMatrix, type BoxTransform } from "./transform";
+export {
+  Proposal,
+  diffDocuments,
+  isEmptyDiff,
+  propose,
+  type DocumentDiff,
+  type Location,
+  type PropertyChange,
+  type ProposalStatus,
+} from "./proposal";

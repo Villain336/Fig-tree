@@ -35,6 +35,8 @@ export class Draft {
   private readonly touchedParents = new Set<string>();
   private readonly childCache = new Map<string, string[]>();
   private clock: number;
+  /** Every node id the draft created, changed, moved or removed. */
+  readonly written = new Set<string>();
 
   constructor(readonly doc: FigDocument) {
     this.clock = doc.tree.maxClock;
@@ -190,10 +192,12 @@ export class Draft {
     const map = new Map<string, unknown>();
     for (const [k, v] of Object.entries(props)) if (v !== undefined && v !== null) map.set(k, frozenCopy(v));
     this.created.set(id, { type, props: map, placement: { parent, key, clock: ++this.clock }, spans });
+    this.written.add(id);
     this.touch(parent);
   }
 
   set(id: string, key: string, value: unknown): void {
+    this.written.add(id);
     const c = this.created.get(id);
     if (c) {
       if (value === undefined || value === null) c.props.delete(key);
@@ -207,6 +211,7 @@ export class Draft {
 
   /** Moves a node (or re-keys it in place). */
   place(id: string, parent: string, key: string): void {
+    this.written.add(id);
     const oldParent = this.parentOf(id)!;
     const c = this.created.get(id);
     if (c) {
@@ -223,13 +228,17 @@ export class Draft {
   remove(id: string): string[] {
     const ids = this.subtree(id);
     const parent = this.parentOf(id);
-    for (const r of ids) this.removed.add(r);
+    for (const r of ids) {
+      this.removed.add(r);
+      this.written.add(r);
+    }
     if (parent !== undefined) this.touch(parent);
     for (const r of ids) this.touch(r);
     return ids;
   }
 
   text(id: string, op: TextOp): void {
+    this.written.add(id);
     const c = this.created.get(id);
     if (c) {
       c.spans = applySpanOp(c.spans ?? [], op);
