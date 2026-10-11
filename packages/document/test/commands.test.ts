@@ -258,6 +258,7 @@ describe("delete, duplicate, group and ungroup", () => {
       user,
     );
     const r = doc.apply([{ type: "duplicate", ids: ["f", "t"], offset: { x: 20, y: 0 }, newIds: ["f2", "t2"] }], user);
+    // "t" is copied with its parent "f", so only "f2" is a root copy.
     expect(r.created[0]).toBe("f2");
     expect(r.created).toHaveLength(2);
     expect(doc.tree.childrenOf(page)).toEqual(["f", "f2", "top"]);
@@ -267,6 +268,10 @@ describe("delete, duplicate, group and ungroup", () => {
     expect(copyOfText).not.toBe("t");
     expect(doc.text(copyOfText).content).toBe("hi");
     expect(doc.get(copyOfText, "x")).toBe(0);
+    // Copies of the given ids come first, then their descendants.
+    const two = doc.apply([{ type: "duplicate", ids: ["f2", "top"], newIds: ["f3", "top2"] }], user);
+    expect(two.created.slice(0, 2)).toEqual(["f3", "top2"]);
+    expect(two.created).toHaveLength(3);
   });
 
   it("groups siblings in place and ungroups them back", () => {

@@ -270,8 +270,7 @@ function execute(d: Draft, cmd: ParsedCommand): CommandResult {
       break;
     }
     case "rename": {
-      const type = requireNode(d, cmd.id);
-      void type;
+      requireNode(d, cmd.id);
       d.set(cmd.id, "name", cmd.name);
       rec.touch(cmd.id);
       break;
@@ -280,8 +279,7 @@ function execute(d: Draft, cmd: ParsedCommand): CommandResult {
       moveNodes(d, rec, cmd.ids, cmd.parent, cmd.index, cmd.keepPosition ?? true);
       break;
     case "reorder": {
-      const type = requireNode(d, cmd.id);
-      void type;
+      requireNode(d, cmd.id);
       const parent = d.parentOf(cmd.id)!;
       const [key] = d.keysAt(parent, cmd.index, 1, new Set([cmd.id]));
       d.place(cmd.id, parent, key!);
@@ -559,6 +557,7 @@ function duplicate(d: Draft, rec: Recorder, ids: readonly string[], offset: { x:
     if (type === "page") reject(`pages cannot be duplicated with this command`);
   }
   const rootIdFor = new Map(unique.map((id, i) => [id, newIds?.[i]]));
+  const descendants: string[] = [];
   for (const id of unique) {
     // A node whose ancestor is also duplicated is copied with that ancestor.
     if (unique.some((other) => other !== id && d.isSelfOrAncestor(other, id))) continue;
@@ -568,12 +567,23 @@ function duplicate(d: Draft, rec: Recorder, ids: readonly string[], offset: { x:
     // The copy goes right above the original.
     const [key] = d.keysAt(parent, d.indexOf(id) + 1, 1, new Set());
     rec.created.push(copyId);
-    copyTree(d, rec, id, copyId, parent, key!, offset, false);
+    copyTree(d, rec, id, copyId, parent, key!, offset, descendants);
   }
+  // Copies of `ids` first (in order), then their descendants.
+  rec.created.push(...descendants);
 }
 
 /** Copies a subtree; children keep their order keys (the new parent has no other children). */
-function copyTree(d: Draft, rec: Recorder, source: string, id: string, parent: string, key: string, offset: { x: number; y: number } | undefined, record = true): void {
+function copyTree(
+  d: Draft,
+  rec: Recorder,
+  source: string,
+  id: string,
+  parent: string,
+  key: string,
+  offset: { x: number; y: number } | undefined,
+  descendants: string[] | null,
+): void {
   const type = d.typeOf(source)!;
   const props = d.storedProps(source);
   if (offset && type !== "group") {
@@ -583,10 +593,13 @@ function copyTree(d: Draft, rec: Recorder, source: string, id: string, parent: s
   const spans = type === "text" ? d.spans(source).map((s) => ({ text: s.text, attrs: { ...s.attrs } })) : null;
   d.create(id, type, props, parent, key, spans);
   rec.touch(id);
-  if (record) rec.created.push(id);
   // Children of a group share the group's coordinate space, so they take the offset too.
   const childOffset = type === "group" ? offset : undefined;
-  for (const child of d.childrenOf(source)) copyTree(d, rec, child, newId(d.doc.random), id, d.keyOf(child)!, childOffset);
+  for (const child of d.childrenOf(source)) {
+    const copy = newId(d.doc.random);
+    (descendants ?? rec.created).push(copy);
+    copyTree(d, rec, child, copy, id, d.keyOf(child)!, childOffset, descendants);
+  }
 }
 
 function group(d: Draft, rec: Recorder, ids: readonly string[], groupId: string | undefined, name: string | undefined): void {
