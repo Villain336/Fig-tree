@@ -104,7 +104,9 @@ export class GeometrySlot {
 /** Smallest level L with 2^L >= scale, so the local tolerance SCREEN_TOLERANCE/2^L holds in device px. */
 export function requiredLevel(scale: number): number {
   if (!(scale > 0) || !Number.isFinite(scale)) return 0;
-  return Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.ceil(Math.log2(scale) - 1e-9)));
+  // The epsilon keeps exact powers of two on their own level; `|| 0` normalizes -0.
+  const level = Math.ceil(Math.log2(scale) - 1e-9) || 0;
+  return Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, level));
 }
 
 /** Converts contours (implicitly closed) to line segments, dropping zero-length edges. */
