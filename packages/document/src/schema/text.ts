@@ -15,11 +15,11 @@ export const LineHeight = z.union([
   z.literal("normal"),
   z.strictObject({ unit: z.literal("px"), value: NonNegative }),
   z.strictObject({ unit: z.literal("percent"), value: NonNegative }),
-]);
+]).meta({ id: "LineHeight" });
 export type LineHeight = z.infer<typeof LineHeight>;
 
 /** CSS `letter-spacing` in px or em. */
-export const LetterSpacing = z.strictObject({ unit: z.enum(["px", "em"]), value: Num });
+export const LetterSpacing = z.strictObject({ unit: z.enum(["px", "em"]), value: Num }).meta({ id: "LetterSpacing" });
 
 /** Properties that can vary within a text node (node-level defaults, per-run overrides). */
 export const textStyleProps = {
@@ -58,7 +58,7 @@ export const textBoxProps = {
 };
 
 /** A style run's overrides; `link` is per-run only. */
-export const TextStyle = z.strictObject({ ...optionalShape(textStyleProps), link: z.url().max(2048).optional() });
+export const TextStyle = z.strictObject({ ...optionalShape(textStyleProps), link: z.url().max(2048).optional() }).meta({ id: "TextStyle" });
 export type TextStyle = z.infer<typeof TextStyle>;
 export const TEXT_STYLE_KEYS = [...Object.keys(textStyleProps), "link"] as (keyof TextStyle)[];
 
@@ -88,5 +88,6 @@ export const TextContent = z
       if (run.end > t.content.length) ctx.addIssue({ code: "custom", path: ["runs", i], message: `run ends past the end of the text (${t.content.length})` });
       last = run.end;
     });
-  });
+  })
+  .meta({ id: "TextContent" });
 export type TextContent = z.infer<typeof TextContent>;

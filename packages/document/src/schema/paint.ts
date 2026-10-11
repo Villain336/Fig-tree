@@ -19,7 +19,7 @@ const paintBase = {
   blendMode: BlendMode.optional(),
 };
 
-export const GradientStop = z.strictObject({ position: Unit, color: Color });
+export const GradientStop = z.strictObject({ position: Unit, color: Color }).meta({ id: "GradientStop" });
 export type GradientStop = z.infer<typeof GradientStop>;
 
 const stops = z.array(GradientStop).min(2, "a gradient needs at least two stops");
@@ -97,17 +97,17 @@ export const Paint = z.discriminatedUnion("type", [
   DiamondGradientPaint,
   ImagePaint,
   ShaderPaint,
-]);
+]).meta({ id: "Paint" });
 export type Paint = z.infer<typeof Paint>;
 export type PaintType = Paint["type"];
 
-export const PaintStack = z.array(Paint).max(64);
+export const PaintStack = z.array(Paint).max(64).meta({ id: "PaintStack" });
 
 /** Per-side stroke weights for rectangles and frames (CSS border widths). */
 export const StrokeWeight = z.union([
   NonNegative,
   z.strictObject({ top: NonNegative, right: NonNegative, bottom: NonNegative, left: NonNegative }),
-]);
+]).meta({ id: "StrokeWeight" });
 export type StrokeWeight = z.infer<typeof StrokeWeight>;
 
 export const StrokeAlign = z.enum(["inside", "center", "outside"]);
@@ -143,6 +143,6 @@ export const BackgroundBlurEffect = z.strictObject({
   visible: z.boolean().optional(),
 });
 
-export const Effect = z.discriminatedUnion("type", [DropShadowEffect, InnerShadowEffect, LayerBlurEffect, BackgroundBlurEffect]);
+export const Effect = z.discriminatedUnion("type", [DropShadowEffect, InnerShadowEffect, LayerBlurEffect, BackgroundBlurEffect]).meta({ id: "Effect" });
 export type Effect = z.infer<typeof Effect>;
-export const EffectStack = z.array(Effect).max(32);
+export const EffectStack = z.array(Effect).max(32).meta({ id: "EffectStack" });

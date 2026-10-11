@@ -17,8 +17,12 @@ const color = fc.record({ r: unit, g: unit, b: unit, a: unit });
 const point = fc.record({ x: num, y: num });
 const blend = fc.constantFrom(...BlendMode.options);
 
-/** Asset ids the fuzzer may reference; documents register them before use. */
-export const FUZZ_ASSETS = ["a".repeat(64), "0123456789abcdef".repeat(4)];
+/** Two tiny PNGs the fuzzer may reference, with their real SHA-256 ids. */
+export const FUZZ_ASSET_BYTES: Record<string, string> = {
+  "4637adf6e38fb59e0bac38aa91f52d0350b030ccb924e115ed9135fd0252b667": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR4nGP4z8DwnwGMgRQAH+4D/dJQfRoAAAAASUVORK5CYII=",
+  "6bb46e7d1b7d527f8a7cbb904a8fb298f3aa6c08af32a4a248fce7d1696e27e8": "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABCAIAAACUgoPjAAAADUlEQVR4nGNgaPgPQQATfgR+5W97sAAAAABJRU5ErkJggg==",
+};
+export const FUZZ_ASSETS = Object.keys(FUZZ_ASSET_BYTES);
 
 const paintBase = { visible: fc.boolean(), opacity: unit, blendMode: blend };
 const optional = { requiredKeys: [] as never[] };

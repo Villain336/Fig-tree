@@ -61,7 +61,8 @@ export const VectorNetwork = z
         if (!loopIsClosed(net.segments, loop)) ctx.addIssue({ code: "custom", path, message: "loop segments must connect end to end and close" });
       });
     });
-  });
+  })
+  .meta({ id: "VectorNetwork" });
 export type VectorNetwork = z.infer<typeof VectorNetwork>;
 export type VectorSegment = z.infer<typeof Segment>;
 

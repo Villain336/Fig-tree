@@ -33,7 +33,7 @@ export const geometryProps = {
  * - `fill`: on a flex main axis `flex: 1 1 0px`, on a cross axis or in grid
  *   `align-self`/`justify-self: stretch`, otherwise `width: 100%`.
  */
-export const SizingMode = z.enum(["fixed", "hug", "fill"]);
+export const SizingMode = z.enum(["fixed", "hug", "fill"]).meta({ id: "SizingMode" });
 export type SizingMode = z.infer<typeof SizingMode>;
 
 export const sizingProps = {
@@ -62,7 +62,7 @@ export const Position = z.enum(["absolute", "relative", "fixed", "sticky"]);
  * size follows), `center` (offset from the center) or `scale` (percentages).
  */
 export const ConstraintKind = z.enum(["start", "end", "start-end", "center", "scale"]);
-export const Constraints = z.strictObject({ horizontal: ConstraintKind, vertical: ConstraintKind });
+export const Constraints = z.strictObject({ horizontal: ConstraintKind, vertical: ConstraintKind }).meta({ id: "Constraints" });
 export type Constraints = z.infer<typeof Constraints>;
 
 export const positionProps = {
@@ -72,7 +72,7 @@ export const positionProps = {
 
 // ── Box model ────────────────────────────────────────────────────────────
 
-export const Margin = z.union([Num, z.literal("auto")]);
+export const Margin = z.union([Num, z.literal("auto")]).meta({ id: "Margin" });
 
 export const boxProps = {
   /** CSS `box-sizing`; `width`/`height` measure the border box by default. */
@@ -89,13 +89,13 @@ export const boxProps = {
 // ── Overflow and corners ─────────────────────────────────────────────────
 
 /** CSS `overflow-x`/`overflow-y`. Anything other than `visible` clips children to the padding box. */
-export const Overflow = z.enum(["visible", "hidden", "clip", "scroll", "auto"]);
+export const Overflow = z.enum(["visible", "hidden", "clip", "scroll", "auto"]).meta({ id: "Overflow" });
 export type Overflow = z.infer<typeof Overflow>;
 
 export const CornerRadius = z.union([
   NonNegative,
   z.strictObject({ topLeft: NonNegative, topRight: NonNegative, bottomRight: NonNegative, bottomLeft: NonNegative }),
-]);
+]).meta({ id: "CornerRadius" });
 export type CornerRadius = z.infer<typeof CornerRadius>;
 
 export const cornerProps = {
@@ -144,7 +144,7 @@ export const TrackSize = z.union([
   TrackBreadth,
   z.strictObject({ type: z.literal("minmax"), min: TrackBreadth, max: TrackBreadth }),
   z.strictObject({ type: z.literal("fit-content"), value: NonNegative }),
-]);
+]).meta({ id: "TrackSize" });
 export type TrackSize = z.infer<typeof TrackSize>;
 /** A track list entry: a size or `repeat(count | auto-fill | auto-fit, sizes…)`. */
 export const TrackListEntry = z.union([
@@ -154,7 +154,7 @@ export const TrackListEntry = z.union([
     count: z.union([z.number().int().min(1).max(10_000), z.literal("auto-fill"), z.literal("auto-fit")]),
     tracks: z.array(TrackSize).min(1).max(64),
   }),
-]);
+]).meta({ id: "TrackListEntry" });
 export type TrackListEntry = z.infer<typeof TrackListEntry>;
 const TrackList = z.array(TrackListEntry).max(1_000);
 
@@ -184,9 +184,9 @@ export const GridLine = z.union([
   z.literal("auto"),
   z.strictObject({ span: z.number().int().min(1) }),
   z.strictObject({ name: z.string().regex(/^[A-Za-z_][\w-]*$/) }),
-]);
+]).meta({ id: "GridLine" });
 export type GridLine = z.infer<typeof GridLine>;
-export const GridPlacement = z.strictObject({ start: GridLine, end: GridLine });
+export const GridPlacement = z.strictObject({ start: GridLine, end: GridLine }).meta({ id: "GridPlacement" });
 
 export const itemProps = {
   flexGrow: NonNegative,

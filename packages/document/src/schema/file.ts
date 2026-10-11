@@ -17,7 +17,7 @@ export const AssetMeta = z.strictObject({
   height: z.number().int().min(0).optional(),
   /** Original file name, for display. */
   name: z.string().max(1_000).optional(),
-});
+}).meta({ id: "AssetMeta" });
 export type AssetMeta = z.infer<typeof AssetMeta>;
 
 export type LayerType = Exclude<NodeType, "page">;
@@ -29,26 +29,28 @@ export type LayerJson = {
 export type PageJson = { id: string; type: "page"; children: LayerJson[] } & NodePropsOf<"page">;
 
 const layerSchemas = NODE_TYPES.filter((t): t is LayerType => t !== "page").map((type) =>
-  z.strictObject({
-    id: NodeId,
-    type: z.literal(type),
-    ...optionalShape(PROPS[type]),
-    ...(isContainer(type) ? { children: z.lazy(() => z.array(LayerJson)).optional() } : {}),
-    ...(type === "text" ? { text: TextContent.optional() } : {}),
-  }),
+  z
+    .strictObject({
+      id: NodeId,
+      type: z.literal(type),
+      ...optionalShape(PROPS[type]),
+      ...(isContainer(type) ? { children: z.lazy(() => z.array(LayerJson)).optional() } : {}),
+      ...(type === "text" ? { text: TextContent.optional() } : {}),
+    })
+    .meta({ id: `${type[0]!.toUpperCase()}${type.slice(1)}Node` }),
 );
 
 export const LayerJson: z.ZodType<LayerJson> = z.discriminatedUnion(
   "type",
   layerSchemas as unknown as [z.ZodObject<{ type: z.ZodLiteral<LayerType> }>, ...z.ZodObject<{ type: z.ZodLiteral<LayerType> }>[]],
-) as unknown as z.ZodType<LayerJson>;
+).meta({ id: "Layer" }) as unknown as z.ZodType<LayerJson>;
 
 export const PageJson: z.ZodType<PageJson> = z.strictObject({
   id: NodeId,
   type: z.literal("page"),
   ...optionalShape(PROPS.page),
   children: z.array(LayerJson),
-}) as unknown as z.ZodType<PageJson>;
+}).meta({ id: "PageNode" }) as unknown as z.ZodType<PageJson>;
 
 /** Contents of `document.json`. */
 export const FigtreeFile = z

@@ -25,14 +25,14 @@ export const NodeId = z
 export type NodeId = z.infer<typeof NodeId>;
 
 /** Content address of an asset: lowercase hex SHA-256 of its bytes. */
-export const AssetId = z.string().regex(/^[0-9a-f]{64}$/, "asset ids are lowercase hex SHA-256 digests");
+export const AssetId = z.string().regex(/^[0-9a-f]{64}$/, "asset ids are lowercase hex SHA-256 digests").meta({ id: "AssetId" });
 export type AssetId = z.infer<typeof AssetId>;
 
 /** Non-premultiplied sRGB color, components in [0, 1]. */
-export const Color = z.strictObject({ r: Unit, g: Unit, b: Unit, a: Unit });
+export const Color = z.strictObject({ r: Unit, g: Unit, b: Unit, a: Unit }).meta({ id: "Color" });
 export type Color = z.infer<typeof Color>;
 
-export const Point = z.strictObject({ x: Num, y: Num });
+export const Point = z.strictObject({ x: Num, y: Num }).meta({ id: "Point" });
 export type Point = z.infer<typeof Point>;
 
 /** CSS `mix-blend-mode` keywords. */
@@ -55,7 +55,7 @@ export const BlendMode = z.enum([
   "luminosity",
   "plus-darker",
   "plus-lighter",
-]);
+]).meta({ id: "BlendMode" });
 export type BlendMode = z.infer<typeof BlendMode>;
 
 /** Four values in CSS order: top, right, bottom, left. */

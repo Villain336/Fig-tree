@@ -25,3 +25,9 @@ export {
   type PropertyChange,
   type ProposalStatus,
 } from "./proposal";
+export { fromFigtreeJson, parseFigtreeJson, serializeFigtreeJson, toFigtreeJson, type ImportOptions } from "./format/json";
+export { FormatError, MIGRATIONS, migrate, type Migration } from "./format/migrations";
+export { AssetStore, sha256Hex, sniffImage } from "./format/assets";
+export { decodeHistory, encodeHistory } from "./format/history";
+export { DEFAULT_LIMITS, readFigtree, writeFigtree, type FigtreeArchive, type ReadLimits, type ReadOptions, type WriteOptions } from "./format/zip";
+export { figtreeJsonSchema } from "./format/json-schema";
