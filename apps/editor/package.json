@@ -10,6 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@fig-tree/document": "0.1.0",
     "@fig-tree/geometry": "0.1.0",
     "@fig-tree/renderer": "0.1.0",
     "lucide-react": "1.47.0",

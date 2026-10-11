@@ -167,10 +167,14 @@ describe("SceneBridge structure", () => {
     expect(s!.path!.verbCount).toBeGreaterThan(10);
     expect(l!.stroke?.width).toBe(1);
     expect(l!.transform[0]).toBeCloseTo(Math.SQRT1_2, 9);
-    expect(v!.path).toBeNull();
+    // Regions are filled by children with their own rule; main strokes every segment.
+    expect(v!.fill).toBeNull();
     expect(v!.children[0]!.fillRule).toBe("evenodd");
-    // Stroke contours: one closed loop through 0-1-2 is split at the junction vertex 2.
-    expect(v!.stroke).not.toBeNull();
+    expect(v!.stroke?.paint).toEqual({ type: "solid", color: BLUE.color });
+    // Two contours: the loop 2-1-0-2 through the junction (closed, so it joins there) and the spoke 2-3.
+    const verbs = Array.from(v!.path!.verbs);
+    expect(verbs.filter((verb) => verb === 0).length).toBe(2);
+    expect(verbs.filter((verb) => verb === 4).length).toBe(1);
   });
 
   it("records what the renderer cannot draw yet instead of faking it", () => {

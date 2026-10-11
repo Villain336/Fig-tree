@@ -307,7 +307,8 @@ export class SceneBridge {
       mainFill = paints[0] ?? null;
       for (const paint of paints.slice(1)) fillSpecs.push({ name: `${id}:fill`, path: outline, fill: paint, rule: "nonzero" });
     }
-    setPath(e.main, type === "vector" ? null : outline);
+    // Vectors fill their regions in child nodes; main carries the stroke outline for its stroke.
+    setPath(e.main, type === "vector" ? e.strokePath : outline);
     setFill(e.main, mainFill);
 
     // Host clip.

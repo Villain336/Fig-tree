@@ -26,7 +26,7 @@ export default defineConfig({
     launchOptions: { args: gpuArgs },
   },
   projects: [
-    { name: "render", testMatch: /render\.spec\.ts/, timeout: 120_000 },
+    { name: "render", testMatch: /(render|editor)\.spec\.ts/, timeout: 120_000 },
     { name: "bench", testMatch: /bench\.spec\.ts/, timeout: 600_000 },
   ],
   webServer: {

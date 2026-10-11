@@ -18,7 +18,16 @@ interface BenchHarness {
   stopRecording(): { frameIntervals: number[]; cpuMs: number[]; uploadedBytes: number };
 }
 
+interface EditorHarness {
+  readonly backend: string;
+  readonly bridge: { readonly lastCompiled: number };
+  apply(commands: unknown[]): { affected: readonly string[] } | { error: string };
+  renderPixels(): Promise<RenderTestResult>;
+  toCanvas(x: number, y: number): { x: number; y: number };
+}
+
 interface Window {
   __renderTest?: RenderTestResult | { error: string };
   __bench?: BenchHarness;
+  __figtree?: EditorHarness;
 }

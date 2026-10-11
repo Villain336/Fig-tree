@@ -114,7 +114,8 @@ export function strokeOutline(net: VectorNetwork): Path {
       appendSegment(path, net, seg, forward);
       v = forward ? s.end : s.start;
       const next = degree.get(v)!;
-      if (v === startVertex && next.length === 2) {
+      // Back at the start (even at a junction): close, so the ends meet with a join, not two caps.
+      if (v === startVertex) {
         path.close();
         return;
       }
