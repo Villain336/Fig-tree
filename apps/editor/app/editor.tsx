@@ -1,7 +1,7 @@
 "use client";
 
 import { multiply, scaling, translation, type Mat2D } from "@fig-tree/geometry";
-import { Renderer, Scene, backendFromSearch } from "@fig-tree/renderer";
+import { Renderer, Scene, backendFromSearch, type FrameStats } from "@fig-tree/renderer";
 import { CommandError, SceneBridge, cssDeclarations, type Command, type FigDocument, type NodeType } from "@fig-tree/document";
 import {
   Circle,
@@ -22,7 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SAMPLE_BOUNDS, buildSampleDocument } from "./sample-document";
+import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildSampleDocument } from "./sample-document";
 
 const ICONS: Record<NodeType, LucideIcon> = {
   page: File,
@@ -68,7 +68,16 @@ export interface EditorHarness {
   renderPixels(): Promise<EditorPixels>;
   /** CSS pixel position on the canvas of a world point. */
   toCanvas(x: number, y: number): { x: number; y: number };
+  /** Renders one frame now (synchronously) and returns its stats. */
+  renderFrame(): FrameStats;
+  /** Resolves when the GPU finished submitted frames. */
+  finish(): Promise<void>;
+  /** Sets the view: world-to-canvas scale and translation. */
+  setView(scale: number, x: number, y: number): void;
 }
+
+/** Layer rows shown in the dev panel; large documents are truncated. */
+const MAX_LAYER_ROWS = 400;
 
 declare global {
   interface Window {
@@ -81,6 +90,7 @@ function layersOf(doc: FigDocument, bridge: SceneBridge): Layer[] {
   const walk = (id: string, depth: number): void => {
     // Top of the stack first, as layer panels list it.
     for (const c of [...doc.tree.childrenOf(id)].reverse()) {
+      if (out.length >= MAX_LAYER_ROWS) return;
       out.push({
         id: c,
         type: doc.typeOf(c)!,
@@ -103,12 +113,15 @@ export function Editor() {
   const [selected, setSelected] = useState<string | null>(null);
   const [inspect, setInspect] = useState<{ css: Record<string, string>; unsupported: readonly string[] } | null>(null);
   const [status, setStatus] = useState("loading");
+  const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const docRef = useRef<{ doc: FigDocument; bridge: SceneBridge; fit: () => void } | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
-    const doc = buildSampleDocument();
+    const grid = new URLSearchParams(window.location.search).get("doc") === "grid10k";
+    const doc = grid ? buildGridDocument() : buildSampleDocument();
+    const bounds = grid ? GRID_BOUNDS : SAMPLE_BOUNDS;
     const scene = new Scene();
     const bridge = new SceneBridge(doc, scene);
     const user = doc.actor("local-user");
@@ -119,7 +132,20 @@ export function Editor() {
     let dragging: { x: number; y: number } | null = null;
     let lastCpu = 0;
 
-    const refreshPanels = (): void => setLayers(layersOf(doc, bridge));
+    let panelsScheduled = false;
+    const refreshPanels = (): void => {
+      setLayers(layersOf(doc, bridge));
+      setTotal(doc.tree.size - 1);
+    };
+    // Panels refresh on the next animation frame, outside the document change itself.
+    const schedulePanels = (): void => {
+      if (panelsScheduled || disposed) return;
+      panelsScheduled = true;
+      requestAnimationFrame(() => {
+        panelsScheduled = false;
+        if (!disposed) refreshPanels();
+      });
+    };
     const schedule = (): void => {
       if (scheduled || disposed) return;
       scheduled = true;
@@ -134,8 +160,8 @@ export function Editor() {
     const fit = (): void => {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      const s = Math.min(w / SAMPLE_BOUNDS.width, h / SAMPLE_BOUNDS.height) * 0.92;
-      view = multiply(translation(Math.round((w - SAMPLE_BOUNDS.width * s) / 2), Math.round((h - SAMPLE_BOUNDS.height * s) / 2)), scaling(s));
+      const s = Math.min(w / bounds.width, h / bounds.height) * 0.92;
+      view = multiply(translation(Math.round((w - bounds.width * s) / 2), Math.round((h - bounds.height * s) / 2)), scaling(s));
       schedule();
     };
     const resize = (): void => {
@@ -143,7 +169,7 @@ export function Editor() {
       fit();
     };
     const unsubscribe = doc.onChange(() => {
-      refreshPanels();
+      schedulePanels();
       schedule();
     });
     docRef.current = { doc, bridge, fit };
@@ -214,6 +240,17 @@ export function Editor() {
         },
         toCanvas(x, y) {
           return { x: view[0] * x + view[2] * y + view[4], y: view[1] * x + view[3] * y + view[5] };
+        },
+        renderFrame() {
+          r.background = bridge.background;
+          return r.render({ transform: view });
+        },
+        finish() {
+          return r.finish();
+        },
+        setView(scale, x, y) {
+          view = [scale, 0, 0, scale, x, y];
+          schedule();
         },
       };
     })().catch((err: unknown) => setError(String(err)));
@@ -288,6 +325,7 @@ export function Editor() {
               );
             })}
           </ul>
+          {total > layers.length && <p className="px-3 py-1 text-[12px] text-neutral-400">{(total - layers.length).toLocaleString()} more layers not listed</p>}
         </aside>
         <main className="relative min-w-0 flex-1">
           <canvas ref={canvasRef} className="block h-full w-full touch-none" data-testid="canvas" />

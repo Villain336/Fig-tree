@@ -20,10 +20,14 @@ interface BenchHarness {
 
 interface EditorHarness {
   readonly backend: string;
+  readonly doc: { readonly tree: { readonly size: number } };
   readonly bridge: { readonly lastCompiled: number };
   apply(commands: unknown[]): { affected: readonly string[] } | { error: string };
   renderPixels(): Promise<RenderTestResult>;
   toCanvas(x: number, y: number): { x: number; y: number };
+  renderFrame(): { cpuMs: number };
+  finish(): Promise<void>;
+  setView(scale: number, x: number, y: number): void;
 }
 
 interface Window {

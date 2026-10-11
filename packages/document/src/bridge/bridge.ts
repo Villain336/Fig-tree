@@ -1,7 +1,7 @@
-import { Path, inflateRect, type Mat2D } from "@fig-tree/geometry";
+import { Path, inflateRect, roundedRectPath, type Mat2D } from "@fig-tree/geometry";
 import type { Color, Paint as RenderPaint, Scene, SceneNode, Stroke } from "@fig-tree/renderer";
 import type { DocumentChange, FigDocument } from "../document";
-import type { Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
+import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
 import { boxMatrix } from "../transform";
 import { geometryKey, outlinePath, regionPaths, strokeOutline } from "./geometry";
 import { toRenderPaint } from "./paints";
@@ -350,19 +350,23 @@ export class SceneBridge {
           // The topmost stroke rides on main; lower ones are nodes painted before it.
           mainStroke = strokeOf(strokePaints[strokePaints.length - 1]!, w);
           for (const paint of strokePaints.slice(0, -1)) strokeSpecs.push({ path: geometry, stroke: strokeOf(paint, w), clip: null });
-        } else {
-          // Inside: a double-width stroke clipped by the outline. Outside: clipped by its complement.
-          let clipPath = geometry;
-          if (align === "outside") {
-            const key = `${e.geometryKey}|${w}`;
-            if (e.complementKey !== key) {
-              e.complementKey = key;
-              e.complement = complement(geometry, w * 2 + 2);
-            }
-            clipPath = e.complement!;
+        } else if (type !== "vector" && type !== "line" && hasBoxOutline(type) && style.dash.length === 0) {
+          // Rectangles: an aligned stroke is a centered stroke on the inset (or outset) rectangle.
+          const key = `${e.geometryKey}|${align}|${w}|${style.join}|${style.miterLimit}`;
+          if (e.offsetKey !== key) {
+            e.offsetKey = key;
+            e.offsetPath = offsetRect(width, height, get<CornerRadius>("cornerRadius"), get<number>("cornerSmoothing"), align === "inside" ? -w / 2 : w / 2, style.join, style.miterLimit);
           }
-          const rule = align === "inside" ? "nonzero" : "evenodd";
-          for (const paint of strokePaints) strokeSpecs.push({ path: geometry, stroke: strokeOf(paint, w * 2), clip: { path: clipPath, rule, align } });
+          const offset = e.offsetPath;
+          if (offset) {
+            // Inside, the outer edge is the shape's own outline: sharp corners stay sharp whatever the join.
+            const join = align === "inside" ? "miter" : style.join;
+            for (const paint of strokePaints) strokeSpecs.push({ path: offset, stroke: { ...strokeOf(paint, w), join }, clip: null });
+          } else {
+            this.clippedStrokes(e, geometry, w, align, strokePaints.map((p) => strokeOf(p, w * 2)), strokeSpecs);
+          }
+        } else {
+          this.clippedStrokes(e, geometry, w, align, strokePaints.map((p) => strokeOf(p, w * 2)), strokeSpecs);
         }
       }
     }
@@ -412,6 +416,21 @@ export class SceneBridge {
     }
   }
 
+  /** Inside: a double-width stroke clipped by the outline. Outside: clipped by its complement (even-odd). */
+  private clippedStrokes(e: Entry, geometry: Path, w: number, align: string, strokes: Stroke[], out: { path: Path; stroke: Stroke; clip: { path: Path; rule: "nonzero" | "evenodd"; align: string } | null }[]): void {
+    let clipPath = geometry;
+    if (align === "outside") {
+      const key = `${e.geometryKey}|${w}`;
+      if (e.complementKey !== key) {
+        e.complementKey = key;
+        e.complement = complement(geometry, w * 2 + 2);
+      }
+      clipPath = e.complement!;
+    }
+    const rule = align === "inside" ? "nonzero" : "evenodd";
+    for (const stroke of strokes) out.push({ path: geometry, stroke, clip: { path: clipPath, rule, align } });
+  }
+
   private own(n: SceneNode, id: string): void {
     this.owners.set(n, id);
     for (const c of n.children) this.own(c, id);
@@ -435,6 +454,8 @@ class Entry {
   strokeShape = "";
   complement: Path | null = null;
   complementKey = "";
+  offsetPath: Path | null = null;
+  offsetKey = "";
   readonly paintNotes = new Set<string>();
 
   constructor(
@@ -457,6 +478,60 @@ function hasFills(type: NodeType): boolean {
 
 function hasStrokes(type: NodeType): boolean {
   return type !== "page" && type !== "group";
+}
+
+function hasBoxOutline(type: NodeType): boolean {
+  return type === "frame" || type === "component" || type === "instance" || type === "rectangle" || type === "image";
+}
+
+/**
+ * The rectangle whose centered stroke of width 2|d| covers exactly the inside
+ * (d < 0) or outside (d > 0) band of a rounded rectangle's outline: the
+ * outline offset by d, with every effective (CSS-clamped) radius offset by
+ * d too (sharp corners follow the join, see below). Returns null when that
+ * is not exact: corner smoothing, a rounded corner that would inset to a
+ * point, offset radii that no longer fit their edges, bevelled outside
+ * corners, or a box too small to inset.
+ */
+function offsetRect(width: number, height: number, radius: CornerRadius, smoothing: number, d: number, join: string, miterLimit: number): Path | null {
+  if (smoothing > 0) return null;
+  // Outside a sharp corner the band follows the join: a miter keeps the corner
+  // (if the limit allows a right angle's √2), a round join is a radius-|2d| arc
+  // around the corner, i.e. radius d on the outset rectangle; a bevel has no
+  // offset-rectangle form.
+  let sharpOutset = 0;
+  if (d > 0) {
+    if (join === "round") sharpOutset = d;
+    else if (join === "bevel" || miterLimit < Math.SQRT2) return null;
+  }
+  const raw = typeof radius === "number" ? [radius, radius, radius, radius] : [radius.topLeft, radius.topRight, radius.bottomRight, radius.bottomLeft];
+  const [tl, tr, br, bl] = raw as [number, number, number, number];
+  const fit = Math.min(
+    1,
+    tl + tr > 0 ? width / (tl + tr) : 1,
+    bl + br > 0 ? width / (bl + br) : 1,
+    tl + bl > 0 ? height / (tl + bl) : 1,
+    tr + br > 0 ? height / (tr + br) : 1,
+  );
+  const radii: number[] = [];
+  for (const r of raw) {
+    const effective = r * fit;
+    if (effective <= 1e-9) {
+      radii.push(sharpOutset);
+      continue;
+    }
+    // Insetting a rounded corner to (or past) a point would turn the stroke's outer edge sharp.
+    if (effective + d <= 1e-9) return null;
+    radii.push(effective + d);
+  }
+  const w = width + 2 * d;
+  const h = height + 2 * d;
+  if (w <= 0 || h <= 0) return null;
+  // Rounded corners move with the offset but sharp ones do not, so the radii
+  // may no longer fit their edges; re-clamping them would change the shape.
+  const [a, b, c, e] = radii as [number, number, number, number];
+  if (a + b > w + 1e-9 || e + c > w + 1e-9 || a + e > h + 1e-9 || b + c > h + 1e-9) return null;
+  return roundedRectPath(-d, -d, w, h, [a, b, c, e]);
 }
 
 function hasHostClip(type: NodeType): boolean {

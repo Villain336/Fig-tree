@@ -87,20 +87,35 @@ describe("SceneBridge structure", () => {
     expect(bridge.nodeIdFor(bridge.sceneNodeFor("r")!)).toBe("r");
   });
 
-  it("aligns strokes inside and outside with clipped double-width strokes", () => {
+  it("aligns strokes inside and outside: offset rectangles, or clipped double-width strokes", () => {
     const { scene } = setup([
-      { type: "createNode", node: { id: "in", type: "rectangle", props: { strokes: [RED], strokeWeight: 4, strokeAlign: "inside" } }, parent: "PAGE" },
+      { type: "createNode", node: { id: "in", type: "rectangle", props: { width: 100, height: 60, cornerRadius: 10, strokes: [RED], strokeWeight: 4, strokeAlign: "inside" } }, parent: "PAGE" },
       { type: "createNode", node: { id: "out", type: "ellipse", props: { strokes: [RED], strokeWeight: 3, strokeAlign: "outside" } }, parent: "PAGE" },
+      { type: "createNode", node: { id: "smooth", type: "rectangle", props: { cornerRadius: 10, cornerSmoothing: 0.6, strokes: [RED], strokeWeight: 4, strokeAlign: "inside" } }, parent: "PAGE" },
+      { type: "createNode", node: { id: "tight", type: "rectangle", props: { cornerRadius: 1, strokes: [RED], strokeWeight: 4, strokeAlign: "inside" } }, parent: "PAGE" },
+      { type: "createNode", node: { id: "rectOut", type: "frame", props: { width: 100, height: 60, strokes: [RED], strokeWeight: 6, strokeAlign: "outside", strokeJoin: "round" } }, parent: "PAGE" },
     ]);
-    const [inside, outside] = scene.root.children[0]!.children;
-    const clipIn = inside!.children[0]!;
-    expect(clipIn.clipsContent).toBe(true);
-    expect(clipIn.fillRule).toBe("nonzero");
-    expect(clipIn.children[0]!.stroke?.width).toBe(8);
+    const [inside, outside, smooth, tight, rectOut] = scene.root.children[0]!.children;
+    // A rounded rectangle's inside stroke: a plain stroke on the rectangle inset by half the weight.
+    const plain = inside!.children[0]!;
+    expect(plain.clipsContent).toBe(false);
+    expect(plain.stroke?.width).toBe(4);
+    expect(plain.path!.bounds()).toEqual({ minX: 2, minY: 2, maxX: 98, maxY: 58 });
+    // An ellipse cannot be offset exactly: clip a double-width stroke by the outline's complement.
     const clipOut = outside!.children[0]!;
+    expect(clipOut.clipsContent).toBe(true);
     expect(clipOut.fillRule).toBe("evenodd");
     expect(clipOut.children[0]!.stroke?.width).toBe(6);
     expect(clipOut.path!.bounds().minX).toBeLessThan(-6);
+    // Smoothed corners and radii smaller than half the weight fall back to clipping too.
+    expect(smooth!.children[0]!.clipsContent).toBe(true);
+    expect(smooth!.children[0]!.fillRule).toBe("nonzero");
+    expect(tight!.children[0]!.clipsContent).toBe(true);
+    // A frame's outside stroke: outset rectangle, keeping its own join for the sharp corners.
+    const out = rectOut!.children.at(-1)!;
+    expect(out.clipsContent).toBe(false);
+    expect(out.path!.bounds()).toEqual({ minX: -3, minY: -3, maxX: 103, maxY: 63 });
+    expect(out.stroke).toMatchObject({ width: 6, join: "round" });
   });
 
   it("maps gradient handles from the node box to local space", () => {
@@ -358,8 +373,9 @@ describe("SceneBridge at 10,000 nodes", () => {
     expect(bridge.lastCompiled).toBe(10_001);
     expectProjected(doc, bridge, scene);
     // 100 frame fills and their clip layers (begin + end), 9,900 shape fills, and
-    // 1,000 strokes aligned inside (the default): each a clip layer around a stroke.
-    expect(list.items.length).toBe(100 + 200 + 9_900 + 1_000 * 3);
+    // 1,000 strokes aligned inside (the default): 600 on rectangles drawn as
+    // offset strokes, 400 on ellipses as clip layers around double-width strokes.
+    expect(list.items.length).toBe(100 + 200 + 9_900 + 600 + 400 * 3);
 
     // Median of repeated single-property updates: command validation, Yjs
     // transaction, change event, bridge recompile of one node, draw-list sync.

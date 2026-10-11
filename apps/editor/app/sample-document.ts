@@ -137,3 +137,41 @@ export function buildSampleDocument(): FigDocument {
   doc.apply(sampleCommands(doc.pages[0]!), doc.actor("sample", "system"));
   return doc;
 }
+
+/** A 10,000-node document (100 frames of 99 shapes, plus the page) for performance tests: `/?doc=grid10k`. */
+export function buildGridDocument(): FigDocument {
+  const doc = FigDocument.create({ random: seededRandom(10_000), clientId: 1, name: "Grid", pageName: "Grid" });
+  const page = doc.pages[0]!;
+  const commands: Command[] = [{ type: "updateProps", id: page, props: { backgroundColor: rgb(238, 238, 234) } }];
+  for (let f = 0; f < 100; f++) {
+    commands.push({
+      type: "createNode",
+      node: { id: `f${f}`, type: "frame", props: { name: `Frame ${f + 1}`, x: (f % 10) * 600, y: Math.floor(f / 10) * 400, width: 580, height: 380, cornerRadius: 8, fills: [solid(255, 255, 255)] } },
+      parent: page,
+    });
+    for (let i = 0; i < 99; i++) {
+      const shape = i % 3 === 0 ? "ellipse" : "rectangle";
+      commands.push({
+        type: "createNode",
+        node: {
+          id: `n${f}-${i}`,
+          type: shape,
+          props: {
+            x: (i % 10) * 55 + 15,
+            y: Math.floor(i / 10) * 37 + 10,
+            width: 50,
+            height: 30,
+            ...(shape === "rectangle" ? { cornerRadius: 4 } : {}),
+            fills: [i % 7 === 0 ? linear([0, 0], [1, 1], rgb(91, 33, 182), rgb(37, 99, 235)) : solid((f * 7) % 255, (i * 13) % 255, 160)],
+            ...(i % 10 === 0 ? { strokes: [solid(24, 24, 27)], strokeWeight: 2 } : {}),
+          },
+        },
+        parent: `f${f}`,
+      });
+    }
+  }
+  doc.apply(commands, doc.actor("sample", "system"));
+  return doc;
+}
+
+export const GRID_BOUNDS = { x: 0, y: 0, width: 5980, height: 3980 };
