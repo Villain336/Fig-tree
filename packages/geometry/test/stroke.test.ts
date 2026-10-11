@@ -152,15 +152,15 @@ describe("dashPolylines", () => {
         (on, off, offset) => {
           const line = flattenPath(new Path().moveTo(0, 0).lineTo(60, 0).lineTo(60, 40));
           const dashed = dashPolylines(line, [on, off], offset);
-          // Expected on-length by integrating the pattern along the 100-unit path.
+          // Exact on-length of the pattern over arc lengths [0, 100] shifted by the offset:
+          // walk whole periods and clip each "on" interval to the path.
           const period = on + off;
+          const shift = ((offset % period) + period) % period;
           let expected = 0;
-          const steps = 20000;
-          for (let i = 0; i < steps; i++) {
-            const s = ((((i + 0.5) / steps) * 100 + offset) % period + period) % period;
-            if (s < on) expected += 100 / steps;
+          for (let start = -shift; start < 100; start += period) {
+            expected += Math.max(0, Math.min(start + on, 100) - Math.max(start, 0));
           }
-          return Math.abs(lengthOf(dashed) - expected) < 0.05;
+          return Math.abs(lengthOf(dashed) - expected) < 1e-6;
         },
       ),
     );

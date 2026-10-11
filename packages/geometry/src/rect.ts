@@ -52,10 +52,6 @@ export function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
 }
 
-export function rectContainsPoint(r: Rect, x: number, y: number): boolean {
-  return x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY;
-}
-
 export function inflateRect(r: Rect, amount: number): Rect {
   return { minX: r.minX - amount, minY: r.minY - amount, maxX: r.maxX + amount, maxY: r.maxY + amount };
 }

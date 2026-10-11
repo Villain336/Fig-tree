@@ -77,13 +77,3 @@ export function maxScale(m: Mat2D): number {
   const diff = Math.sqrt(((p - r) / 2) ** 2 + q * q);
   return Math.sqrt(mean + diff);
 }
-
-export function isIdentity(m: Mat2D): boolean {
-  return m[0] === 1 && m[1] === 0 && m[2] === 0 && m[3] === 1 && m[4] === 0 && m[5] === 0;
-}
-
-export function matricesEqual(m: Mat2D, n: Mat2D): boolean {
-  return (
-    m[0] === n[0] && m[1] === n[1] && m[2] === n[2] && m[3] === n[3] && m[4] === n[4] && m[5] === n[5]
-  );
-}

@@ -1,6 +1,6 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { intersectRect, isEmptyRect, rectContainsPoint, rectFromXYWH, rectsIntersect, transformPoint, transformRect, unionRect } from "../src";
+import { intersectRect, isEmptyRect, rectFromXYWH, rectsIntersect, transformPoint, transformRect, unionRect } from "../src";
 import { affine, coord } from "./helpers";
 
 const rect = fc.tuple(coord, coord, fc.double({ min: 0, max: 300, noNaN: true }), fc.double({ min: 0, max: 300, noNaN: true }))
@@ -31,7 +31,8 @@ describe("Rect", () => {
         const u = unionRect(a, b);
         const ok = u.minX <= a.minX && u.maxX >= b.maxX && u.minY <= b.minY && u.maxY >= a.maxY;
         const i = intersectRect(a, b);
-        if (rectsIntersect(a, b)) return ok && !isEmptyRect(i) && rectContainsPoint(a, i.minX, i.minY) && rectContainsPoint(b, i.maxX, i.maxY);
+        const inside = (r: typeof a, x: number, y: number): boolean => x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY;
+        if (rectsIntersect(a, b)) return ok && !isEmptyRect(i) && inside(a, i.minX, i.minY) && inside(b, i.maxX, i.maxY);
         return ok && isEmptyRect(i);
       }),
     );

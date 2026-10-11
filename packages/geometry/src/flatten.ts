@@ -12,10 +12,6 @@ export interface Polylines {
   readonly closed: Uint8Array;
 }
 
-export function contourCount(p: Polylines): number {
-  return p.contourStarts.length - 1;
-}
-
 /** Upper bound on subdivisions of a single curve, guarding against absurd zoom levels. */
 const MAX_CURVE_SEGMENTS = 4096;
 

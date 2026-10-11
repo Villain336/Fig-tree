@@ -26,6 +26,15 @@ Scenarios:
 | WebGL2 | Pan + zoom | 7 | 624 ms | 1,300 ms | 1,300 ms | 41 ms | 2.8 MB (zoom re-flattening) |
 | WebGL2 | Sustained pan | 113 | 45 ms | 67 ms | 67 ms | 0.2 ms | **0** |
 
+Across five runs on this machine, the averages ranged as follows:
+
+| Backend | Pan + zoom avg | Sustained pan avg |
+|---|---|---|
+| WebGPU | 349–476 ms | 41–50 ms |
+| WebGL2 | 552–624 ms | 44–47 ms |
+
+Pan + zoom fits only 7–16 frames into 5 s on SwiftShader, so its p95 is close to the slowest frame.
+
 A full-screen frame at the overview (all 11k draws rasterized), WebGPU on SwiftShader, from `timestamp-query`:
 
 | Stage | GPU time |

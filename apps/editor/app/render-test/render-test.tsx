@@ -36,8 +36,13 @@ export function RenderTest() {
       return;
     }
     let renderer: Renderer | null = null;
+    let disposed = false;
     (async () => {
       renderer = await Renderer.create(canvas, { backend: backendFromSearch(window.location.search) });
+      if (disposed) {
+        renderer.destroy();
+        return;
+      }
       renderer.setSize(spec.width, spec.height, 1);
       const scene = new Scene();
       spec.build(scene);
@@ -59,7 +64,10 @@ export function RenderTest() {
       window.__renderTest = { error: String(err) };
       setStatus("error");
     });
-    return () => renderer?.destroy();
+    return () => {
+      disposed = true;
+      renderer?.destroy();
+    };
   }, []);
 
   return (
