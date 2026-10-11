@@ -155,5 +155,33 @@ export const testScenes: Record<string, TestScene> = {
       scene.root.appendChild(scene.createNode({ path: rect(80, 8, 152, 72), fill: { type: "linear-gradient", start: { x: 80, y: 0 }, end: { x: 152, y: 0 }, stops } }));
     },
   },
+  // A stroke aligned outside: a double-width stroke clipped by the complement
+  // of its outline (even-odd: a surrounding rect plus the outline).
+  "outside-stroke": {
+    width: 100,
+    height: 100,
+    build(scene) {
+      const box = rect(30, 30, 70, 70);
+      const outer = rect(0, 0, 100, 100).append(box);
+      const clip = scene.createNode({ path: outer, fillRule: "evenodd", clipsContent: true });
+      clip.appendChild(scene.createNode({ path: box, stroke: { paint: solid(rgba(0, 0, 0, 1)), width: 16 } }));
+      scene.root.appendChild(clip);
+    },
+  },
+  // A rotated clipping frame whose children cover only part of it, with a
+  // center stroke drawn after the clip layer: the clip's stencil must not
+  // leak outside the layer's bounds into the stroke's cover.
+  "clip-stencil-leak": {
+    width: 200,
+    height: 160,
+    build(scene) {
+      const frame = scene.createNode({ transform: multiply(translation(30, 20), rotation(0.1)), path: roundedRectPath(0, 0, 140, 100, 20), fill: solid(rgba(1, 0.93, 0.83, 1)), stroke: { paint: solid(rgba(0.92, 0.35, 0.05, 1)), width: 3 } });
+      const host = scene.createNode({ path: roundedRectPath(0, 0, 140, 100, 20), clipsContent: true });
+      host.appendChild(scene.createNode({ transform: translation(80, 30), path: ellipsePath(50, 50, 50, 50), fill: solid(rgba(0.9, 0.2, 0.1, 1)) }));
+      host.appendChild(scene.createNode({ transform: translation(-20, 70), path: roundedRectPath(0, 0, 120, 60, 30), fill: solid(rgba(0.1, 0.6, 0.3, 1)) }));
+      frame.appendChild(host);
+      scene.root.appendChild(frame);
+    },
+  },
 };
 

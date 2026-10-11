@@ -177,6 +177,30 @@ for (const backend of backends) {
       near(pixel(img, 30, 30), [127.5, 127.5, 255]);
     });
 
+    test("draws outside-aligned strokes only outside the outline", async ({ page }) => {
+      const img = await renderScene(page, "outside-stroke", backend);
+      for (const [x, y] of [[50, 50], [31, 50], [50, 31], [68, 68], [21, 50], [50, 78]] as const) {
+        expect(pixel(img, x, y).slice(0, 3), `white at ${x},${y}`).toEqual([255, 255, 255]);
+      }
+      for (const [x, y] of [[25, 50], [50, 25], [75, 50], [50, 75], [24, 24]] as const) {
+        expect(pixel(img, x, y).slice(0, 3), `stroke at ${x},${y}`).toEqual([0, 0, 0]);
+      }
+    });
+
+    test("keeps a clip layer's stencil inside the layer bounds", async ({ page }) => {
+      const img = await renderScene(page, "clip-stencil-leak", backend);
+      // Inside the frame, above its children: the frame's fill, not its stroke color.
+      const at = (lx: number, ly: number): [number, number] => [
+        Math.floor(30 + lx * Math.cos(0.1) - ly * Math.sin(0.1)),
+        Math.floor(20 + lx * Math.sin(0.1) + ly * Math.cos(0.1)),
+      ];
+      for (const [lx, ly] of [[30, 15], [70, 20], [110, 25], [60, 40]] as const) {
+        const [x, y] = at(lx, ly);
+        const got = pixel(img, x, y);
+        for (const [k, want] of [[0, 255], [1, 237], [2, 212]] as const) expect(Math.abs(got[k]! - want), `fill at ${x},${y}`).toBeLessThanOrEqual(2);
+      }
+    });
+
     test("renders the mixed reference scene", async ({ page }) => {
       const img = await renderScene(page, "mixed", backend);
       expect(img.mode).toBe("direct");

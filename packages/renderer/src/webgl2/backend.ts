@@ -398,17 +398,20 @@ export class WebGL2Backend implements Backend {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, layer.msaaFbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, layer.resolveFbo);
     gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-    gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, parent.msaaFbo);
     gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, layer.resolveTexture);
     const clip = begin.geometry && begin.item.geometry ? this.geometryCache.get(begin.item.geometry) : undefined;
+    // The scissor stays on: the clip path's stencil may extend past the layer's
+    // bounds, and the cover (which resets the stencil) only spans those bounds.
+    // Stencil left outside would leak into later covers.
     if (clip) {
       this.stencil(endIndex, Int32Array.of(clip.range.offset), Int32Array.of(clip.range.size), begin.item.fillRule === "evenodd");
       this.cover(endIndex, 1);
     } else {
       this.cover(endIndex, 1, false);
     }
+    gl.disable(gl.SCISSOR_TEST);
     gl.bindTexture(gl.TEXTURE_2D, null);
   }
 
@@ -441,10 +444,12 @@ export class WebGL2Backend implements Backend {
       const pad = 1; // cover one extra pixel so every MSAA sample the stencil touched is reset
       data.set([m[0], m[1], m[2], m[3], m[4], m[5], e.item.alpha, paint], k);
       const r = rects[i]!;
+      // Layer composites cover exactly their scissor rect (see endLayer).
+      const end = e.kind === ItemKind.EndLayer;
       data.set([
-        Math.max(0, r.minX - pad), Math.max(0, r.minY - pad),
-        Math.min(this.width, r.maxX + pad), Math.min(this.height, r.maxY + pad),
-        e.kind === ItemKind.EndLayer ? 1 : 0, 0, 0, 0,
+        Math.max(0, end ? Math.floor(r.minX) - 1 : r.minX - pad), Math.max(0, end ? Math.floor(r.minY) - 1 : r.minY - pad),
+        Math.min(this.width, end ? Math.ceil(r.maxX) + 1 : r.maxX + pad), Math.min(this.height, end ? Math.ceil(r.maxY) + 1 : r.maxY + pad),
+        end ? 1 : 0, 0, 0, 0,
       ], k + 8);
     });
     gl.bindTexture(gl.TEXTURE_2D, this.entryTexture);
