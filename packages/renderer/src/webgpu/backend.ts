@@ -1,3 +1,4 @@
+/// <reference types="@webgpu/types" />
 import { RangeAllocator, type Range } from "../arena";
 import type { Backend, PixelData } from "../backend";
 import { ItemKind } from "../compile";

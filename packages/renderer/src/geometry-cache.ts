@@ -8,7 +8,7 @@ import {
 import type { SceneNode } from "./scene";
 
 /** Maximum flattening error in device pixels. */
-export const SCREEN_TOLERANCE = 0.2;
+export const SCREEN_TOLERANCE = 0.1;
 
 /**
  * Cached levels are reused while they are at most this many powers of two
@@ -101,7 +101,7 @@ export class GeometrySlot {
   }
 }
 
-/** Smallest level L with 2^L >= scale, so local tolerance 0.2/2^L is <= 0.2 device px. */
+/** Smallest level L with 2^L >= scale, so the local tolerance SCREEN_TOLERANCE/2^L holds in device px. */
 export function requiredLevel(scale: number): number {
   if (!(scale > 0) || !Number.isFinite(scale)) return 0;
   return Math.min(MAX_LEVEL, Math.max(MIN_LEVEL, Math.ceil(Math.log2(scale) - 1e-9)));
