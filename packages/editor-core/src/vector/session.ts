@@ -1166,6 +1166,20 @@ export class VectorEditSession implements EditSession {
         at: () => (this.visibleHandles().some((x) => x.segment === h.segment && x.end === h.end) ? this.handleScreen(h) : null),
       });
     }
+    if (this._subTool === "pen" && this.pen) {
+      // The outgoing handle of the point being drawn, while it shows.
+      wanted.set("canvas.vector.pen.pending", {
+        label: "outgoing handle of the point being drawn",
+        at: () => {
+          const st = this.pen;
+          const h = st?.tool.pendingHandle;
+          const a = st?.tool.activeVertex;
+          if (!st || !h || a === null || a === undefined) return null;
+          const v = st.tool.network.vertices[a]!;
+          return transformPoint(multiply(this.editor.viewport.matrix, st.frame), v.x + h.x, v.y + h.y);
+        },
+      });
+    }
     for (const [id, off] of this.anchorOffs) {
       if (!wanted.has(id)) {
         off();

@@ -1,11 +1,11 @@
 # Architecture
 
-This document covers what Modules 1 to 5 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), the text engine (Module 4), the vector toolkit with boolean groups (Module 5b) and the editor (Module 5a). It also covers how later modules plug in.
+This document covers what Modules 1 to 5 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), the text engine (Module 4), the vector toolkit with boolean groups (Module 5b), the editor (Module 5a) and its vector editing (Module 5c). It also covers how later modules plug in.
 
 ```
 apps/editor ──────────────┐  Next.js: editor UI (/), /bench, /render-test
   │ input, overlay, panels  │
-packages/editor-core       │  tools, selection, gestures, snapping, text editing, clipboard, keymap, anchors
+packages/editor-core       │  tools, selection, gestures, snapping, text and vector editing, clipboard, keymap, anchors
   │ commands              ▼
   │                packages/document   FigDocument (Yjs) ──DocumentChange──► SceneBridge
   │                  │  commands ─► Draft ─► one Y transaction    │   │
@@ -480,7 +480,7 @@ The editor is split in two. `packages/editor-core` holds everything about editin
 ```
 DOM events ─► Canvas (apps/editor) ─► Editor.pointerDown/Move/Up, keyDown, wheel, text input, composition
                                          │
-                       active EditSession (text; 5b: vector) ─► else active Tool (select, shapes, text, hand, image)
+                       active EditSession (text, vector) ─► else active Tool (select, shapes, pen, pencil, text, hand, image)
                                          │
                        History.apply(commands) ─► doc.apply(…, user actor) ─► bridge ─► scene ─► renderer (next frame)
                                          │
@@ -510,28 +510,46 @@ Snapping (`snapping.ts`) is pure math over boxes: the smallest correction aligni
 
 ### 6.4 Tools and edit modes (extension points)
 
-A `Tool` handles pointer and key events and contributes overlay items; the toolbar is generated from `editor.tools` (group, order, icon name, shortcut action). An `EditMode` edits the inside of one node type and returns an `EditSession` that receives input first while it is open. Text editing is the built-in edit mode; module 5b registers its pen tool and vector edit mode the same way, without changing the editor.
+A `Tool` handles pointer and key events and contributes overlay items; the toolbar is generated from `editor.tools` (group, order, icon name, shortcut action). An `EditMode` edits the inside of one node type and returns an `EditSession` that receives input first while it is open (a tool can also open a session it built, `Editor.openSession`). Text editing and vector editing (6.6) are the two edit modes; both register the same way, without special cases in the editor.
 
 ### 6.5 Text editing
 
 `TextSession` keeps an anchor and a focus (UTF-16 indices into the node's content). Caret geometry comes from the text engine through `TextLayoutView` (caret rectangles, the index nearest a point, visual lines and highlight rectangles from grapheme boxes); movement is by grapheme cluster and word (`Intl.Segmenter`), visual line (keeping a goal x), line boundary, paragraph and document. Typing replaces the selection with `deleteText` + `insertText`; with a pending style (Bold with nothing selected) the insert carries an explicit style. Style changes on a selection are `formatText` runs. The app feeds text from a hidden textarea positioned at the caret (`beforeinput`), so every keyboard layout and input method works; IME composition writes the composed text into the document as it changes (collaborators see it, layout reflows) inside one undo group, and a cancelled composition is reverted.
 
-### 6.6 Clipboard
+### 6.6 Vector editing (module 5c)
+
+`packages/editor-core/src/vector/` wires the vector toolkit of `@fig-tree/geometry` (section 1) into the editor. It adds no geometry of its own beyond point snapping.
+
+| Piece | What it does |
+|---|---|
+| `VectorEditMode`, `VectorEditSession` | The edit mode for vectors, rectangles, ellipses, polygons, stars and lines (Enter or a double-click). A sub-tool state machine: **select** (click, Shift-click and marquee select vertices and segments; drag them; arrows nudge; handle drags; double-click a segment to add a point), **pen**, **bend** (also Cmd/Ctrl held: drag a segment to bend it, drag a point to pull out mirrored handles, click a point to toggle smooth and sharp) and **paint bucket** (click a face, holes included, to fill or unfill it). Keys: Delete keeps the shape (the two segments are joined by `deleteVertex`), Shift+Delete leaves a gap, Cmd/Ctrl+J joins (points within 8 px merge, otherwise a segment closes them), Shift+Cmd/Ctrl+J disconnects, Shift+H/V flips points; Escape or Enter ends a pen path, then leaves. The design panel reads and sets the selected points' position, handle mirroring and corner radius through the session. |
+| `edit.ts` | Every edit is one batch: an `editVector` command with the network operations, then the box update that keeps the node's box tight around its network (the network is translated so its bounds start at the origin, and `x`/`y`/`width`/`height` change so nothing moves on the canvas). The shift is rounded like stored positions (1e-6), so repeated edits during a drag do not drift. Editing uses the node's stored box for its matrix, not the laid-out one (layout rounds positions to 1e-4 px). A shape's first edit converts it with `flatten` (same box, paints and transform) in the same batch, so the conversion and the edit are one undo step; until then the mode shows the shape's own points and says that editing them will make it a vector. |
+| Pen | The pen tool (P) creates a vector in the frame under its first click and opens the session with the pen; the pen sub-tool adds to the edited network. `PenTool` runs in a fixed session space; it logs what it does as `editVector` operations (`PenTool.takeOps`), which the session translates into the stored network's space and applies, so the document always holds exactly the pen's network (a property test replays 200 random sessions through `editVector`). Each press to release is one undo step; Backspace reverts the last step (dropping it from redo) and the pen's own history together. Points snap to other points, to the x and y of other points and of nearby layers (with guides), and to the pixel grid; Cmd/Ctrl turns snapping off. A vector left without a segment is taken back when the session ends. |
+| Pencil | The pencil tool (Shift+P) records the stroke and fits it with `freehandToNetwork` within 1.5 screen pixels (corners kept); a stroke ending within 10 px of its start is closed and filled. One `createNode` per stroke. |
+| Actions | Union, subtract, intersect and exclude make live boolean groups (`group` with `booleanOperation`), from the toolbar menu, the context menu or Shift+Alt+U/S/I/E; with one boolean group selected they change its operation (the layers panel does too). Flatten (Cmd/Ctrl+E) and outline stroke (Shift+Cmd/Ctrl+O) are the document's commands; text becomes its glyph outlines first, through the bridge (`textToVectorNetwork`), which has the fonts. Copy as SVG walks the bridge's scene, so the SVG is what the canvas draws (boolean results, region fill rules, strokes, gradients, text outlines). |
+| Resizing | A resize of a vector (handles, the panel, or a group around it) scales its network with its box. |
+| Overlay and anchors | Segments, selected and hovered segments, vertices, visible handles (those at selected points), the pen's rubber band and handles, the bucket's face, snap guides. Screen geometry is cached per network and view, so hovering a large network does not re-flatten it. Vertices, segment midpoints and visible handles are registered as anchors (`canvas.vector.vertex.<i>`, `canvas.vector.segment.<i>`, `canvas.vector.handle.<segment>.<start|end>`, `canvas.vector.pen.pending`) while the mode is open. |
+
+Hit-testing is in screen space: handles within 6 px, then vertices within 6 px, then segments within 5 px (closest point on each cubic, after a bounding-box test). Selections are vertex and segment indices; operations that renumber them (deleting, merging) clear or set the selection, and indices that an undo or a collaborator removed are ignored.
+
+Tests: `packages/editor-core/test/vector-*.test.ts` drive the pen, the pencil, every gesture and action of the mode with synthetic input on real documents, checking the commands (editVector batches), the network, positions on the canvas and that each gesture is one undo step; `e2e/vector-editing.spec.ts` does the same with real mouse and keyboard input on both backends and checks pixels and goldens; `e2e/editing-bench.spec.ts` measures the pen and point dragging on a 10,000-node document (`benchmarks.md`).
+
+### 6.7 Clipboard
 
 Copy serializes the selected subtrees (stored properties, text with runs, world placement of every box, assets with their bytes up to 8 MB) as JSON inside an HTML `data-` attribute, next to plain text. Paste prefers our format, then SVG (our own XML and path-data parsers produce a frame of shapes, groups and vector networks), then image files (content-addressed assets and image nodes), then plain text. Paste places nodes where they were copied if that spot is visible (in the target frame when one is selected), otherwise in the middle of the view; foreign asset bytes are verified against their hash.
 
-### 6.7 UI anchors
+### 6.8 UI anchors
 
 `AnchorRegistry` maps stable ids (`toolbar.tool.rectangle`, `design.position.x`, `layers.row.<id>.lock`, `canvas.handle.resize.se`, …) to a kind, a label and a function returning the control's client rectangle. React controls register through `useAnchor`; canvas handles resolve from the editor's current state. Sprout (module 11) will point at controls through it; an e2e test checks that every interactive element in many UI states has a unique, resolvable anchor.
 
-### 6.8 The app
+### 6.9 The app
 
-`apps/editor/app/editor.tsx` wires the DOM: one GPU canvas, an input layer with the overlay canvas and the hidden textarea, window keyboard and clipboard listeners (fields in panels keep their keys), file drops and the image file picker. Frames render on the animation frame after a view or document change; panels subscribe with `useEditorTick` and re-render at most once per frame. Panels read document values directly and write through editor-core actions (`setGeometry`, `setProps`, text style commands), so the same edits are available to tests and agents. Input-to-frame latency is recorded per frame (`__figtree.takeSamples()`).
+`apps/editor/app/editor.tsx` wires the DOM: one GPU canvas, an input layer with the overlay canvas and the hidden textarea, window keyboard and clipboard listeners (fields in panels keep their keys), file drops and the image file picker. Frames render on the animation frame after a view or document change; panels subscribe with `useEditorTick` and re-render at most once per frame. Panels read document values directly and write through editor-core actions (`setGeometry`, `setProps`, text style commands, the vector session's point setters), so the same edits are available to tests and agents. While points are edited the toolbar shows the vector sub-tools and Done, and the design panel shows the points' fields. Input-to-frame latency is recorded per frame, with the overlay's CPU time separately (`__figtree.takeSamples()`).
 
 ## 7. How later modules plug in
 
 - **Text styles (module 7):** named style references resolved into the same text properties the typography panel edits.
-- **Vector editing UI** (pen, pencil, vector edit mode, boolean and flatten actions): drives `PenTool` and the network operations in `@fig-tree/geometry`, and turns their results into `editVector` (or `updateProps`), `group` with a boolean operation, `flatten` and `outlineStroke` commands.
+- **More vector tools** (shape builder, variable-width strokes, per-vertex caps drawn): a sub-tool of `VectorEditSession` or a `Tool`, issuing `editVector` operations through `commitVectorOps` so the box stays tight and each gesture is one undo step.
 - **Effects** (blur, shadows) and **shader fills:** new composite inputs that sample from layer textures.
 - **Code view and export:** walk the document, not the scene.
 - **Multiplayer:** a provider relays Yjs updates (the convergence tests already simulate one); cursors and selections go in Yjs awareness and render as an overlay scene, so they never invalidate document tiles.

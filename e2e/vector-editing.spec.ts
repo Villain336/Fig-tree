@@ -288,6 +288,10 @@ for (const backend of backends) {
     near(await worldPixel(page, img, 250, 404), [0, 0, 0], "outlined stroke filled black");
     near(await worldPixel(page, img, 250, 410), BG, "outside the 12 px band");
 
+    await page.evaluate(() => window.__figtree!.editor.select([]));
+    img = await frame(page);
+    expectGolden(`vector-booleans-edit.${backend}`, crop(img, 0, 0, 700, 500));
+
     // Undo everything, redo everything.
     const final = await snapshot(page);
     await undoAll(page);
@@ -365,6 +369,9 @@ for (const backend of backends) {
     const bounds = await page.evaluate((i) => window.__figtree!.editor.geometry.bounds(i), pasted!);
     const orig = await page.evaluate((i) => window.__figtree!.editor.geometry.bounds(i), pencil!);
     expect(Math.abs(bounds.width - orig.width)).toBeLessThan(3);
+    await page.evaluate(() => window.__figtree!.editor.select([]));
+    img = await frame(page);
+    expectGolden(`vector-pencil-svg.${backend}`, crop(img, 0, 0, 700, 500));
 
     // Undo everything, redo everything.
     const final = await snapshot(page);

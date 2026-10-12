@@ -85,7 +85,7 @@ export function DesignPanel({ fonts }: { fonts: FontRegistry | null }) {
 }
 
 const MIRRORING: readonly (readonly [HandleMirroring, string])[] = [
-  ["none", "No mirroring"],
+  ["none", "Independent"],
   ["angle", "Mirror angle"],
   ["angle-length", "Mirror angle and length"],
 ];
@@ -108,15 +108,18 @@ function VectorSection() {
       <div className="grid grid-cols-2 gap-1.5">
         <NumberField anchor="design.vector.x" label="Point X" icon={<span className="text-[10px]">X</span>} value={pos ? pos.x : null} disabled={!pos} onCommit={(f) => pos && s.setPointPosition("x", f(pos.x))} testId="vector-x" />
         <NumberField anchor="design.vector.y" label="Point Y" icon={<span className="text-[10px]">Y</span>} value={pos ? pos.y : null} disabled={!pos} onCommit={(f) => pos && s.setPointPosition("y", f(pos.y))} testId="vector-y" />
-        <SelectField
-          anchor="design.vector.mirroring"
-          label="Handle mirroring"
-          value={mirroring === "mixed" ? MIXED : (mirroring ?? "none")}
-          options={MIRRORING}
-          disabled={mirroring === null}
-          onChange={(v) => s.setMirroring(v)}
-          testId="vector-mirroring"
-        />
+        <div className="col-span-2 flex items-center gap-1.5">
+          <span className="w-16 shrink-0 text-[11px] text-stone-500">Handles</span>
+          <SelectField
+            anchor="design.vector.mirroring"
+            label="Handle mirroring"
+            value={mirroring === "mixed" ? MIXED : (mirroring ?? "none")}
+            options={MIRRORING}
+            disabled={mirroring === null}
+            onChange={(v) => s.setMirroring(v)}
+            testId="vector-mirroring"
+          />
+        </div>
         <NumberField anchor="design.vector.radius" label="Point corner radius" icon={<Scan size={12} aria-hidden />} value={radius === null ? null : radius === "mixed" ? MIXED : radius} min={0} disabled={radius === null} onCommit={(f) => s.setCornerRadius(f)} testId="vector-radius" />
       </div>
       <div className="mt-2 flex items-center gap-0.5">

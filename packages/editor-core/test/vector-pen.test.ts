@@ -174,6 +174,9 @@ describe("pen tool", () => {
     o = buildOverlay(s.editor);
     expect(o.filter((x) => x.kind === "line" && x.role === "handle").length).toBeGreaterThanOrEqual(2);
     s.editor.pointerUp({ x: 280, y: 180 });
+    // The pending outgoing handle is an anchor (for Sprout), at the end of the drag.
+    buildOverlay(s.editor);
+    expect(s.editor.anchors.rect("canvas.vector.pen.pending")).toEqual({ x: 275, y: 175, width: 10, height: 10 });
     // The hover over the first point shows the close cursor.
     s.editor.pointerMove({ x: 101, y: 100 });
     expect(s.editor.cursor).toBe("pen-close");

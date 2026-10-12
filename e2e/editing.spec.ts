@@ -389,7 +389,35 @@ test("registers every interactive control with a unique anchor and a rect", asyn
   total += await check("css tab");
   await page.keyboard.press("Control+/");
   total += await check("shortcuts sheet");
-  expect(total).toBeGreaterThan(200);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("tab-design").click();
+  // Vector edit mode: its toolbar, the point fields of the design panel and the canvas points.
+  await page.evaluate(() => window.__figtree!.editor.select(["star"]));
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("vector-toolbar")).toBeVisible();
+  total += await check("vector edit mode");
+  await expect.poll(() => page.evaluate(() => window.__figtree!.anchors().filter((a) => a.id.startsWith("canvas.vector.vertex.") && a.rect).length)).toBe(10);
+  const v0 = await page.evaluate(() => window.__figtree!.anchors().find((a) => a.id === "canvas.vector.vertex.0")!.rect!);
+  await page.mouse.click(v0.x + v0.width / 2, v0.y + v0.height / 2);
+  await expect(page.getByTestId("vector-count")).toHaveText("1 point selected");
+  total += await check("vector point selected");
+  expect(await page.evaluate(() => window.__figtree!.anchors().filter((a) => a.id.startsWith("canvas.vector.segment.") && a.rect).length)).toBe(10);
+  await page.getByTestId("vector-tool-bucket").click();
+  total += await check("vector paint bucket");
+  await page.getByTestId("vector-done").click();
+  await expect(page.getByTestId("vector-toolbar")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__figtree!.anchors().filter((a) => a.id.startsWith("canvas.vector.")).length)).toBe(0);
+  // The boolean menu, and the operation menu of a boolean group in the layers panel.
+  await page.evaluate(() => window.__figtree!.editor.select(["hexagon", "donut"]));
+  await page.getByTestId("boolean-menu").click();
+  total += await check("boolean menu");
+  await page.locator('[data-anchor="menu.boolean.exclude"]').click();
+  const group = (await page.evaluate(() => window.__figtree!.selection()))[0]!;
+  await page.getByTestId(`layer-boolean-${group}`).click();
+  total += await check("boolean operation menu");
+  await page.getByTestId("boolean-op-union").click();
+  expect(await page.evaluate((g) => window.__figtree!.doc.get(g, "booleanOperation"), group)).toBe("union");
+  expect(total).toBeGreaterThan(250);
 });
 
 test("zooms and pans with keys, the wheel and the space bar; shows the pixel grid", async ({ page }) => {
@@ -633,4 +661,31 @@ test("documentation screenshots", async ({ page }) => {
   await page.getByTestId("design.fills.0.swatch").click();
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(dir, "editor-gradient.png") });
+  await page.keyboard.press("Escape");
+  // Vector edit mode on a pen-drawn shape: points, a selected smooth point with its handles, the point fields.
+  // Right of the sample's content, so the new vector is on the page (not clipped by a frame).
+  await page.evaluate(() => window.__figtree!.setView(2, -2536, 14));
+  await page.keyboard.press("p");
+  const pts: [number, number, number?, number?][] = [[1420, 140], [1560, 110, 1620, 140], [1590, 280], [1450, 290, 1420, 250]];
+  for (const [x, y, dx, dy] of pts) {
+    const p = await page.evaluate(([wx, wy]) => window.__figtree!.toCanvas(wx!, wy!), [x, y]);
+    const box = (await page.getByTestId("canvas").boundingBox())!;
+    await page.mouse.move(box.x + p.x, box.y + p.y);
+    await page.mouse.down();
+    if (dx !== undefined) {
+      const q = await page.evaluate(([wx, wy]) => window.__figtree!.toCanvas(wx!, wy!), [dx, dy!]);
+      await page.mouse.move(box.x + q.x, box.y + q.y, { steps: 6 });
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(450);
+  }
+  const first = await page.evaluate(([wx, wy]) => window.__figtree!.toCanvas(wx!, wy!), [1420, 140]);
+  const cb = (await page.getByTestId("canvas").boundingBox())!;
+  await page.mouse.click(cb.x + first.x, cb.y + first.y);
+  await page.keyboard.press("v");
+  const smooth = await page.evaluate(() => window.__figtree!.anchors().find((a) => a.id === "canvas.vector.vertex.1")!.rect!);
+  await page.mouse.click(smooth.x + smooth.width / 2, smooth.y + smooth.height / 2);
+  await page.mouse.move(cb.x + first.x + 120, cb.y + first.y + 60);
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: join(dir, "editor-vector-edit.png") });
 });
