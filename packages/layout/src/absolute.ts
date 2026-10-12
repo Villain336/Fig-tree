@@ -62,11 +62,19 @@ function selfAlignment(v: string): { value: string; unsafe: boolean } {
   return { value: value === "first baseline" ? "baseline" : value, unsafe: overflow === "unsafe" };
 }
 
-/** Where a value aligns a box in an axis: 0 start, 0.5 center, 1 end, or null for `normal`/`stretch` (CSS 2 rules). */
+/** `normal` and `stretch` stretch an auto-sized box between two insets. */
+function stretchy(value: string): boolean {
+  return value === "normal" || value === "stretch";
+}
+
+/**
+ * Where a value aligns a box in an axis: 0 start, 0.5 center, 1 end, or
+ * null for `normal` (CSS 2 rules). `stretch` aligns a box that could not be
+ * stretched (a definite size) like `start`.
+ */
 function alignFraction(value: string, horizontal: boolean): number | null {
   switch (value) {
     case "normal":
-    case "stretch":
       return null;
     case "center":
       return 0.5;
@@ -140,7 +148,7 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
   let height = resolveLength(s, s.height, cbH, pb.v);
   const stretchH = s.height === "auto" && top !== undefined && bottom !== undefined;
   // Stretch into the inset-modified containing block (its size floored at 0 before margins, as Chromium does).
-  if (height === undefined && stretchH && !node.replaced && alignFraction(alignSelf.value, false) === null) height = Math.max(0, cbH - top - bottom) - mt - mb;
+  if (height === undefined && stretchH && !node.replaced && stretchy(alignSelf.value)) height = Math.max(0, cbH - top - bottom) - mt - mb;
   if (height !== undefined) height = Math.max(pb.v, clamp(height, minH, maxH));
 
   // Horizontal: the inset-modified containing block.
@@ -151,7 +159,7 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
     if (s.width === "min-content") width = intrinsic(node).min + pb.h;
     else if (s.width === "max-content") width = intrinsic(node).max + pb.h;
     else if (ratio && height !== undefined && !(stretchH && left !== undefined && right !== undefined)) width = ratioWidthFromHeight(ratio, height, pb.h, pb.v);
-    else if (s.width === "auto" && left !== undefined && right !== undefined && !node.replaced && alignFraction(justify.value, true) === null) width = Math.max(0, availW) - ml - mr;
+    else if (s.width === "auto" && left !== undefined && right !== undefined && !node.replaced && stretchy(justify.value)) width = Math.max(0, availW) - ml - mr;
     else if (node.replaced && s.width === "auto") width = replacedWidth(node, pb.h);
     else width = fitContentWidth(node, availW - ml - mr, pb.h);
   }

@@ -30,6 +30,7 @@ interface GridItem {
   width?: number;
   rowOuter?: number;
   rowMinContribution?: number;
+  rowMinIsContent?: boolean;
   firstBaseline?: number | undefined;
   /** Distance from the margin-box top to the first baseline (synthesized from the border box when none). */
   ascent?: number;
@@ -212,7 +213,8 @@ function columnMinContribution(it: GridItem, g: Grid): number {
   const pb = pbOf(cs, undefined);
   const m = marginOf(cs, undefined);
   const preferred = resolveLength(cs, cs.width, undefined, pb.h);
-  if (preferred !== undefined || cs.width === "min-content" || cs.width === "max-content" || cs.width === "fit-content") return inlineContribution(it.node, "min");
+  // A preferred size that depends on the containing block (auto, percentages, fit-content) uses the minimum size instead.
+  if (preferred !== undefined || cs.width === "min-content" || cs.width === "max-content") return inlineContribution(it.node, "min");
   let min = 0;
   if (cs.minWidth === "auto") {
     if (!isScrollContainer(cs.overflowX) && autoMinApplies(g.cols, it.c0, it.c1)) min = contentBasedMinWidth(it, g, pb.h, pb.v, m.left + m.right);
@@ -249,12 +251,17 @@ function widthInArea(it: GridItem, container: Style, areaW: number, areaH: numbe
   if (w === undefined) {
     const j = resolvedSelf(cs, container, "justify");
     const ratio = aspectRatioOf(it.node);
-    const h = ratio ? resolveLength(cs, cs.height, areaH, pb.v) : undefined;
+    let h = ratio ? resolveLength(cs, cs.height, areaH, pb.v) : undefined;
+    // The ratio transfers the used (min/max-clamped) height.
+    if (h !== undefined) h = clamp(h, resolveLength(cs, cs.minHeight, areaH, pb.v) ?? 0, resolveLength(cs, cs.maxHeight, areaH, pb.v) ?? INF);
+    const noAutoMargins = !isAuto(cs.margin.left) && !isAuto(cs.margin.right);
     if (cs.width === "min-content") w = intrinsic(it.node).min + pb.h;
     else if (cs.width === "max-content") w = intrinsic(it.node).max + pb.h;
     else if (cs.width === "fit-content") w = fitContentWidth(it.node, avail, pb.h);
+    // An explicit stretch wins over the aspect ratio.
+    else if (j.value === "stretch" && noAutoMargins) w = avail;
     else if (ratio && h !== undefined) w = ratioWidthFromHeight(ratio, h, pb.h, pb.v);
-    else if (stretches(it.node, j.value, "justify") && !isAuto(cs.margin.left) && !isAuto(cs.margin.right)) w = avail;
+    else if (stretches(it.node, j.value, "justify") && noAutoMargins) w = avail;
     else if (it.node.replaced) w = intrinsic(it.node).max + pb.h;
     else w = fitContentWidth(it.node, avail, pb.h);
   }
@@ -284,7 +291,9 @@ function rowSizingItem(it: GridItem, g: Grid, container: Style, colPos: readonly
     const pb = pbOf(cs, areaW);
     const preferred = resolveLength(cs, cs.height, undefined, pb.v);
     if (preferred !== undefined) {
+      // The minimum contribution is the min-content contribution (baseline shim included).
       it.rowMinContribution = it.rowOuter;
+      it.rowMinIsContent = true;
       return;
     }
     let min = resolveLength(cs, cs.minHeight, undefined, pb.v) ?? 0;
@@ -298,6 +307,8 @@ function rowSizingItem(it: GridItem, g: Grid, container: Style, colPos: readonly
       const area = fixedMaxArea(g.rows, it.r0, it.r1, g.rowGap);
       if (area !== INF) v = Math.min(v, Math.max(0, area - m.top - m.bottom));
       min = v;
+      // A content-based minimum is a content contribution: it carries the baseline shim.
+      it.rowMinIsContent = true;
     }
     it.rowMinContribution = Math.max(pb.v, min) + m.top + m.bottom;
   };
@@ -308,25 +319,30 @@ function rowSizingItem(it: GridItem, g: Grid, container: Style, colPos: readonly
     span: it.r1 - it.r0,
     minContent: () => (measure(), it.rowOuter! + shim()),
     maxContent: () => (measure(), it.rowOuter! + shim()),
-    minContribution: () => (measure(), it.rowMinContribution! + shim()),
+    // Only a minimum contribution that comes from content gets the shim (as in Chromium).
+    minContribution: () => (measure(), it.rowMinContribution! + (it.rowMinIsContent ? shim() : 0)),
   };
 }
 
 /**
  * Items that take part in first-baseline alignment in the block axis: a
  * baseline self-alignment, no auto block margins, and a baseline that does
- * not depend on the row: a content baseline, or one synthesized from a box
- * whose height is not a percentage (Box Alignment 3 §9.3). Items spanning
+ * not depend on the row's intrinsic size: a content baseline, or one
+ * synthesized from a box whose height is not a percentage or whose rows are
+ * all fixed-size (Box Alignment 3 §9.3). Items spanning
  * several rows join the group of their first row (as in Chromium). Call
  * after measuring the item.
  */
-function baselineParticipant(it: GridItem, container: Style): boolean {
+function baselineParticipant(it: GridItem, container: Style, rows: readonly Track[]): boolean {
   const cs = it.style;
   if (resolvedSelf(cs, container, "align").value !== "baseline") return false;
   if (isAuto(cs.margin.top) || isAuto(cs.margin.bottom)) return false;
-  // A baseline synthesized from a box whose height depends on the row would be circular.
+  if (it.firstBaseline !== undefined) return true;
+  // A baseline synthesized from a percentage height would depend on the row's size: circular unless the rows are fixed.
   const pct = (v: unknown): boolean => typeof v === "object" && v !== null && "pct" in v;
-  return it.firstBaseline !== undefined || (!pct(cs.height) && !pct(cs.minHeight) && !pct(cs.maxHeight));
+  if (!pct(cs.height) && !pct(cs.minHeight) && !pct(cs.maxHeight)) return true;
+  for (let r = it.r0; r < it.r1; r++) if (rows[r]!.min.kind !== "fixed" || rows[r]!.max.kind !== "fixed") return false;
+  return true;
 }
 
 function contentHeight(it: GridItem, width: number, areaW: number): number {
@@ -418,7 +434,7 @@ export function layoutGrid(node: LayoutNode, input: ContentInput): ContentResult
   g.items.forEach((it, k) => {
     if (resolvedSelf(it.style, s, "align").value !== "baseline") return;
     rowItems[k]!.maxContent();
-    if (!baselineParticipant(it, s)) return;
+    if (!baselineParticipant(it, s, g.rows)) return;
     let grp = groups.get(it.r0);
     if (!grp) groups.set(it.r0, (grp = { ascent: -INF }));
     grp.ascent = Math.max(grp.ascent, it.ascent!);

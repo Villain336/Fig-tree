@@ -71,7 +71,6 @@ const isMaxContentMax = (f: SizingFn): boolean => f.kind === "max-content" || f.
 
 /** Sizes the tracks in place (base sizes are the used sizes). */
 export function sizeTracks(tracks: Track[], items: readonly SizingItem[], o: SizingOptions): void {
-  const underConstraint = o.available.kind === "min-content" || o.available.kind === "max-content";
   const live = tracks.filter((t) => !t.collapsed);
   const gaps = o.gap * Math.max(0, live.length - 1);
 
@@ -93,7 +92,6 @@ export function sizeTracks(tracks: Track[], items: readonly SizingItem[], o: Siz
     }
     return sum;
   };
-  const limitedMin = (it: SizingItem): number => Math.max(Math.min(it.minContent(), fixedMaxCap(it)), it.minContribution());
   const limitedMax = (it: SizingItem): number => Math.max(Math.min(it.maxContent(), fixedMaxCap(it)), it.minContribution());
 
   const spansFlex = (it: SizingItem): boolean => {
@@ -108,7 +106,9 @@ export function sizeTracks(tracks: Track[], items: readonly SizingItem[], o: Siz
     if (t.collapsed || isFlex(t)) continue;
     if (t.min.kind === "min-content") t.base = Math.max(t.base, it.minContent());
     else if (t.min.kind === "max-content") t.base = Math.max(t.base, it.maxContent());
-    else if (t.min.kind === "auto") t.base = Math.max(t.base, underConstraint ? limitedMin(it) : it.minContribution());
+    // Auto minimums: the limited max-content contribution under a max-content constraint, otherwise (as in
+    // Chromium, also under a min-content constraint) the minimum contribution.
+    else if (t.min.kind === "auto") t.base = Math.max(t.base, o.available.kind === "max-content" ? limitedMax(it) : it.minContribution());
     if (t.max.kind === "min-content") t.limit = max0(t.limit, it.minContent());
     else if (isMaxContentMax(t.max)) {
       let v = it.maxContent();
@@ -128,24 +128,17 @@ export function sizeTracks(tracks: Track[], items: readonly SizingItem[], o: Siz
     i = j;
   }
 
-  // §11.5 step 4: items crossing flexible tracks, space going to flexible tracks only. The spec handles
-  // them all together; Chromium groups them by span like step 3, and so do we.
-  const crossing = items.filter((it) => spansFlex(it)).sort((a, b) => a.span - b.span);
-  for (let i = 0; i < crossing.length; ) {
-    let j = i;
-    while (j < crossing.length && crossing[j]!.span === crossing[i]!.span) j++;
-    accommodate(crossing.slice(i, j), isFlex, true);
-    i = j;
-  }
+  // §11.5 step 4: items crossing flexible tracks (all spans together), space going to flexible tracks only.
+  const crossing = items.filter((it) => spansFlex(it));
+  if (crossing.length) accommodate(crossing, isFlex, true);
 
   // §11.5 step 5.
   for (const t of tracks) if (t.limit === INF) t.limit = t.base;
 
   /** The six sub-steps of §11.5 step 3 for one group of items, restricted to `eligible` tracks. */
   function accommodate(group: readonly SizingItem[], eligible: (t: Track) => boolean, byFlex: boolean): void {
-    // 1. Intrinsic minimums. (For items crossing flexible tracks Chromium keeps the minimum contribution
-    // under a min-/max-content constraint too, instead of the limited min-content contribution.)
-    distribute(group, (t) => eligible(t) && isIntrinsic(t.min), true, underConstraint && !byFlex ? limitedMin : (it) => it.minContribution(), "min", byFlex);
+    // 1. Intrinsic minimums (minimum contributions; see step 2 for constraints).
+    distribute(group, (t) => eligible(t) && isIntrinsic(t.min), true, (it) => it.minContribution(), "min", byFlex);
     // 2. Content-based minimums.
     distribute(group, (t) => eligible(t) && (t.min.kind === "min-content" || t.min.kind === "max-content"), true, (it) => it.minContent(), "min", byFlex);
     // 3. Max-content minimums.

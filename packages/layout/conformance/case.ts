@@ -22,7 +22,7 @@ export interface CaseNode {
   readonly replaced?: readonly [number, number];
 }
 
-export type Area = "flex" | "grid" | "box" | "position" | "block";
+export type Area = "flex" | "grid" | "box" | "position" | "block" | "document";
 
 export interface LayoutCase {
   readonly name: string;

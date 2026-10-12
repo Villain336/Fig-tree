@@ -206,7 +206,8 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
       else if (cs.width === "fit-content") w = fitContentWidth(it.node, cw - it.marginLeft - it.marginRight, it.pbH);
       else if (stretchTo !== undefined && it.stretches) w = stretchTo - it.marginLeft - it.marginRight;
       else {
-        const h = it.ratio ? definiteMainProp(it) : undefined;
+        let h = it.ratio ? definiteMainProp(it) : undefined;
+        if (h !== undefined) h = clamp(h, resolveLength(cs, cs.minHeight, ph, it.pbV) ?? 0, resolveLength(cs, cs.maxHeight, ph, it.pbV) ?? INF);
         if (it.ratio && h !== undefined) w = ratioWidthFromHeight(it.ratio, h, it.pbH, it.pbV);
         else w = fitContentWidth(it.node, available - it.marginLeft - it.marginRight, it.pbH);
       }
@@ -306,6 +307,12 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
   /** The automatic minimum size of a flex item in the main axis (§4.5). */
   function automaticMinimum(it: Item, maxMain: number): number {
     let content = row ? intrinsic(it.node).min + it.pbH : columnContentHeight(it, columnWidth(it));
+    // With a preferred aspect ratio and a definite cross size, the min-content size is transferred through the ratio.
+    const crossForRatio = it.ratio && !it.node.replaced ? (row ? definiteCross(it) : columnWidth(it)) : undefined;
+    if (crossForRatio !== undefined) {
+      const transferred = row ? ratioWidthFromHeight(it.ratio!, crossForRatio, it.pbH, it.pbV) : ratioHeightFromWidth(it.ratio!, crossForRatio, it.pbH, it.pbV);
+      content = Math.max(content, transferred);
+    }
     if (it.ratio) {
       // Clamp by definite min/max cross sizes converted through the ratio.
       const cs = it.style;

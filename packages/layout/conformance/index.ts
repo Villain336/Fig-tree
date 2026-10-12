@@ -6,7 +6,7 @@ import { randomFlexCases, randomGridCases } from "./random";
 
 /** Every conformance case, in a stable order. */
 export function allCases(): LayoutCase[] {
-  const cases = [...flexCases, ...randomFlexCases(200), ...randomFlexCases(200, 5000), ...gridCases, ...randomGridCases(250), ...randomGridCases(250, 7000), ...positionCases];
+  const cases = [...flexCases, ...randomFlexCases(200), ...randomFlexCases(200, 5000), ...gridCases, ...randomGridCases(250), ...randomGridCases(250, 7000), ...randomGridCases(250, 9000), ...positionCases];
   const seen = new Set<string>();
   for (const c of cases) {
     if (seen.has(c.name)) throw new Error(`duplicate conformance case ${c.name}`);

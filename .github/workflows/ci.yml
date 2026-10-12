@@ -40,6 +40,11 @@ jobs:
       - name: Pixel-quality and editor tests (WebGPU + WebGL2)
         run: npx playwright test --project=render
 
+      # Re-renders every layout conformance case in Chromium: the engine must match it, and the stored
+      # fixtures (which `npm test` compares against) must still be what this Chromium renders.
+      - name: Layout conformance against live Chromium
+        run: npm run test:conformance
+
       - name: Benchmarks (pan/zoom, 10k-node document updates; both backends)
         run: npx playwright test --project=bench
 
