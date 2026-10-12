@@ -1,7 +1,7 @@
 import { fitContentWidth, inlineBounds, intrinsic, layout, space } from "./compute";
 import { LayoutNode, type Rect } from "./node";
 import { INF, aspectRatioOf, clamp, isAuto, pbOf, ratioHeightFromWidth, ratioWidthFromHeight, resolveLength } from "./sizing";
-import { resolveLP, resolveLPOrZero, type LengthPercentage } from "./style";
+import { resolveLP, resolveLPOrZero, splitAlignment, type LengthPercentage } from "./style";
 
 /**
  * Absolutely positioned boxes (CSS Positioned Layout 3, CSS 2 §10.3.7 and
@@ -60,6 +60,49 @@ function inset(v: LengthPercentage | "auto", basis: number): number | undefined 
   return v === "auto" ? undefined : resolveLP(v, basis);
 }
 
+/** A box's own `justify-self`/`align-self` for positioning (`auto` is `normal` for absolutely positioned boxes). */
+function selfAlignment(v: string): { value: string; unsafe: boolean } {
+  const { overflow, value } = splitAlignment(v === "auto" ? "normal" : v);
+  return { value: value === "first baseline" ? "baseline" : value, unsafe: overflow === "unsafe" };
+}
+
+/** Where a value aligns a box in an axis: 0 start, 0.5 center, 1 end, or null for `normal`/`stretch` (CSS 2 rules). */
+function alignFraction(value: string, horizontal: boolean): number | null {
+  switch (value) {
+    case "normal":
+    case "stretch":
+      return null;
+    case "center":
+      return 0.5;
+    case "end":
+    case "self-end":
+    case "flex-end":
+    case "last baseline":
+      return 1;
+    case "right":
+      return horizontal ? 1 : 0;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Position of a margin box of `outer` size between insets `a` and `b` of a
+ * containing block `size` long (CSS Positioned Layout 3 §4): `normal` keeps
+ * CSS 2's start alignment; other values align in the inset-modified
+ * containing block and, unless `unsafe`, a box that overflows it is shifted
+ * back inside the containing block (to its start when it cannot fit).
+ */
+function alignInInsets(a: number, b: number, size: number, outer: number, align: { value: string; unsafe: boolean }, horizontal: boolean): number {
+  const frac = alignFraction(align.value, horizontal) ?? 0;
+  const imcb = size - a - b;
+  let p = a + frac * (imcb - outer);
+  if (alignFraction(align.value, horizontal) !== null && !align.unsafe && outer > imcb) {
+    p = outer > size ? 0 : Math.max(0, Math.min(p, size - outer));
+  }
+  return p;
+}
+
 /**
  * Sizes and places one absolutely positioned box in the containing block
  * `cb` (a rectangle in the coordinates the static position is given in).
@@ -87,13 +130,16 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
   const sx = staticX - cb.x;
   const sy = staticY - cb.y;
   const ratio = aspectRatioOf(node);
+  const justify = selfAlignment(s.justifySelf);
+  const alignSelf = selfAlignment(s.alignSelf);
 
   // Vertical size first when it is definite (it may determine the width through the ratio).
   const minH = resolveLength(s, s.minHeight, cbH, pb.v) ?? 0;
   const maxH = resolveLength(s, s.maxHeight, cbH, pb.v) ?? INF;
   let height = resolveLength(s, s.height, cbH, pb.v);
   const stretchH = s.height === "auto" && top !== undefined && bottom !== undefined;
-  if (height === undefined && stretchH && !node.replaced) height = cbH - top - bottom - mt - mb;
+  // Stretch into the inset-modified containing block (its size floored at 0 before margins, as Chromium does).
+  if (height === undefined && stretchH && !node.replaced && alignFraction(alignSelf.value, false) === null) height = Math.max(0, cbH - top - bottom) - mt - mb;
   if (height !== undefined) height = Math.max(pb.v, clamp(height, minH, maxH));
 
   // Horizontal: the inset-modified containing block.
@@ -104,7 +150,7 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
     if (s.width === "min-content") width = intrinsic(node).min + pb.h;
     else if (s.width === "max-content") width = intrinsic(node).max + pb.h;
     else if (ratio && height !== undefined && !(stretchH && left !== undefined && right !== undefined)) width = ratioWidthFromHeight(ratio, height, pb.h, pb.v);
-    else if (s.width === "auto" && left !== undefined && right !== undefined && !node.replaced) width = availW - ml - mr;
+    else if (s.width === "auto" && left !== undefined && right !== undefined && !node.replaced && alignFraction(justify.value, true) === null) width = Math.max(0, availW) - ml - mr;
     else if (node.replaced && s.width === "auto") width = replacedWidth(node, pb.h);
     else width = fitContentWidth(node, availW - ml - mr, pb.h);
   }
@@ -115,7 +161,7 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
   if (left === undefined && right === undefined) x = sx + node.staticAlignX * (node.staticW - (width + ml + mr)) + ml;
   else if (left === undefined) x = cbW - right! - mr - width;
   else if (right === undefined) x = left + ml;
-  else {
+  else if (autoL || autoR) {
     const free = cbW - left - right - width - ml - mr;
     if (autoL && autoR) {
       if (free >= 0) ml = mr = free / 2;
@@ -124,9 +170,10 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
         mr = free;
       }
     } else if (autoL) ml = free;
-    else if (autoR) mr = free;
-    else mr += free;
+    else mr = free;
     x = left + ml;
+  } else {
+    x = alignInInsets(left, right, cbW, width + ml + mr, justify, true) + ml;
   }
 
   const r = layout(node, space(width, height, cbW, cbH), true);
@@ -135,7 +182,7 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
   if (top === undefined && bottom === undefined) y = sy + node.staticAlignY * (node.staticH - (h + mt + mb)) + mt;
   else if (top === undefined) y = cbH - bottom! - mb - h;
   else if (bottom === undefined) y = top + mt;
-  else {
+  else if (autoT || autoB) {
     const free = cbH - top - bottom - h - mt - mb;
     if (autoT && autoB) {
       if (free >= 0) mt = mb = free / 2;
@@ -144,9 +191,10 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
         mb = free;
       }
     } else if (autoT) mt = free;
-    else if (autoB) mb = free;
-    else mb += free;
+    else mb = free;
     y = top + mt;
+  } else {
+    y = alignInInsets(top, bottom, cbH, h + mt + mb, alignSelf, false) + mt;
   }
   const o = node.out;
   o.x = cb.x + x;

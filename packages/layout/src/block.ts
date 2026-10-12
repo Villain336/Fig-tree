@@ -25,7 +25,9 @@ export function layoutBlock(node: LayoutNode, input: ContentInput): ContentResul
     }
     if (isOutOfFlow(child)) {
       // Static position: where the box would start in flow (its top margin collapsing with the pending one).
-      setStatic(child, input.left, y + (any ? pendingPos + pendingNeg : 0), 0, 0, 0, 0);
+      // The static-position rectangle spans the line in the inline axis and is empty in the block axis;
+      // the box's own self-alignment places it there (CSS Positioned Layout 3).
+      setStatic(child, input.left, y + (any ? pendingPos + pendingNeg : 0), input.width, 0, staticSelf(cs.justifySelf, true), staticSelf(cs.alignSelf, false));
       continue;
     }
     const w = blockChildWidth(child, input.width, input.percentHeight);
@@ -117,4 +119,21 @@ function replacedAutoWidth(child: LayoutNode, pbH: number): number {
   const ratio = r.ratio ?? (r.height ? undefined : undefined);
   if (ratio && r.height !== undefined) return r.height * ratio + pbH;
   return 300 + pbH;
+}
+
+function staticSelf(v: string, horizontal: boolean): number {
+  const value = v.replace(/^(safe|unsafe) /, "");
+  switch (value) {
+    case "center":
+      return 0.5;
+    case "end":
+    case "self-end":
+    case "flex-end":
+    case "last baseline":
+      return 1;
+    case "right":
+      return horizontal ? 1 : 0;
+    default:
+      return 0;
+  }
 }
