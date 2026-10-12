@@ -248,7 +248,7 @@ export function ColorPicker({ anchor, paint, onChange }: { anchor: string; paint
               }}
             />
           ))}
-        <NumberField anchor={`${anchor}.alphaValue`} label="A" value={Math.round(color.a * 100)} digits={0} min={0} max={100} suffix="%" width={64} onCommit={(f) => setColor({ ...color, a: f(color.a * 100) / 100 })} />
+        <NumberField anchor={`${anchor}.alphaValue`} label="A" value={Math.round(color.a * 100)} digits={0} min={0} max={100} suffix="%" width={76} onCommit={(f) => setColor({ ...color, a: f(color.a * 100) / 100 })} />
       </div>
     </div>
   );

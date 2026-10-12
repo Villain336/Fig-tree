@@ -80,7 +80,7 @@ export function PaintSection({ ids, keyName }: { ids: readonly string[]; keyName
       )}
       {keyName === "strokes" && stack !== null && (stack === MIXED || stack.length > 0) && <StrokeSettings ids={targets} />}
       {picker && stack !== MIXED && stack !== null && stack[picker.index] && editable(stack[picker.index]!) && (
-        <Popover at={picker.at} onClose={() => setPicker(null)} width={248} label="Color picker" testId="picker">
+        <Popover at={picker.at} onClose={() => setPicker(null)} width={264} label="Color picker" testId="picker">
           <ColorPicker anchor="picker" paint={stack[picker.index] as EditablePaint} onChange={(np) => apply(stack.map((x, k) => (k === picker.index ? np : x)))} />
         </Popover>
       )}
@@ -108,7 +108,7 @@ function PaintRow({ anchor, paint, onChange, onRemove, onOpen }: { anchor: strin
         style={{ background: `${paintCss(paint)}, repeating-conic-gradient(#e7e5e4 0 25%, #fff 0 50%) 0 0 / 6px 6px` }}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
-          onOpen({ x: r.left - 256, y: r.top - 40 });
+          onOpen({ x: r.left - 276, y: r.top - 40 });
         }}
       />
       {paint.type === "solid" ? (

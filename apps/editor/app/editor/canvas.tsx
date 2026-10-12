@@ -39,8 +39,12 @@ export function isPrintable(e: KeyboardEvent | React.KeyboardEvent, mac: boolean
 }
 
 export interface FrameSample {
-  /** Input timestamp to the end of the frame's CPU work (ms). */
+  /** Wall clock from the earliest input of the frame to the end of the frame's CPU work (includes waiting for the GPU and the next animation frame). */
+  readonly wall: number;
+  /** CPU time from input to frame: handling the frame's inputs (editor, commands, Yjs, layout, bridge) plus the frame's render CPU. */
   readonly latency: number;
+  /** Handling the frame's inputs only. */
+  readonly input: number;
   readonly frameCpu: number;
   readonly compiled: number;
 }
@@ -120,21 +124,18 @@ export function Canvas({ onContextMenu, render }: { onContextMenu: (at: { x: num
       const now = performance.now();
       const near = Math.hypot(e.clientX - clicks.x, e.clientY - clicks.y) < 5;
       clicks = { n: now - clicks.t < 400 && near ? clicks.n + 1 : 1, t: now, x: e.clientX, y: e.clientY };
-      editor.pointerDown(point(e, Math.min(clicks.n, 3)));
-      markInput(e.timeStamp);
+      timed(e.timeStamp, () => editor.pointerDown(point(e, Math.min(clicks.n, 3))));
       render();
       if (textSession(editor)) setTimeout(() => textRef.current?.focus({ preventScroll: true }));
     };
     const onMove = (e: PointerEvent): void => {
       // Coalesced events: the editor only needs the latest position of a frame's batch.
-      editor.pointerMove(point(e));
-      markInput(e.timeStamp);
+      timed(e.timeStamp, () => editor.pointerMove(point(e)));
       render();
     };
     const onUp = (e: PointerEvent): void => {
       if (e.button === 2) return;
-      editor.pointerUp(point(e, Math.min(clicks.n, 3)));
-      markInput(e.timeStamp);
+      timed(e.timeStamp, () => editor.pointerUp(point(e, Math.min(clicks.n, 3))));
       render();
       if (textSession(editor)) textRef.current?.focus({ preventScroll: true });
     };
@@ -143,8 +144,7 @@ export function Canvas({ onContextMenu, render }: { onContextMenu: (at: { x: num
       e.preventDefault();
       const r = host.getBoundingClientRect();
       const scale = e.deltaMode === 1 ? 16 : 1;
-      editor.wheel({ x: e.clientX - r.left, y: e.clientY - r.top, deltaX: e.deltaX * scale, deltaY: e.deltaY * scale, zoom: e.ctrlKey || e.metaKey, shift: e.shiftKey });
-      markInput(e.timeStamp);
+      timed(e.timeStamp, () => editor.wheel({ x: e.clientX - r.left, y: e.clientY - r.top, deltaX: e.deltaX * scale, deltaY: e.deltaY * scale, zoom: e.ctrlKey || e.metaKey, shift: e.shiftKey }));
       render();
     };
     const onContext = (e: MouseEvent): void => {
@@ -177,8 +177,7 @@ export function Canvas({ onContextMenu, render }: { onContextMenu: (at: { x: num
       if (!s) return;
       if (e.inputType === "insertText" && e.data) {
         e.preventDefault();
-        s.insert(e.data);
-        markInput(e.timeStamp);
+        timed(e.timeStamp, () => s.insert(e.data!));
         render();
       } else if (e.inputType === "insertCompositionText") {
         // Handled by composition events.
@@ -250,11 +249,18 @@ function positionTextInput(editor: Editor, ta: HTMLTextAreaElement | null): void
   ta.style.height = `${Math.max(12, Math.round(r.height))}px`;
 }
 
-/** Input timestamps waiting for a frame (for input-to-frame latency). */
-const pendingInputs: number[] = [];
-export function markInput(timeStamp: number): void {
-  pendingInputs.push(timeStamp);
+/** Inputs waiting for a frame (for input-to-frame latency): event timestamp and handling time. */
+const pendingInputs: { at: number; cpu: number }[] = [];
+export function markInput(timeStamp: number, cpu = 0): void {
+  pendingInputs.push({ at: timeStamp, cpu });
 }
-export function takeInputs(): number[] {
+export function takeInputs(): { at: number; cpu: number }[] {
   return pendingInputs.splice(0);
+}
+
+/** Runs an input handler and records its timestamp and CPU time. */
+export function timed(timeStamp: number, fn: () => void): void {
+  const t0 = performance.now();
+  fn();
+  markInput(timeStamp, performance.now() - t0);
 }

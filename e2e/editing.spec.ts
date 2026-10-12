@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 import { backends, pixel, type BackendName, type Image } from "./pixels";
 
 /**
@@ -390,4 +391,245 @@ test("registers every interactive control with a unique anchor and a rect", asyn
   await page.keyboard.press("Control+/");
   total += await check("shortcuts sheet");
   expect(total).toBeGreaterThan(200);
+});
+
+test("zooms and pans with keys, the wheel and the space bar; shows the pixel grid", async ({ page }) => {
+  await open(page, "webgl2", "sample");
+  const view = (): Promise<{ scale: number; x: number; y: number }> => page.evaluate(() => {
+    const v = window.__figtree!.editor.viewport;
+    return { scale: v.scale, x: v.x, y: v.y };
+  });
+  await page.keyboard.press("Shift+0");
+  expect((await view()).scale).toBe(1);
+  // Ctrl+wheel zooms about the pointer: the world point under it stays put.
+  const p = await at(page, 660, 118);
+  await page.mouse.move(...p);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -100);
+  await page.keyboard.up("Control");
+  const zoomed = await view();
+  expect(zoomed.scale).toBeGreaterThan(2);
+  const back = await at(page, 660, 118);
+  expect(Math.abs(back[0] - p[0])).toBeLessThan(1);
+  // Space+drag pans.
+  await page.keyboard.down(" ");
+  await drag(page, [p[0], p[1]], [p[0] - 100, p[1] - 50]);
+  await page.keyboard.up(" ");
+  const panned = await view();
+  expect(Math.round(panned.x - zoomed.x)).toBe(-100);
+  expect(Math.round(panned.y - zoomed.y)).toBe(-50);
+  // Plain wheel scrolls.
+  await page.mouse.wheel(0, 40);
+  expect(Math.round((await view()).y - panned.y)).toBe(-40);
+  // Zoom to selection and to fit.
+  await page.evaluate(() => window.__figtree!.editor.select(["star"]));
+  await page.keyboard.press("Shift+2");
+  const sel = await view();
+  const star = (await page.evaluate(() => window.__figtree!.editor.geometry.bounds("star"))) as { x: number; y: number; width: number; height: number };
+  const c = await page.evaluate(([x, y]) => window.__figtree!.toCanvas(x!, y!), [star.x + star.width / 2, star.y + star.height / 2]);
+  const size = (await page.getByTestId("canvas").boundingBox())!;
+  expect(Math.abs(c.x - size.width / 2)).toBeLessThan(2);
+  expect(sel.scale).toBeGreaterThan(4);
+  // The pixel grid shows at 800% and above, on the overlay (the document pixels do not change).
+  const overlayInk = (): Promise<number> => page.evaluate(() => {
+    const cv = document.querySelector<HTMLCanvasElement>("[data-testid=overlay]")!;
+    const d = cv.getContext("2d")!.getImageData(0, 0, cv.width, cv.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4 * 97) if (d[i]! > 0) n++;
+    return n;
+  });
+  await page.evaluate(() => window.__figtree!.editor.select([]));
+  await page.evaluate(() => window.__figtree!.setView(12, -7000, -1000));
+  await page.waitForTimeout(150);
+  const withGrid = await overlayInk();
+  await page.keyboard.press("Shift+Control+'");
+  await page.waitForTimeout(150);
+  expect(await page.evaluate(() => window.__figtree!.editor.settings.pixelGrid)).toBe(false);
+  expect(withGrid).toBeGreaterThan(await overlayInk());
+  await page.keyboard.press("Shift+1");
+  expect((await view()).scale).toBeLessThan(1.5);
+  // Rulers.
+  await page.keyboard.press("Shift+R");
+  await expect(page.getByTestId("ruler-top")).toBeVisible();
+});
+
+test("places an image from a file as an image node backed by an asset", async ({ page }) => {
+  await open(page, "webgl2");
+  // A 3×2 PNG.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEklEQVR4nGP4z8DwH4YZYBwAQJcF+5oUY1UAAAAASUVORK5CYII=", "base64");
+  await page.keyboard.press("Shift+Control+k");
+  await page.getByTestId("image-input").setInputFiles({ name: "dot.png", mimeType: "image/png", buffer: png });
+  await expect.poll(() => sel(page).then((s) => s.length)).toBe(1);
+  const [id] = await sel(page);
+  expect(await page.evaluate((i) => window.__figtree!.doc.typeOf(i), id!)).toBe("image");
+  expect(await page.evaluate((i) => [window.__figtree!.doc.get(i, "width"), window.__figtree!.doc.get(i, "height")], id!)).toEqual([3, 2]);
+  const asset = await prop(page, id!, "asset");
+  expect(await page.evaluate((a) => window.__figtree!.doc.assets().get(a)?.mimeType, asset as string)).toBe("image/png");
+  expect(await page.evaluate(() => window.__figtree!.editor.tool.id)).toBe("select");
+});
+
+test("edits every design panel field: math, mixed values, scrubbing, paints, typography, layout", async ({ page }) => {
+  await open(page, "webgl2");
+  // Two rectangles and a text.
+  await page.keyboard.press("r");
+  await drag(page, await at(page, 0, 0), await at(page, 100, 50));
+  const [a] = await sel(page);
+  await page.keyboard.press("r");
+  await drag(page, await at(page, 200, 0), await at(page, 260, 80));
+  const [b] = await sel(page);
+  const get = (id: string, key: string): Promise<unknown> => prop(page, id, key);
+  const field = async (testId: string, value: string): Promise<void> => {
+    await page.getByTestId(testId).fill(value);
+    await page.getByTestId(testId).press("Enter");
+  };
+
+  // Math in fields, relative edits and mixed values over a multi-selection.
+  await page.evaluate(([x, y]) => window.__figtree!.editor.select([x, y]), [a, b]);
+  await expect(page.getByTestId("w")).toHaveValue("Mixed");
+  await field("w", "+10");
+  expect([await get(a!, "width"), await get(b!, "width")]).toEqual([110, 70]);
+  await field("h", "12*5");
+  expect([await get(a!, "height"), await get(b!, "height")]).toEqual([60, 60]);
+  await expect(page.getByTestId("h")).toHaveValue("60");
+  // Arrow keys step the value (Shift ×10).
+  await page.getByTestId("x").focus();
+  await page.getByTestId("x").press("Shift+ArrowUp");
+  expect([await get(a!, "x"), await get(b!, "x")]).toEqual([10, 210]);
+  // Scrubbing the label is one undo step.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  const label = page.locator('[data-anchor="design.position.y.scrub"]');
+  const lb = (await label.boundingBox())!;
+  await drag(page, [lb.x + lb.width / 2, lb.y + lb.height / 2], [lb.x + lb.width / 2 + 30, lb.y + lb.height / 2], 6);
+  expect(await get(a!, "y")).toBe(30);
+  await page.keyboard.press("Control+z");
+  expect(await get(a!, "y")).toBe(0);
+
+  // Single node: rotation, radius per corner, smoothing, opacity, aspect lock, min/max, constraints.
+  await page.evaluate((x) => window.__figtree!.editor.select([x]), a!);
+  await field("rotation", "45");
+  expect(await get(a!, "rotation")).toBe(45);
+  await field("rotation", "0");
+  await field("radius", "8");
+  expect(await get(a!, "cornerRadius")).toBe(8);
+  await page.locator('[data-anchor="design.appearance.radiusMode"]').click();
+  await page.locator('[data-anchor="design.appearance.radius.topLeft"]').fill("20");
+  await page.locator('[data-anchor="design.appearance.radius.topLeft"]').press("Enter");
+  expect(await get(a!, "cornerRadius")).toEqual({ topLeft: 20, topRight: 8, bottomRight: 8, bottomLeft: 8 });
+  await page.locator('[data-anchor="design.appearance.smoothing"]').fill("60");
+  await page.locator('[data-anchor="design.appearance.smoothing"]').press("Enter");
+  expect(await get(a!, "cornerSmoothing")).toBe(0.6);
+  await field("opacity", "50");
+  expect(await get(a!, "opacity")).toBe(0.5);
+  await page.locator('[data-anchor="design.size.aspectLock"]').click();
+  await field("w", "220");
+  expect([await get(a!, "width"), await get(a!, "height")]).toEqual([220, 120]);
+  await page.locator('[data-anchor="design.size.more"]').click();
+  await page.locator('[data-anchor="design.size.minWidth"]').fill("50");
+  await page.locator('[data-anchor="design.size.minWidth"]').press("Enter");
+  expect(await get(a!, "minWidth")).toBe(50);
+
+  // Fills: hex, opacity, add, hide, remove; the picker's hex field and paint types.
+  await page.locator('[data-anchor="design.fills.0.hex"]').fill("ff8800");
+  await page.locator('[data-anchor="design.fills.0.hex"]').press("Enter");
+  expect(await get(a!, "fills")).toEqual([{ type: "solid", color: { r: 1, g: 136 / 255, b: 0, a: 1 } }]);
+  await page.locator('[data-anchor="design.fills.add"]').click();
+  expect(((await get(a!, "fills")) as unknown[]).length).toBe(2);
+  await page.locator('[data-anchor="design.fills.1.visible"]').click();
+  expect(((await get(a!, "fills")) as { visible?: boolean }[])[1]!.visible).toBe(false);
+  await page.locator('[data-anchor="design.fills.1.remove"]').click();
+  expect(((await get(a!, "fills")) as unknown[]).length).toBe(1);
+  await page.getByTestId("design.fills.0.swatch").click();
+  await page.locator('[data-anchor="picker.hex"]').fill("3366cc");
+  await page.locator('[data-anchor="picker.hex"]').press("Enter");
+  expect(((await get(a!, "fills")) as { color: unknown }[])[0]!.color).toEqual({ r: 0.2, g: 0.4, b: 0.8, a: 1 });
+  await page.getByTestId("paint-type").selectOption("radial-gradient");
+  expect(((await get(a!, "fills")) as { type: string }[])[0]!.type).toBe("radial-gradient");
+  // Clicking the stop bar adds a stop.
+  const bar = (await page.getByTestId("gradient-bar").boundingBox())!;
+  await page.mouse.click(bar.x + bar.width / 2, bar.y + bar.height / 2);
+  expect(((await get(a!, "fills")) as { stops: unknown[] }[])[0]!.stops.length).toBe(3);
+  await page.keyboard.press("Escape");
+  // Strokes.
+  await page.locator('[data-anchor="design.strokes.add"]').click();
+  await page.locator('[data-anchor="design.strokes.weight"]').fill("3");
+  await page.locator('[data-anchor="design.strokes.weight"]').press("Enter");
+  await page.locator('[data-anchor="design.strokes.align"]').selectOption("outside");
+  expect([await get(a!, "strokeWeight"), await get(a!, "strokeAlign")]).toEqual([3, "outside"]);
+
+  // Constraints inside a frame.
+  await page.keyboard.press("f");
+  await drag(page, await at(page, 0, 300), await at(page, 300, 500));
+  const [f] = await sel(page);
+  await page.keyboard.press("r");
+  await drag(page, await at(page, 20, 320), await at(page, 60, 360));
+  const [c] = await sel(page);
+  await page.locator('[data-anchor="design.constraints.horizontal"]').selectOption("end");
+  expect(await get(c!, "constraints")).toEqual({ horizontal: "end", vertical: "start" });
+
+  // Grid layout with a track editor.
+  await page.evaluate((x) => window.__figtree!.editor.select([x]), f!);
+  await page.locator('[data-anchor="design.layout.addGrid"]').click();
+  expect(await get(f!, "display")).toBe("grid");
+  await page.locator('[data-anchor="design.grid.columns.add"]').click();
+  await page.locator('[data-anchor="design.grid.columns.1.unit"]').selectOption("px");
+  await page.locator('[data-anchor="design.grid.columns.1.value"]').fill("120");
+  await page.locator('[data-anchor="design.grid.columns.1.value"]').press("Enter");
+  expect(await get(f!, "gridTemplateColumns")).toEqual([{ type: "repeat", count: 2, tracks: [{ type: "fr", value: 1 }] }, { type: "px", value: 120 }]);
+  await page.locator('[data-anchor="design.layout.toFlex"]').click();
+  await page.locator('[data-anchor="design.layout.direction.column"]').click();
+  await page.locator('[data-anchor="design.layout.wrap"]').click();
+  expect([await get(f!, "display"), await get(f!, "flexDirection"), await get(f!, "flexWrap")]).toEqual(["flex", "column", "wrap"]);
+  await page.getByTestId("width-mode").selectOption("hug");
+  expect(await get(f!, "widthMode")).toBe("hug");
+
+  // Typography on a whole text node.
+  await page.keyboard.press("t");
+  await clickWorld(page, 400, 300);
+  await page.keyboard.type("Panel text");
+  await page.keyboard.press("Escape");
+  const [t] = await sel(page);
+  await page.getByTestId("font-family").click();
+  await page.getByLabel("Search fonts").fill("noto sans");
+  await page.locator('[data-anchor="fontpicker.family.Noto-Sans"]').click();
+  expect(await get(t!, "fontFamily")).toBe("Noto Sans");
+  await page.getByTestId("font-weight").selectOption("700");
+  await field("font-size", "24");
+  await page.locator('[data-anchor="design.text.lineHeight"]').fill("30");
+  await page.locator('[data-anchor="design.text.lineHeight"]').press("Enter");
+  await page.locator('[data-anchor="design.text.letterSpacing"]').fill("2");
+  await page.locator('[data-anchor="design.text.letterSpacing"]').press("Enter");
+  await page.locator('[data-anchor="design.text.align.center"]').click();
+  await page.locator('[data-anchor="design.text.decoration.underline"]').click();
+  await page.locator('[data-anchor="design.text.case.uppercase"]').click();
+  await page.locator('[data-anchor="design.text.resize.auto-height"]').click();
+  await page.locator('[data-anchor="design.text.truncate"]').check();
+  expect(await page.evaluate((i) => {
+    const d = window.__figtree!.doc;
+    return ["fontWeight", "fontSize", "lineHeight", "letterSpacing", "textAlign", "textDecoration", "textTransform", "widthMode", "heightMode", "textOverflow"].map((k) => d.get(i, k));
+  }, t!)).toEqual([700, 24, { unit: "px", value: 30 }, { unit: "px", value: 2 }, "center", "underline", "uppercase", "fixed", "hug", "ellipsis"]);
+});
+
+// `UPDATE_DOCS=1` refreshes the editor screenshots in docs/img.
+test("documentation screenshots", async ({ page }) => {
+  test.skip(process.env.UPDATE_DOCS !== "1", "set UPDATE_DOCS=1 to refresh docs/img");
+  const dir = join(__dirname, "..", "docs", "img");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await open(page, "webgpu", "sample");
+  await page.keyboard.press("Shift+1");
+  await page.evaluate(() => window.__figtree!.editor.select(["toolbar"]));
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: join(dir, "editor-auto-layout.png") });
+  // Text editing with a selection, and the typography panel.
+  await page.evaluate(() => window.__figtree!.editor.enterEditMode("type-body"));
+  await page.evaluate(() => window.__figtree!.editor.session.setSelection(0, 24));
+  await page.keyboard.press("Shift+2");
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: join(dir, "editor-text.png") });
+  await page.keyboard.press("Escape");
+  // A gradient being edited on the canvas, with smart guides from a drag in progress.
+  await page.keyboard.press("Shift+1");
+  await page.evaluate(() => window.__figtree!.editor.select(["header"]));
+  await page.getByTestId("design.fills.0.swatch").click();
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: join(dir, "editor-gradient.png") });
 });

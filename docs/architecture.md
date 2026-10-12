@@ -1,9 +1,11 @@
 # Architecture
 
-This document covers what Modules 1 to 4 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), and the text engine (Module 4). It also covers how later modules plug in.
+This document covers what Modules 1 to 5a built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), the text engine (Module 4) and the editor (Module 5a). It also covers how later modules plug in.
 
 ```
-apps/editor ──────────────┐  Next.js: editor (/), /bench, /render-test
+apps/editor ──────────────┐  Next.js: editor UI (/), /bench, /render-test
+  │ input, overlay, panels  │
+packages/editor-core       │  tools, selection, gestures, snapping, text editing, clipboard, keymap, anchors
   │ commands              ▼
   │                packages/document   FigDocument (Yjs) ──DocumentChange──► SceneBridge
   │                  │  commands ─► Draft ─► one Y transaction    │   │
@@ -27,6 +29,7 @@ Dependencies point downward only:
 - `layout` depends on nothing: it is pure TypeScript with no DOM.
 - `text` depends on `geometry` (glyph outlines are `Path`s), `layout` (it implements the measure callback), `harfbuzzjs`, `bidi-js` and the `brotli` and `fflate` decoders. No DOM: it runs in Node for tests and in the editor.
 - `document` depends on `geometry`, `layout`, `text` and `renderer` (for the bridge only), `yjs`, `zod` and `fflate`. Nothing in it touches the DOM: it runs in Node for tests and in the editor.
+- `editor-core` depends on `document`, `geometry`, `text` and (for scene node types) `renderer`. No DOM, no React: it runs in Node for tests.
 - The app depends on all of them.
 
 All packages are TypeScript-strict internal workspace packages that export their sources. Next.js transpiles them, and Vitest and `tsc` read them directly.
@@ -424,15 +427,71 @@ A scene node can carry a **glyph run**: a glyph source (outlines and bounds in f
 
 `docs/conformance.md` describes the method (grapheme rects, line breaks and baselines from Chromium with the same font files) and the results: every grapheme of the 166 text cases within 1/64 px, identical breaks everywhere, and a per-case pixel comparison of our rendering with Chromium's.
 
-## 6. How later modules plug in
+## 6. Editor (`packages/editor-core`, `apps/editor`)
 
-- **Text editing:** carets, selection and IME go through `textCaretAt`/`textCaretRect` and the `insertText`, `deleteText` and `formatText` commands; text styles (module 7) will be named style references resolved into the same text properties.
+The editor is split in two. `packages/editor-core` holds everything about editing that does not need a UI framework or a DOM: it runs in Node, where its unit tests drive it with synthetic pointer and key events against a real document, bridge and (for text) real fonts. `apps/editor` is React chrome around it: it forwards input, draws the overlay, renders the scene and builds the panels from editor state.
+
+```
+DOM events ─► Canvas (apps/editor) ─► Editor.pointerDown/Move/Up, keyDown, wheel, text input, composition
+                                         │
+                       active EditSession (text; 5b: vector) ─► else active Tool (select, shapes, text, hand, image)
+                                         │
+                       History.apply(commands) ─► doc.apply(…, user actor) ─► bridge ─► scene ─► renderer (next frame)
+                                         │
+             Editor.overlay() ─► OverlayItem[] (screen space) ─► drawOverlay(2D canvas over the GPU canvas)
+             Editor.subscribe(changes) ─► panels re-render (once per animation frame)
+```
+
+### 6.1 State
+
+| Piece | What it is |
+|---|---|
+| `Editor` | One document view: the document, its `SceneBridge`, `CanvasGeometry`, `Viewport`, `LocalPresence`, `History`, `ToolRegistry`, `EditModeRegistry`, `AnchorRegistry`, settings (snapping, pixel snapping, pixel grid, rulers) and the current tool and edit session. Emits batched change kinds (`view`, `selection`, `hover`, `document`, `tool`, `session`, `overlay`, …) once per input event. |
+| `LocalPresence` | Page, selection, hover, text caret and cursor as a plain JSON object: exactly what module 8 publishes as Yjs awareness. Selection and hover are never written to the document. |
+| `History` | The only way the editor edits: `apply(commands)` calls `doc.apply` with the user's actor, so undo is per user. A gesture (drag, resize, scrub, a drawn shape) is one undo step: `begin()` opens the actor's Yjs undo-manager capture window and `end()` closes it. A run of typing is a *soft* group that any other edit closes. `abort()` reverts an open group and drops it from the redo stack (Escape during a drag). |
+| `CanvasGeometry` | World matrices and sizes read from the bridge's scene (so flex and grid children are where they are drawn), quads and bounds (groups: the union of their children), and cached flattened paths for hit-testing. |
+| `Viewport` | Uniform scale plus translation, zoom about a point, zoom steps, fit. |
+
+### 6.2 Hit-testing and selection rules
+
+`pickPath` walks the page top-down in reverse paint order and returns the stack of nodes under a point: hidden and locked layers are transparent, clipping containers only hit inside their box, frames, text and images hit by their box, shapes by their own scene nodes (fills by the fill rule, strokes within half their width or a few screen pixels, lines by distance). `clickTarget` turns the stack into a selection target: top-level frames are *boards* whose children are picked directly; containers the selection is inside are "entered" so siblings are picked directly; otherwise the first other node on the stack (a group, a nested frame) is selected; ⌘/Ctrl picks the deepest. Double-click goes one level deeper, or enters the edit mode registered for the node's type. `marqueeSelect` selects intersecting layers, recursing into boards the marquee only crosses.
+
+### 6.3 Gestures and transforms
+
+The select tool is a small state machine: idle (hover, handle cursors) → press (after 3 px becomes a gesture) → move | marquee | resize | rotate | endpoint | gradient → release. All transform math (`transform.ts`) works on the laid-out boxes in world space and writes *deltas* of the stored `x`/`y`, so insets keep their meaning under any constraint and in hug or fill parents; sizes, rotation and flips are absolute. A resize computes a signed rectangle in the box's own frame (aspect lock, from-center, mirroring past the anchor) and turns the new world matrix back into stored properties with `boxFromMatrix`; several nodes scale with the selection box; rotation composes a rotation about the pivot. Resizing a frame moves its absolutely positioned children per their constraints. Nodes in flex or grid flow are reordered, not moved: the drop index comes from the nearest in-flow child along the main axis. Dropping over another frame reparents with `reparentCommands`, which keeps every box where it is drawn. Writes during a gesture are "sticky" (a key once written is written on every later step), so moving back to the start is exact.
+
+Snapping (`snapping.ts`) is pure math over boxes: the smallest correction aligning a moving edge or center with a target line (siblings on screen, the parent's edges, center and padding box), or equal spacing (centered between the nearest neighbours, or repeating a gap of the row before or after); guide lines span every coinciding target. Resizing snaps the dragged edge. Pixel snapping rounds the selection's position.
+
+### 6.4 Tools and edit modes (extension points)
+
+A `Tool` handles pointer and key events and contributes overlay items; the toolbar is generated from `editor.tools` (group, order, icon name, shortcut action). An `EditMode` edits the inside of one node type and returns an `EditSession` that receives input first while it is open. Text editing is the built-in edit mode; module 5b registers its pen tool and vector edit mode the same way, without changing the editor.
+
+### 6.5 Text editing
+
+`TextSession` keeps an anchor and a focus (UTF-16 indices into the node's content). Caret geometry comes from the text engine through `TextLayoutView` (caret rectangles, the index nearest a point, visual lines and highlight rectangles from grapheme boxes); movement is by grapheme cluster and word (`Intl.Segmenter`), visual line (keeping a goal x), line boundary, paragraph and document. Typing replaces the selection with `deleteText` + `insertText`; with a pending style (Bold with nothing selected) the insert carries an explicit style. Style changes on a selection are `formatText` runs. The app feeds text from a hidden textarea positioned at the caret (`beforeinput`), so every keyboard layout and input method works; IME composition writes the composed text into the document as it changes (collaborators see it, layout reflows) inside one undo group, and a cancelled composition is reverted.
+
+### 6.6 Clipboard
+
+Copy serializes the selected subtrees (stored properties, text with runs, world placement of every box, assets with their bytes up to 8 MB) as JSON inside an HTML `data-` attribute, next to plain text. Paste prefers our format, then SVG (our own XML and path-data parsers produce a frame of shapes, groups and vector networks), then image files (content-addressed assets and image nodes), then plain text. Paste places nodes where they were copied if that spot is visible (in the target frame when one is selected), otherwise in the middle of the view; foreign asset bytes are verified against their hash.
+
+### 6.7 UI anchors
+
+`AnchorRegistry` maps stable ids (`toolbar.tool.rectangle`, `design.position.x`, `layers.row.<id>.lock`, `canvas.handle.resize.se`, …) to a kind, a label and a function returning the control's client rectangle. React controls register through `useAnchor`; canvas handles resolve from the editor's current state. Sprout (module 11) will point at controls through it; an e2e test checks that every interactive element in many UI states has a unique, resolvable anchor.
+
+### 6.8 The app
+
+`apps/editor/app/editor.tsx` wires the DOM: one GPU canvas, an input layer with the overlay canvas and the hidden textarea, window keyboard and clipboard listeners (fields in panels keep their keys), file drops and the image file picker. Frames render on the animation frame after a view or document change; panels subscribe with `useEditorTick` and re-render at most once per frame. Panels read document values directly and write through editor-core actions (`setGeometry`, `setProps`, text style commands), so the same edits are available to tests and agents. Input-to-frame latency is recorded per frame (`__figtree.takeSamples()`).
+
+## 7. How later modules plug in
+
+- **Vector editing (5b):** registers a pen tool and a vector edit mode (section 6.4).
+- **Text styles (module 7):** named style references resolved into the same text properties the typography panel edits.
 - **Vector networks and booleans:** these produce paths. The robust winding-number boolean approach uses the same flattening and winding primitives.
 - **Effects** (blur, shadows) and **shader fills:** new composite inputs that sample from layer textures.
 - **Code view and export:** walk the document, not the scene.
 - **Multiplayer:** a provider relays Yjs updates (the convergence tests already simulate one); cursors and selections go in Yjs awareness and render as an overlay scene, so they never invalidate document tiles.
 - **MCP and the Sprout agent:** call the same command API as the UI, and use proposals so a person reviews the diff before it lands.
 
-## 7. Known limitations
+## 8. Known limitations
 
-See [`parity.md`](parity.md) → "Text limitations", "Layout limitations", "Renderer limitations" and "Document model limitations" for the honest lists.
+See [`parity.md`](parity.md) → "Editing limitations", "Text limitations", "Layout limitations", "Renderer limitations" and "Document model limitations" for the honest lists.

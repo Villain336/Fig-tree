@@ -6,7 +6,7 @@ import { AssetStore, CommandError, SceneBridge, type Command, type FigDocument }
 import { deletePage, Editor as CoreEditor, paste, placeImage, textSession, copySelection, cutSelection, type AnchorRect, type ClipboardIn } from "@fig-tree/editor-core";
 import type { FontRegistry } from "@fig-tree/text";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Canvas, isPrintable, keyInput, takeInputs, type FrameSample } from "./editor/canvas";
+import { Canvas, isPrintable, keyInput, takeInputs, timed, type FrameSample } from "./editor/canvas";
 import { PanelBoundary } from "./editor/boundary";
 import { DesignPanel } from "./editor/design";
 import { LayersPanel, PagesPanel } from "./editor/layers";
@@ -53,6 +53,8 @@ export interface EditorHarness {
   takeSamples(): FrameSample[];
   /** Selected node ids. */
   selection(): readonly string[];
+  /** Resolves once the next frame was rendered and the GPU finished it. */
+  afterFrame(): Promise<void>;
 }
 
 declare global {
@@ -108,6 +110,7 @@ export function Editor() {
     let disposed = false;
     let scheduled = false;
     let samples: FrameSample[] = [];
+    const frameWaiters: (() => void)[] = [];
     const assets = new AssetStore();
 
     const renderNow = (): FrameStats | null => {
@@ -116,8 +119,12 @@ export function Editor() {
       const inputs = takeInputs();
       const stats = renderer.render({ transform: editor.viewport.matrix });
       const now = performance.now();
-      if (inputs.length) samples.push({ latency: now - Math.min(...inputs), frameCpu: stats.cpuMs, compiled: bridge.lastCompiled });
+      if (inputs.length) {
+        const input = inputs.reduce((sum, i) => sum + i.cpu, 0);
+        samples.push({ wall: now - Math.min(...inputs.map((i) => i.at)), latency: input + stats.cpuMs, input, frameCpu: stats.cpuMs, compiled: bridge.lastCompiled });
+      }
       if (samples.length > 5000) samples = samples.slice(-5000);
+      for (const w of frameWaiters.splice(0)) w();
       setStatus(`${renderer.backendKind} · ${doc.tree.size} nodes · last update compiled ${bridge.lastCompiled} · frame cpu ${stats.cpuMs.toFixed(1)} ms · ${Math.round(editor.viewport.scale * 100)}%`);
       return stats;
     };
@@ -230,6 +237,10 @@ export function Editor() {
         selection() {
           return editor.selection;
         },
+        async afterFrame() {
+          await new Promise<void>((resolve) => frameWaiters.push(resolve));
+          await r.finish();
+        },
       };
     })().catch((err: unknown) => setError(String(err)));
 
@@ -241,7 +252,9 @@ export function Editor() {
       if (!editor || isField(e.target)) return;
       if (e.isComposing || e.key === "Process") return;
       if (textSession(editor) && isPrintable(e, mac)) return;
-      if (editor.keyDown(keyInput(e, mac))) {
+      let handled = false;
+      timed(e.timeStamp, () => (handled = editor.keyDown(keyInput(e, mac))));
+      if (handled) {
         e.preventDefault();
         schedule();
       }
