@@ -6,7 +6,18 @@ import { TextContent } from "./text";
 /** Current `.figtree` format version. Bump it with a migration in `format/migrations.ts`. */
 export const FORMAT_VERSION = 1;
 
-export const ASSET_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"] as const;
+export const ASSET_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "font/ttf", "font/otf", "font/woff", "font/woff2"] as const;
+
+/** The `@font-face` descriptor of an uploaded font: text with this family uses it. */
+export const FontAssetDescriptor = z.strictObject({
+  family: z.string().min(1).max(256),
+  /** CSS font-weight, or a [min, max] range for variable fonts. */
+  weight: z.union([z.number().min(1).max(1000), z.tuple([z.number().min(1).max(1000), z.number().min(1).max(1000)])]),
+  style: z.enum(["normal", "italic", "oblique"]),
+  /** CSS font-stretch percentage, or a range. */
+  stretch: z.union([z.number().min(50).max(200), z.tuple([z.number().min(50).max(200), z.number().min(50).max(200)])]),
+}).meta({ id: "FontAssetDescriptor" });
+export type FontAssetDescriptor = z.infer<typeof FontAssetDescriptor>;
 
 /** Metadata of an asset stored under `assets/` in the zip; the bytes are content-addressed by `AssetId`. */
 export const AssetMeta = z.strictObject({
@@ -17,6 +28,8 @@ export const AssetMeta = z.strictObject({
   height: z.number().int().min(0).optional(),
   /** Original file name, for display. */
   name: z.string().max(1_000).optional(),
+  /** For font assets: the face it provides. */
+  font: FontAssetDescriptor.optional(),
 }).meta({ id: "AssetMeta" });
 export type AssetMeta = z.infer<typeof AssetMeta>;
 

@@ -27,6 +27,8 @@ export const textStyleProps = {
   /** CSS `font-weight`, 1–1000. */
   fontWeight: z.number().min(1).max(1000),
   fontStyle: z.enum(["normal", "italic", "oblique"]),
+  /** CSS `font-stretch` as a percentage (100 normal); selects width faces and the `wdth` axis. */
+  fontStretch: z.number().min(50).max(200),
   fontSize: z.number().positive().max(10_000),
   lineHeight: LineHeight,
   letterSpacing: LetterSpacing,
@@ -38,6 +40,14 @@ export const textStyleProps = {
   fontVariations: z.record(OpenTypeTag, Num),
   /** Text color and other paints (CSS `color`, or `background-clip: text` for gradients). */
   fills: PaintStack,
+  /**
+   * List formatting of the paragraphs this run starts (a paragraph takes the
+   * value of its first character): `bullet` and `ordered` map to `<ul>` and
+   * `<ol>` items with an outside marker.
+   */
+  listStyle: z.enum(["none", "bullet", "ordered"]),
+  /** Nesting level of a list paragraph (each level indents by 1.5em, CSS `padding-inline-start`). */
+  listLevel: z.number().int().min(0).max(8),
 };
 
 /** Properties of the whole text box (paragraph level). */
@@ -55,6 +65,10 @@ export const textBoxProps = {
   maxLines: z.number().int().min(1),
   /** CSS `white-space` collapsing and wrapping. */
   whiteSpace: z.enum(["normal", "pre", "pre-wrap", "pre-line", "nowrap"]),
+  /** CSS `text-wrap-style`: `balance` evens out line lengths, `pretty` avoids a lone short last line. */
+  textWrap: z.enum(["auto", "balance", "pretty"]),
+  /** CSS `direction` of the paragraphs (`auto`: from the first strong character, like HTML `dir="auto"`). */
+  direction: z.enum(["ltr", "rtl", "auto"]),
 };
 
 /** A style run's overrides; `link` is per-run only. */

@@ -3878,6 +3878,11 @@
             "oblique"
           ]
         },
+        "fontStretch": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 200
+        },
         "fontSize": {
           "type": "number",
           "exclusiveMinimum": 0,
@@ -3928,6 +3933,19 @@
             "type": "number"
           }
         },
+        "listStyle": {
+          "type": "string",
+          "enum": [
+            "none",
+            "bullet",
+            "ordered"
+          ]
+        },
+        "listLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
         "textAlign": {
           "type": "string",
           "enum": [
@@ -3974,6 +3992,22 @@
             "pre-wrap",
             "pre-line",
             "nowrap"
+          ]
+        },
+        "textWrap": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "balance",
+            "pretty"
+          ]
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "ltr",
+            "rtl",
+            "auto"
           ]
         },
         "text": {
@@ -4112,6 +4146,11 @@
             "oblique"
           ]
         },
+        "fontStretch": {
+          "type": "number",
+          "minimum": 50,
+          "maximum": 200
+        },
         "fontSize": {
           "type": "number",
           "exclusiveMinimum": 0,
@@ -4164,6 +4203,19 @@
         },
         "fills": {
           "$ref": "#/$defs/PaintStack"
+        },
+        "listStyle": {
+          "type": "string",
+          "enum": [
+            "none",
+            "bullet",
+            "ordered"
+          ]
+        },
+        "listLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
         },
         "link": {
           "type": "string",
@@ -5436,7 +5488,11 @@
             "image/jpeg",
             "image/gif",
             "image/webp",
-            "image/svg+xml"
+            "image/svg+xml",
+            "font/ttf",
+            "font/otf",
+            "font/woff",
+            "font/woff2"
           ]
         },
         "byteLength": {
@@ -5457,11 +5513,93 @@
         "name": {
           "type": "string",
           "maxLength": 1000
+        },
+        "font": {
+          "$ref": "#/$defs/FontAssetDescriptor"
         }
       },
       "required": [
         "mimeType",
         "byteLength"
+      ],
+      "additionalProperties": false
+    },
+    "FontAssetDescriptor": {
+      "type": "object",
+      "properties": {
+        "family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 1000
+                },
+                {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 1000
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ]
+        },
+        "style": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "italic",
+            "oblique"
+          ]
+        },
+        "stretch": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 50,
+              "maximum": 200
+            },
+            {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "type": "number",
+                  "minimum": 50,
+                  "maximum": 200
+                },
+                {
+                  "type": "number",
+                  "minimum": 50,
+                  "maximum": 200
+                }
+              ],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            }
+          ]
+        }
+      },
+      "required": [
+        "family",
+        "weight",
+        "style",
+        "stretch"
       ],
       "additionalProperties": false
     }

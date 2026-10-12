@@ -53,7 +53,8 @@ export interface TextStyle {
 }
 
 export interface ParagraphStyle {
-  readonly direction: "ltr" | "rtl";
+  /** `auto` takes the direction of the first strong character (HTML `dir="auto"`). */
+  readonly direction: "ltr" | "rtl" | "auto";
   readonly textAlign: "start" | "end" | "left" | "right" | "center" | "justify";
   readonly textAlignLast: "auto" | "start" | "end" | "left" | "right" | "center" | "justify";
   /** px, or a percentage of the containing block width. */

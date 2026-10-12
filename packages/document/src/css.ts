@@ -9,6 +9,9 @@ import {
   type StrokeWeight,
   type TrackListEntry,
   type TrackSize,
+  type LineHeight,
+  type Paint,
+  type TextStyle,
 } from "./schema";
 
 /**
@@ -22,6 +25,9 @@ import {
  * |-------|-----------------------------|-----------------------|----------------------------|--------------|
  * | fixed | `width: Npx; flex-shrink: 0`| `width: Npx`          | `width: Npx`               | `width: Npx` |
  * | hug   | `width: fit-content`        | `width: fit-content`  | `width: fit-content`       | `width: fit-content` |
+ *
+ * (Text that hugs its width, Figma's "auto width", is `width: max-content`:
+ * it never wraps.)
  * | fill  | `flex: 1 1 0px`             | `align-self: stretch` | `justify/align-self: stretch` | `width: 100%` |
  *
  * Absolutely positioned nodes are placed with insets chosen by their
@@ -72,7 +78,8 @@ export function cssDeclarations(doc: FigDocument, id: string): Record<string, st
         else css[axis] = px(get<number>(axis));
         if (isMain && !stored("flexShrink")) css["flex-shrink"] = "0";
       } else if (mode === "hug") {
-        css[axis] = "fit-content";
+        // Auto-width text never wraps: it is as wide as its longest line (max-content).
+        css[axis] = type === "text" && axis === "width" ? "max-content" : "fit-content";
       } else if (isMain) {
         css.flex = "1 1 0px";
       } else if (isCross) {
@@ -166,6 +173,31 @@ export function cssDeclarations(doc: FigDocument, id: string): Record<string, st
       const rg = get<number>("rowGap");
       const cg = get<number>("columnGap");
       if (rg || cg) css.gap = rg === cg ? px(rg) : `${px(rg)} ${px(cg)}`;
+    }
+  }
+
+  // Typography (text nodes): the block container's own text style and its paragraph properties.
+  if (type === "text") {
+    Object.assign(css, textStyleDeclarations(Object.fromEntries(TEXT_STYLE_PROPS.map((k) => [k, get(k)])) as TextStyle, true));
+    const align = get<string>("textAlign");
+    if (align !== "start") css["text-align"] = align;
+    const valign = get<string>("verticalAlign");
+    if (valign !== "top") css["align-content"] = valign === "center" ? "center" : "end";
+    const indent = get<number>("paragraphIndent");
+    if (indent !== 0) css["text-indent"] = px(indent);
+    css["white-space"] = get<string>("whiteSpace");
+    const wrap = get<string>("textWrap");
+    if (wrap !== "auto") css["text-wrap-style"] = wrap;
+    const dir = get<string>("direction");
+    if (dir !== "auto") css.direction = dir;
+    if (stored("maxLines")) {
+      if (css.display !== "none") css.display = "-webkit-box";
+      css["-webkit-box-orient"] = "vertical";
+      css["-webkit-line-clamp"] = String(get<number>("maxLines"));
+      css.overflow = "hidden";
+    } else if (get<string>("textOverflow") === "ellipsis") {
+      css["text-overflow"] = "ellipsis";
+      css.overflow = "hidden";
     }
   }
 
@@ -268,4 +300,53 @@ function track(t: TrackListEntry): string {
     case "repeat":
       return `repeat(${t.count}, ${t.tracks.map(track).join(" ")})`;
   }
+}
+
+/** Text style properties of a text node's base style (each run may override any subset). */
+const TEXT_STYLE_PROPS = ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "lineHeight", "letterSpacing", "textDecoration", "textTransform", "fontFeatures", "fontVariations", "fills"] as const;
+
+/**
+ * CSS declarations of a text style: a text node's base style (`all`: every
+ * property, as on the block) or a style run's overrides (only what it sets,
+ * as on a `<span>`).
+ */
+export function textStyleDeclarations(style: TextStyle, all = false): Record<string, string> {
+  const css: Record<string, string> = {};
+  const set = (k: keyof TextStyle): boolean => style[k] !== undefined;
+  if (set("fontFamily")) css["font-family"] = cssFamily(style.fontFamily!);
+  if (set("fontSize")) css["font-size"] = px(style.fontSize!);
+  if (set("fontWeight") && (all ? style.fontWeight !== 400 : true)) css["font-weight"] = num(style.fontWeight!);
+  if (set("fontStyle") && (all ? style.fontStyle !== "normal" : true)) css["font-style"] = style.fontStyle!;
+  if (set("fontStretch") && (all ? style.fontStretch !== 100 : true)) css["font-stretch"] = `${num(style.fontStretch!)}%`;
+  if (set("lineHeight")) css["line-height"] = lineHeightCss(style.lineHeight!);
+  if (set("letterSpacing") && (all ? style.letterSpacing!.value !== 0 : true)) css["letter-spacing"] = `${num(style.letterSpacing!.value)}${style.letterSpacing!.unit}`;
+  if (set("textDecoration") && (all ? style.textDecoration !== "none" : true)) css["text-decoration-line"] = style.textDecoration!;
+  if (set("textTransform") && (all ? style.textTransform !== "none" : true)) css["text-transform"] = style.textTransform!;
+  if (set("fontFeatures") && Object.keys(style.fontFeatures!).length) {
+    css["font-feature-settings"] = Object.entries(style.fontFeatures!).map(([t, v]) => `"${t}" ${v}`).join(", ");
+  }
+  if (set("fontVariations") && Object.keys(style.fontVariations!).length) {
+    css["font-variation-settings"] = Object.entries(style.fontVariations!).map(([t, v]) => `"${t}" ${num(v)}`).join(", ");
+  }
+  if (set("fills")) {
+    const top = [...style.fills!].reverse().find((p: Paint) => p.visible !== false);
+    if (top?.type === "solid") css.color = rgbaCss(top.color, top.opacity ?? 1);
+  }
+  return css;
+}
+
+function cssFamily(family: string): string {
+  const generic = new Set(["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui"]);
+  return generic.has(family) ? family : JSON.stringify(family);
+}
+
+function lineHeightCss(lh: LineHeight): string {
+  if (lh === "normal") return "normal";
+  return lh.unit === "px" ? px(lh.value) : `${num(lh.value)}%`;
+}
+
+function rgbaCss(c: { r: number; g: number; b: number; a: number }, opacity: number): string {
+  const ch = (v: number): number => Math.round(Math.min(1, Math.max(0, v)) * 255);
+  const a = Math.round(c.a * opacity * 1000) / 1000;
+  return a >= 1 ? `rgb(${ch(c.r)}, ${ch(c.g)}, ${ch(c.b)})` : `rgba(${ch(c.r)}, ${ch(c.g)}, ${ch(c.b)}, ${a})`;
 }

@@ -1,7 +1,9 @@
 import { FixedMeasurer, LayoutNode, computeLayout, parseDeclarations, makeStyle, type LayoutStats } from "@fig-tree/layout";
+import { TextBlock, type FontRegistry, type TextBlockLayout } from "@fig-tree/text";
 import { cssDeclarations } from "../css";
 import type { DocumentChange, FigDocument } from "../document";
 import type { NodeType } from "../schema";
+import { textBlockInput, textKey } from "./text";
 
 /** A node's computed layout box, relative to its parent's border box (groups have no box: their children use the group's parent space). */
 export interface ComputedBox {
@@ -34,8 +36,11 @@ const PARENT_KEYS = new Set(["display", "flexDirection", "width", "height", "str
  * - Groups have no box: their children join the group's parent (as with
  *   CSS `display: contents`) and keep the group's parent space.
  * - Top-level nodes are absolutely positioned on the page at their `x`/`y`.
- * - Text is not shaped yet (module 4): text nodes measure as their stored
- *   width and height. Images use their asset's natural size and ratio.
+ * - Text nodes are measured by the text engine (`@fig-tree/text`) when a
+ *   font registry is given: their content shapes and wraps like the CSS
+ *   their typography states, so hug, fill and fixed text boxes size as in a
+ *   browser. Without a registry they measure as their stored width and
+ *   height. Images use their asset's natural size and ratio.
  * - `position: fixed` lays out like `absolute` and `sticky` like
  *   `relative` without offsets (scrolling is a prototype concern).
  *
@@ -49,14 +54,42 @@ export class DocumentLayout {
   /** The CSS each node was last styled from, to skip restyling when it did not change. */
   private readonly cssKeys = new Map<string, string>();
   private root: LayoutNode | null = null;
+  /** Text engine input per text node, and the key it was built from. */
+  private readonly texts = new Map<string, { block: TextBlock; key: string }>();
   /** Counters of the last layout pass. */
   lastStats: LayoutStats = { layouts: 0, cacheHits: 0, intrinsic: 0, placed: 0 };
 
   constructor(
     readonly doc: FigDocument,
     private page: string,
+    /** Fonts for text nodes; without them text measures as its stored box. */
+    readonly fonts: FontRegistry | null = null,
   ) {
     this.build(page);
+  }
+
+  /** A text node's text block and its layout at the node's computed width. */
+  text(id: string): { block: TextBlock; layout: TextBlockLayout } | undefined {
+    const t = this.texts.get(id);
+    const n = this.nodes.get(id);
+    if (!t || !n) return undefined;
+    const o = n.out;
+    const width = o.width - o.border.left - o.border.right - o.padding.left - o.padding.right;
+    return { block: t.block, layout: t.block.layout(width) };
+  }
+
+  /** Text nodes on the page that the text engine lays out. */
+  textNodes(): string[] {
+    return [...this.texts.keys()];
+  }
+
+  /**
+   * Lays text out again after fonts changed (a face finished loading): every
+   * text node re-shapes. Returns the nodes whose box changed.
+   */
+  refreshFonts(): Set<string> {
+    for (const id of this.texts.keys()) this.nodes.get(id)?.markDirty();
+    return this.run();
   }
 
   /** The computed box of a node on the page (undefined for groups, the page and unknown nodes). */
@@ -75,6 +108,7 @@ export class DocumentLayout {
     this.nodes.clear();
     this.boxes.clear();
     this.cssKeys.clear();
+    this.texts.clear();
     this.root = null;
     if (!this.doc.has(page)) return;
     this.root = new LayoutNode(makeStyle({ position: "relative", width: 0, height: 0 }));
@@ -99,6 +133,11 @@ export class DocumentLayout {
       }
       for (const p of s.parents) if (p === this.page || this.nodes.has(p) || this.doc.typeOf(p) === "group") relink.add(p);
       for (const id of s.added) if (tree.pageOf(id) === this.page) relink.add(tree.parentOf(id)!);
+    }
+    // Text content or runs changed: new text engine input.
+    for (const id of change.text) {
+      const n = this.nodes.get(id);
+      if (n && tree.has(id) && tree.pageOf(id) === this.page) this.setLeaf(n, id);
     }
     for (const [id, keys] of change.props) {
       if (!tree.has(id) || tree.pageOf(id) !== this.page) continue;
@@ -172,6 +211,7 @@ export class DocumentLayout {
       this.nodes.delete(tag);
       this.boxes.delete(tag);
       this.cssKeys.delete(tag);
+      this.texts.delete(tag);
       for (const c of m.children) visit(c);
     };
     visit(n);
@@ -199,6 +239,8 @@ export class DocumentLayout {
   /** The CSS a node is laid out with. */
   private cssOf(id: string): Record<string, string> {
     const css = cssDeclarations(this.doc, id);
+    // -webkit-line-clamp's `display: -webkit-box` lays out like a block.
+    if (css.display === "-webkit-box") css.display = "block";
     if (css.position === "fixed") css.position = "absolute";
     if (css.position === "sticky") {
       css.position = "relative";
@@ -211,10 +253,19 @@ export class DocumentLayout {
     return css;
   }
 
-  /** Leaf content: text measures as its stored box until text shaping exists; images use their natural size. */
+  /** Leaf content: text is measured by the text engine (or its stored box without fonts); images use their natural size. */
   private setLeaf(n: LayoutNode, id: string): void {
     const type = this.doc.typeOf(id);
-    if (type === "text") {
+    if (type === "text" && this.fonts) {
+      const css = cssDeclarations(this.doc, id);
+      const content = this.doc.text(id);
+      const key = textKey(this.doc, id, css, content);
+      const prev = this.texts.get(id);
+      if (prev && prev.key === key && n.measure === prev.block) return;
+      const block = new TextBlock(this.fonts, textBlockInput(this.doc, id, css, content));
+      this.texts.set(id, { block, key });
+      n.setMeasure(block);
+    } else if (type === "text") {
       const w = this.doc.get<number>(id, "width");
       const h = this.doc.get<number>(id, "height");
       const m = n.measure;

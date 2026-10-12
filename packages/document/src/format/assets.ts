@@ -1,4 +1,4 @@
-import type { AssetMeta } from "../schema";
+import type { AssetMeta, FontAssetDescriptor } from "../schema";
 
 /**
  * Asset bytes live outside the CRDT (the document only stores metadata
@@ -20,10 +20,21 @@ export class AssetStore {
     return [...this.bytes.keys()].sort();
   }
 
-  /** Stores bytes under their SHA-256 and returns the id with sniffed metadata. */
-  async add(bytes: Uint8Array, name?: string): Promise<{ id: string; meta: AssetMeta }> {
+  /**
+   * Stores bytes under their SHA-256 and returns the id with sniffed
+   * metadata. Font files (TTF, OTF, WOFF, WOFF2) need their `@font-face`
+   * descriptor (the text package derives one from the font's tables).
+   */
+  async add(bytes: Uint8Array, name?: string, font?: FontAssetDescriptor): Promise<{ id: string; meta: AssetMeta }> {
+    const fontType = sniffFont(bytes);
+    if (fontType) {
+      if (!font) throw new Error("font assets need a font descriptor (family, weight, style, stretch)");
+      const id = await sha256Hex(bytes);
+      this.bytes.set(id, bytes);
+      return { id, meta: { mimeType: fontType, byteLength: bytes.length, font, ...(name !== undefined ? { name } : {}) } };
+    }
     const sniffed = sniffImage(bytes);
-    if (!sniffed) throw new Error("unsupported asset: expected a PNG, JPEG, GIF, WebP or SVG image");
+    if (!sniffed) throw new Error("unsupported asset: expected a PNG, JPEG, GIF, WebP or SVG image, or a TTF, OTF, WOFF or WOFF2 font");
     const id = await sha256Hex(bytes);
     this.bytes.set(id, bytes);
     const meta: AssetMeta = {
@@ -53,7 +64,21 @@ export const EXTENSIONS: Record<AssetMeta["mimeType"], string> = {
   "image/gif": "gif",
   "image/webp": "webp",
   "image/svg+xml": "svg",
+  "font/ttf": "ttf",
+  "font/otf": "otf",
+  "font/woff": "woff",
+  "font/woff2": "woff2",
 };
+
+/** Detects a font file's type from its first four bytes. */
+export function sniffFont(bytes: Uint8Array): "font/ttf" | "font/otf" | "font/woff" | "font/woff2" | null {
+  if (bytes.length < 12) return null;
+  if (ascii(bytes, 0, "wOF2")) return "font/woff2";
+  if (ascii(bytes, 0, "wOFF")) return "font/woff";
+  if (ascii(bytes, 0, "OTTO")) return "font/otf";
+  if ((bytes[0] === 0 && bytes[1] === 1 && bytes[2] === 0 && bytes[3] === 0) || ascii(bytes, 0, "true")) return "font/ttf";
+  return null;
+}
 
 const ascii = (bytes: Uint8Array, at: number, text: string): boolean => [...text].every((c, i) => bytes[at + i] === c.charCodeAt(0));
 

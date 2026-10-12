@@ -1,24 +1,36 @@
 import { LayoutNode, computeLayout, parseStyle } from "@fig-tree/layout";
-import { TextBlock, parseParagraphStyle, parseTextStyle, type FontRegistry, type ParagraphStyle, type TextStyle } from "../src/index";
+import { TextBlock, parseParagraphStyle, parseTextStyle, type FontRegistry, type ParagraphInput, type ParagraphStyle, type TextStyle } from "../src/index";
 import { DEFAULT_PARAGRAPH_STYLE, DEFAULT_TEXT_STYLE } from "../src/style";
 import { fontDigest, fontFaceCss } from "./fonts";
 
 /**
  * A text conformance case: a tree of boxes described by CSS, where leaves
- * can hold text (plain, or style runs rendered as `<span>`s). Chromium
- * renders it as HTML with the fixture fonts; the engine lays out the same
- * CSS. Compared: every box's border box, each line's break position and
- * baseline, and the rectangle of every grapheme (Range.getBoundingClientRect).
+ * can hold text (plain, or style runs rendered as `<span>`s, optionally in
+ * several `<p>` paragraphs). Chromium renders it as HTML with the fixture
+ * fonts; the engine lays out the same CSS. Compared: every box's border
+ * box, each line's break position and baseline, and the rectangle of every
+ * grapheme (Range.getBoundingClientRect).
  */
 
 /** A style run: plain text, or [css, text] rendered as a span. */
 export type Run = string | readonly [css: string, text: string];
+
+/** A paragraph of a text leaf: a `<p>` (margins zero) holding runs. */
+export interface Paragraph {
+  readonly runs: readonly Run[];
+  /** Space above the paragraph (CSS margin-top), px. */
+  readonly spaceBefore?: number;
+  /** A list item: content inset (margin-inline-start) and an outside string marker. */
+  readonly list?: { readonly inset: number; readonly marker: string };
+}
 
 export interface TextNode {
   readonly style?: string;
   readonly children?: readonly TextNode[];
   /** Text content: the node is a block container of these inline runs. */
   readonly text?: readonly Run[];
+  /** Text content as paragraphs (each a block). */
+  readonly paragraphs?: readonly Paragraph[];
   /** HTML `lang` of the node. */
   readonly lang?: string;
 }
@@ -39,7 +51,8 @@ export type TextArea =
   | "transform"
   | "truncation"
   | "wrap-style"
-  | "sizing";
+  | "sizing"
+  | "document";
 
 export interface TextCase {
   readonly name: string;
@@ -59,8 +72,15 @@ export interface TextReference {
   /**
    * Per text leaf (pre-order): for each source grapheme, `[start, run, x, y, w, h]`
    * (the rect is null when the grapheme has no box), and each run's ascent.
+   * Sources and runs count the leaf's DOM text nodes in order.
    */
   readonly texts: { readonly graphemes: readonly (readonly (number | null)[])[]; readonly ascents: readonly number[] }[];
+}
+
+/** The paragraphs of a text leaf. */
+export function paragraphsOf(n: TextNode): Paragraph[] {
+  if (n.paragraphs) return [...n.paragraphs];
+  return n.text ? [{ runs: n.text }] : [];
 }
 
 // ── HTML ─────────────────────────────────────────────────────────────────
@@ -82,6 +102,10 @@ function blockStyle(n: TextNode): string {
   return [style, ...extra].filter(Boolean).join(";");
 }
 
+function runsHtml(runs: readonly Run[]): string {
+  return runs.map((r, i) => (typeof r === "string" ? escapeText(r) : `<span data-run="${i}" style="${escapeAttr(r[0])}">${escapeText(r[1])}</span>`)).join("");
+}
+
 export function caseHtml(c: TextCase): string {
   const [vw, vh] = c.viewport ?? TEXT_VIEWPORT;
   let id = 0;
@@ -89,10 +113,21 @@ export function caseHtml(c: TextCase): string {
   const render = (n: TextNode): string => {
     const attrs = [`data-id="${id++}"`, `style="${escapeAttr(blockStyle(n))}"`];
     if (n.lang) attrs.push(`lang="${n.lang}"`);
+    if (n.paragraphs) {
+      attrs.push(`data-text="${textId++}"`);
+      const inner = n.paragraphs
+        .map((p) => {
+          const styles = ["margin:0", `margin-top:${p.spaceBefore ?? 0}px`];
+          if (p.list) styles.push("display:list-item", `list-style:${JSON.stringify(p.list.marker).replace(/"/g, "'")} outside`, `margin-inline-start:${p.list.inset}px`);
+          const content = p.runs.every((r) => (typeof r === "string" ? r : r[1]) === "") ? "<br>" : runsHtml(p.runs);
+          return `<p style="${escapeAttr(styles.join(";"))}">${content}</p>`;
+        })
+        .join("");
+      return `<div ${attrs.join(" ")}>${inner}</div>`;
+    }
     if (n.text) {
       attrs.push(`data-text="${textId++}"`);
-      const inner = n.text.map((r, i) => (typeof r === "string" ? escapeText(r) : `<span data-run="${i}" style="${escapeAttr(r[0])}">${escapeText(r[1])}</span>`)).join("");
-      return `<div ${attrs.join(" ")}>${inner}</div>`;
+      return `<div ${attrs.join(" ")}>${runsHtml(n.text)}</div>`;
     }
     return `<div ${attrs.join(" ")}>${(n.children ?? []).map(render).join("")}</div>`;
   };
@@ -142,17 +177,16 @@ export const MEASURE_SCRIPT = `(async () => {
     const starts = nodes.map((n) => { const s = full.length; full += n.data; return s; });
     const ascents = nodes.map((n) => ascentOf(n.parentElement));
     const graphemes = [];
-    for (const g of seg.segment(full)) {
-      const s = g.index, e = s + g.segment.length;
-      let k = 0; while (k + 1 < nodes.length && starts[k + 1] <= s) k++;
+    for (let k = 0; k < nodes.length; k++) {
       const node = nodes[k];
-      const rg = document.createRange();
-      rg.setStart(node, s - starts[k]);
-      rg.setEnd(node, Math.min(node.data.length, e - starts[k]));
-      const rects = [...rg.getClientRects()];
-      if (rects.length === 0) { graphemes.push([s, k, null]); continue; }
-      const b = rg.getBoundingClientRect();
-      graphemes.push([s, k, ...r4(b)]);
+      for (const g of seg.segment(node.data)) {
+        const rg = document.createRange();
+        rg.setStart(node, g.index);
+        rg.setEnd(node, g.index + g.segment.length);
+        const s = starts[k] + g.index;
+        if (rg.getClientRects().length === 0) { graphemes.push([s, k, null]); continue; }
+        graphemes.push([s, k, ...r4(rg.getBoundingClientRect())]);
+      }
     }
     return { graphemes, ascents };
   });
@@ -162,20 +196,42 @@ export const MEASURE_SCRIPT = `(async () => {
 
 // ── Engine ───────────────────────────────────────────────────────────────
 
+/** A laid-out text leaf, and how its source maps to the DOM's text nodes. */
 export interface EngineText {
   readonly node: LayoutNode;
   readonly block: TextBlock;
-  /** Source text and the style run each source index belongs to. */
+  /** The leaf's DOM text: every paragraph's text, concatenated. */
   readonly source: string;
-  readonly runOf: number[];
-  /** Computed style of each DOM text node (a plain run or a span), in order. */
-  readonly runStyles: TextStyle[];
+  /** Start of each paragraph in `source`. */
+  readonly paragraphStarts: readonly number[];
+  /** DOM text node (run) index of each source index. */
+  readonly runOf: readonly number[];
+  /** For each DOM text node: its paragraph and span. */
+  readonly runs: readonly (readonly [paragraph: number, span: number])[];
 }
 
 export interface EngineTree {
   readonly root: LayoutNode;
   readonly nodes: LayoutNode[];
   readonly texts: EngineText[];
+}
+
+/** Maps a text block's paragraphs to the DOM text node numbering (one per non-empty run). */
+export function engineText(node: LayoutNode, block: TextBlock): EngineText {
+  let source = "";
+  const paragraphStarts: number[] = [];
+  const runOf: number[] = [];
+  const runs: [number, number][] = [];
+  block.input.paragraphs.forEach((p: ParagraphInput, pi) => {
+    paragraphStarts.push(source.length);
+    p.spans.forEach((s, si) => {
+      if (s.end <= s.start) return;
+      runs.push([pi, si]);
+      for (let k = s.start; k < s.end; k++) runOf.push(runs.length - 1);
+    });
+    source += p.text;
+  });
+  return { node, block, source, paragraphStarts, runOf, runs };
 }
 
 /** Builds the layout tree with text measurers. CSS text properties inherit down the tree. */
@@ -190,24 +246,23 @@ export function buildEngineTree(c: TextCase, fonts: FontRegistry): EngineTree {
     const textStyle0 = parseTextStyle(css, inherited);
     const textStyle = n.lang ? { ...textStyle0, language: n.lang } : textStyle0;
     const para = parseParagraphStyle(css, inheritedPara);
-    if (n.text) {
-      let source = "";
-      const spans: { start: number; end: number; style: TextStyle }[] = [];
-      const runOf: number[] = [];
-      const runStyles: TextStyle[] = [];
-      n.text.forEach((r, i) => {
-        const [runCss, t] = typeof r === "string" ? ["", r] : r;
-        const style = typeof r === "string" ? textStyle : parseTextStyle(runCss, textStyle);
-        spans.push({ start: source.length, end: source.length + t.length, style });
-        for (let k = 0; k < t.length; k++) runOf.push(i);
-        runStyles.push(style);
-        source += t;
+    const paragraphs = paragraphsOf(n);
+    if (paragraphs.length > 0) {
+      const inputs: ParagraphInput[] = paragraphs.map((p) => {
+        let text = "";
+        const spans: { start: number; end: number; style: TextStyle }[] = [];
+        for (const r of p.runs) {
+          const [runCss, t] = typeof r === "string" ? ["", r] : r;
+          spans.push({ start: text.length, end: text.length + t.length, style: typeof r === "string" ? textStyle : parseTextStyle(runCss, textStyle) });
+          text += t;
+        }
+        return { text, spans, style: para, root: textStyle, emptyLine: n.paragraphs !== undefined, ...(p.list ? { inlineStart: p.list.inset, marker: p.list.marker } : {}) };
       });
-      const block = new TextBlock(fonts, { paragraphs: [{ text: source, spans, style: para, root: textStyle }], lineClamp: para.lineClamp });
+      const spacing = paragraphs[1]?.spaceBefore ?? 0;
+      const block = new TextBlock(fonts, { paragraphs: inputs, paragraphSpacing: spacing, lineClamp: para.lineClamp });
       node.setMeasure(block);
-      texts.push({ node, block, source, runOf, runStyles });
+      texts.push(engineText(node, block));
     }
-    // Paragraph properties inherit too, except the box-level ones parseParagraphStyle resets.
     for (const child of n.children ?? []) node.appendChild(build(child, textStyle, para));
     return node;
   };
@@ -225,6 +280,58 @@ function absolute(n: LayoutNode): [number, number] {
   return [x, y];
 }
 
+/**
+ * Grapheme rects of a laid-out text leaf whose content box starts at
+ * (cx, cy), in the {@link TextReference} format.
+ */
+export function textGraphemes(t: EngineText, cx: number, cy: number, contentWidth: number, offsetY = 0): TextReference["texts"][number] {
+  const layout = t.block.layout(contentWidth);
+  const shaped = t.block.shaped;
+  const bySource = new Map<number, { l: number; r: number; top: number; bottom: number }>();
+  for (const p of layout.paragraphs) {
+    const sp = shaped[p.index]!;
+    const base = t.paragraphStarts[p.index]!;
+    for (const line of p.layout.lines) {
+      for (const ch of line.chars) {
+        const box = sp.spanBoxes[ch.span]!;
+        const top = cy + offsetY + p.top + line.baseline - box.ascent;
+        const bottom = top + box.ascent + box.descent;
+        const src = base + sp.prepared.source[ch.index]!;
+        const prev = bySource.get(src);
+        if (prev) {
+          prev.l = Math.min(prev.l, cx + ch.left);
+          prev.r = Math.max(prev.r, cx + ch.right);
+        } else bySource.set(src, { l: cx + ch.left, r: cx + ch.right, top, bottom });
+      }
+    }
+  }
+  const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const graphemes: (number | null)[][] = [];
+  // Graphemes per DOM text node, like the browser script.
+  let at = 0;
+  t.runs.forEach(([pi, si], k) => {
+    const span = t.block.input.paragraphs[pi]!.spans[si]!;
+    const nodeText = t.block.input.paragraphs[pi]!.text.slice(span.start, span.end);
+    for (const g of segmenter.segment(nodeText)) {
+      const start = at + g.index;
+      let box: { l: number; r: number; top: number; bottom: number } | undefined;
+      for (let i = start; i < start + g.segment.length; i++) {
+        const b = bySource.get(i);
+        if (!b) continue;
+        if (!box) box = { ...b };
+        else {
+          box.l = Math.min(box.l, b.l);
+          box.r = Math.max(box.r, b.r);
+        }
+      }
+      graphemes.push(box ? [start, k, box.l, box.top, box.r - box.l, box.bottom - box.top] : [start, k, null]);
+    }
+    at += nodeText.length;
+  });
+  const ascents = t.runs.map(([pi, si]) => shaped[pi]!.spanBoxes[si]?.ascent ?? 0);
+  return { graphemes, ascents };
+}
+
 /** The engine's equivalent of {@link TextReference}. */
 export function engineResult(c: TextCase, tree: EngineTree): TextReference {
   const [vw, vh] = c.viewport ?? TEXT_VIEWPORT;
@@ -239,44 +346,7 @@ export function engineResult(c: TextCase, tree: EngineTree): TextReference {
     const cx = x0 + n.out.border.left + n.out.padding.left;
     const cy = y0 + n.out.border.top + n.out.padding.top;
     const contentWidth = n.out.width - n.out.border.left - n.out.border.right - n.out.padding.left - n.out.padding.right;
-    const layout = t.block.layout(contentWidth);
-    const sp = t.block.shaped[0]!;
-    const source = sp.prepared.source;
-    // Grapheme boxes per source index.
-    const bySource = new Map<number, { l: number; r: number; top: number; bottom: number }>();
-    for (const p of layout.paragraphs) {
-      for (const line of p.layout.lines) {
-        for (const ch of line.chars) {
-          const box = sp.spanBoxes[ch.span]!;
-          const top = cy + p.top + line.baseline - box.ascent;
-          const bottom = top + box.ascent + box.descent;
-          const src = source[ch.index]!;
-          const prev = bySource.get(src);
-          if (prev) {
-            prev.l = Math.min(prev.l, cx + ch.left);
-            prev.r = Math.max(prev.r, cx + ch.right);
-          } else bySource.set(src, { l: cx + ch.left, r: cx + ch.right, top, bottom });
-        }
-      }
-    }
-    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-    const graphemes: (number | null)[][] = [];
-    for (const g of segmenter.segment(t.source)) {
-      let box: { l: number; r: number; top: number; bottom: number } | undefined;
-      for (let i = g.index; i < g.index + g.segment.length; i++) {
-        const b = bySource.get(i);
-        if (!b) continue;
-        if (!box) box = { ...b };
-        else {
-          box.l = Math.min(box.l, b.l);
-          box.r = Math.max(box.r, b.r);
-        }
-      }
-      const run = t.runOf[g.index] ?? 0;
-      graphemes.push(box ? [g.index, run, box.l, box.top, box.r - box.l, box.bottom - box.top] : [g.index, run, null]);
-    }
-    const ascents = t.runStyles.map((_, i) => sp.spanBoxes[i]?.ascent ?? 0);
-    return { graphemes, ascents };
+    return textGraphemes(t, cx, cy, contentWidth);
   });
   return { boxes, texts };
 }
@@ -326,7 +396,12 @@ function linesOf(gs: { index: number; rect: Rect4; baseline: number }[]): { base
   return lines.sort((a, b) => a.baseline - b.baseline);
 }
 
-export function compareText(c: TextCase, tree: EngineTree, ref: TextReference, actual: TextReference): TextComparison {
+/**
+ * Compares Chromium's reference with the engine's result: boxes, line
+ * starts and baselines, and grapheme and word rects. `sources` holds each
+ * text leaf's DOM text (for word splitting and messages).
+ */
+export function compareText(sources: readonly string[], ref: TextReference, actual: TextReference): TextComparison {
   let maxError = 0;
   let boxesWithin1 = 0;
   let boxesWithin001 = 0;
@@ -348,23 +423,26 @@ export function compareText(c: TextCase, tree: EngineTree, ref: TextReference, a
   let breaksMatch = true;
   let baselinesWithin1 = true;
   ref.texts.forEach((t, ti) => {
-    const engineText = tree.texts[ti]!;
+    const source = sources[ti] ?? "";
     const refG = refGraphemes(t);
-    const act = new Map(refGraphemes(actual.texts[ti]!).filter((g) => g.rect).map((g) => [g.index, g.rect!]));
-    const ascentsRef = t.ascents;
+    const actG = actual.texts[ti] ? refGraphemes(actual.texts[ti]!) : [];
+    const act = new Map(actG.filter((g) => g.rect).map((g) => [g.index, g.rect!]));
+    const actRun = new Map(actG.map((g) => [g.index, g.run]));
+    // A removed (collapsed) space reports a zero-width rect: it has no box.
     const refWithBox = refG.filter((g): g is RefGrapheme & { rect: Rect4 } => g.rect !== null && g.rect[2] > 0.05);
-    const refLines = linesOf(refWithBox.map((g) => ({ index: g.index, rect: g.rect, baseline: g.rect[1] + ascentsRef[g.run]! })));
-    const engineAscents = engineText.block.shaped[0]!.spanBoxes.map((b) => b.ascent);
-    const actWithBox = [...act].filter(([, r]) => r[2] > 0.05).map(([index, rect]) => ({ index, rect, baseline: rect[1] + engineAscents[engineText.runOf[index] ?? 0]! }));
-    // Only graphemes Chromium shows count for the engine's line grouping.
+    const refLines = linesOf(refWithBox.map((g) => ({ index: g.index, rect: g.rect, baseline: g.rect[1] + t.ascents[g.run]! })));
+    const actAscents = actual.texts[ti]?.ascents ?? [];
     const shown = new Set(refWithBox.map((g) => g.index));
-    const actLines = linesOf(actWithBox.filter((g) => shown.has(g.index)));
+    const actWithBox = [...act]
+      .filter(([index, r]) => r[2] > 0.05 && shown.has(index))
+      .map(([index, rect]) => ({ index, rect, baseline: rect[1] + actAscents[actRun.get(index) ?? 0]! }));
+    const actLines = linesOf(actWithBox);
     lines += refLines.length;
     const refStarts = refLines.map((l) => l.start).join(",");
     const actStarts = actLines.map((l) => l.start).join(",");
     if (refStarts !== actStarts) {
       breaksMatch = false;
-      if (msgs.length < 3) msgs.push(`text ${ti} line starts: chromium [${refStarts}] engine [${actStarts}] in ${JSON.stringify(engineText.source.slice(0, 60))}`);
+      if (msgs.length < 3) msgs.push(`text ${ti} line starts: chromium [${refStarts}] engine [${actStarts}] in ${JSON.stringify(source.slice(0, 60))}`);
     }
     refLines.forEach((l, i) => {
       const a = actLines[i];
@@ -379,7 +457,7 @@ export function compareText(c: TextCase, tree: EngineTree, ref: TextReference, a
       const err = a ? Math.max(...g.rect.map((v, k) => Math.abs(v - a[k]!))) : Infinity;
       maxError = Math.max(maxError, err);
       if (err <= 1) graphemesWithin1++;
-      else if (msgs.length < 3) msgs.push(`text ${ti} grapheme @${g.index} ${JSON.stringify(engineText.source.slice(g.index, g.index + 2))}: chromium ${fmt(g.rect)} engine ${a ? fmt(a) : "none"}`);
+      else if (msgs.length < 3) msgs.push(`text ${ti} grapheme @${g.index} ${JSON.stringify(source.slice(g.index, g.index + 2))}: chromium ${fmt(g.rect)} engine ${a ? fmt(a) : "none"}`);
       if (err <= 0.01) graphemesWithin001++;
     }
     // Words: maximal runs of non-space graphemes on one line, compared as unions.
@@ -398,14 +476,13 @@ export function compareText(c: TextCase, tree: EngineTree, ref: TextReference, a
         word = [];
       };
       for (const m of members) {
-        if (/\s/.test(engineText.source[m.index] ?? "")) flush();
+        if (/\s/.test(source[m.index] ?? "")) flush();
         else word.push(m);
       }
       flush();
     }
   });
   const pass = boxesWithin1 === ref.boxes.length && breaksMatch && baselinesWithin1 && graphemesWithin1 === graphemes;
-  void c;
   return {
     boxes: ref.boxes.length,
     boxesWithin1,
@@ -436,7 +513,7 @@ function fmt(r: readonly number[]): string {
   return `[${r.map((v) => Math.round(v * 100) / 100).join(",")}]`;
 }
 
-/** A short stable hash of the case's HTML and the font list, stored with fixtures to detect stale references. */
+/** A short stable hash of the case's HTML and the fonts, stored with fixtures to detect stale references. */
 export function caseHash(c: TextCase): string {
   const s = caseHtml(c) + JSON.stringify(c.viewport ?? TEXT_VIEWPORT) + fontFaceCss() + fontDigest();
   let h1 = 0x811c9dc5;

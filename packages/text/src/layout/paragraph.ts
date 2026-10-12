@@ -29,6 +29,12 @@ export interface ParagraphInput {
   readonly style: ParagraphStyle;
   /** The block's own text style: the root inline box (strut). */
   readonly root: TextStyle;
+  /** Space reserved on the inline-start side (a list item's `padding-inline-start`), px. */
+  readonly inlineStart?: number;
+  /** A list marker drawn outside the content, ending at its inline-start edge (e.g. "• " or "1. "), in the root style. */
+  readonly marker?: string;
+  /** An empty paragraph still has one line box (like `<p><br></p>`), as design tools show blank paragraphs. */
+  readonly emptyLine?: boolean;
 }
 
 /** Vertical metrics of a font at a size, in px, rounded as Chromium rounds them (whole pixels). */
@@ -129,7 +135,7 @@ export class ShapedParagraph {
     // Bidi levels.
     bidi ??= bidiFactory();
     if (n > 0) {
-      const emb = bidi.getEmbeddingLevels(text, style.direction);
+      const emb = bidi.getEmbeddingLevels(text, style.direction === "auto" ? undefined : style.direction);
       this.levels = emb.levels;
       this.baseLevel = emb.paragraphs[0]?.level ?? (style.direction === "rtl" ? 1 : 0);
     } else {

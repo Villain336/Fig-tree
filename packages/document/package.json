@@ -15,6 +15,7 @@
     "@fig-tree/renderer": "0.1.0",
     "fflate": "0.8.3",
     "yjs": "13.6.33",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "@fig-tree/text": "0.1.0"
   }
 }

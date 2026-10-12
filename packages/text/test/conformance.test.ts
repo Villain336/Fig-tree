@@ -59,7 +59,7 @@ describe("text conformance (Chromium fixtures)", () => {
       if (!ref) throw new Error(`no fixture for ${c.name}`);
       const tree = buildEngineTree(c, fonts);
       const actual = engineResult(c, tree);
-      const cmp = compareText(c, tree, ref.result, actual);
+      const cmp = compareText(tree.texts.map((t) => t.source), ref.result, actual);
       if (process.env.CONFORMANCE_DEBUG && c.name.includes(process.env.CONFORMANCE_DEBUG)) console.log(c.name, JSON.stringify(cmp), "\n", cmp.message);
       for (const key of [c.area, "all"]) {
         const t = tally(key);

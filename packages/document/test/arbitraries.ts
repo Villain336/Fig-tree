@@ -84,6 +84,7 @@ export const textStyle = {
   fontFamily: fc.constantFrom("Inter", "system-ui", "Georgia", "Noto Sans JP"),
   fontWeight: fc.integer({ min: 1, max: 1000 }),
   fontStyle: fc.constantFrom("normal", "italic", "oblique"),
+  fontStretch: fc.double({ min: 50, max: 200, noNaN: true }),
   fontSize: positive,
   lineHeight: fc.oneof(fc.constant("normal"), fc.record({ unit: fc.constantFrom("px", "percent"), value: nonneg })),
   letterSpacing: fc.record({ unit: fc.constantFrom("px", "em"), value: num }),
@@ -92,6 +93,8 @@ export const textStyle = {
   fontFeatures: fc.dictionary(openTypeTag, fc.integer({ min: 0, max: 20 }), { maxKeys: 3 }),
   fontVariations: fc.dictionary(openTypeTag, num, { maxKeys: 3 }),
   fills: paints,
+  listStyle: fc.constantFrom("none", "bullet", "ordered"),
+  listLevel: fc.integer({ min: 0, max: 8 }),
 };
 
 /** A valid vector network: a random polygon plus optional extra spokes. */
@@ -183,6 +186,8 @@ const PROP_ARBS: Record<string, fc.Arbitrary<unknown>> = {
   textOverflow: fc.constantFrom("clip", "ellipsis"),
   maxLines: fc.integer({ min: 1, max: 20 }),
   whiteSpace: fc.constantFrom("normal", "pre", "pre-wrap", "pre-line", "nowrap"),
+  textWrap: fc.constantFrom("auto", "balance", "pretty"),
+  direction: fc.constantFrom("ltr", "rtl", "auto"),
   arcStart: num,
   arcSweep: fc.double({ min: -360, max: 360, noNaN: true }),
   innerRadius: unit,

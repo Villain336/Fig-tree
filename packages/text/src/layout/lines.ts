@@ -278,7 +278,53 @@ export interface LineOptions {
 
 /** Lays out a shaped paragraph at `available` px. */
 export function layoutLines(sp: ShapedParagraph, available: number, options: LineOptions = {}): ParagraphLayout {
+  const inset = sp.input.inlineStart ?? 0;
+  if (inset === 0 && !sp.input.marker) return layoutContent(sp, available, options);
+  // A list item: content inset on the inline-start side, the marker outside it on the first line.
+  const content = layoutContent(sp, Math.max(0, available - inset), options);
+  const rtl = (sp.baseLevel & 1) === 1;
+  const dx = rtl ? 0 : inset;
+  const shiftRun = (r: GlyphRun): GlyphRun => {
+    const g = Float64Array.from(r.glyphs);
+    for (let i = 1; i < g.length; i += 3) g[i] = g[i]! + dx;
+    return { ...r, glyphs: g, left: r.left + dx, right: r.right + dx };
+  };
+  const lines = content.lines.map((l) => ({
+    ...l,
+    left: l.left + dx,
+    runs: l.runs.map(shiftRun),
+    chars: l.chars.map((c) => ({ ...c, left: c.left + dx, right: c.right + dx })),
+  }));
+  const marker = sp.input.marker ? shapeMarker(sp, sp.input.marker) : null;
+  if (marker && lines[0] && !lines[0].hidden) {
+    const first = lines[0];
+    const edge = rtl ? available - inset : inset;
+    const x0 = rtl ? edge : edge - marker.width;
+    const data: number[] = [];
+    let x = x0;
+    marker.gids.forEach((gid, k) => {
+      data.push(gid, x, first.baseline);
+      x += marker.advances[k]!;
+    });
+    lines[0] = { ...first, runs: [...first.runs, { font: marker.font, size: marker.box.size, span: -1, syntheticBold: false, syntheticOblique: false, glyphs: Float64Array.from(data), left: x0, right: x0 + marker.width, baseline: first.baseline }] };
+  }
+  return {
+    ...content,
+    width: available,
+    lines,
+    decorations: content.decorations.map((d) => ({ ...d, x: d.x + dx })),
+    contentWidth: content.contentWidth + inset,
+  };
+}
+
+function layoutContent(sp: ShapedParagraph, available: number, options: LineOptions): ParagraphLayout {
   const style = sp.input.style;
+  if (sp.length === 0 && sp.input.emptyLine) {
+    // One line box holding only the strut (a forced break's line).
+    const [ascent, descent] = leadingBox(sp.rootBox, sp.rootBox.lineHeight);
+    const line: Line = { start: 0, end: 0, top: 0, height: ascent + descent, baseline: ascent, left: 0, width: 0, runs: [], chars: [], ellipsis: false, hyphenated: false, hidden: false };
+    return { width: available, height: line.height, lines: [line], decorations: [], contentWidth: 0, firstBaseline: ascent, lastBaseline: ascent, clamped: false };
+  }
   const indent = indentOf(sp, available);
   let breaks = breakLines(sp, available, indent);
   if (style.textWrapStyle === "balance" && style.textWrapMode === "wrap") breaks = balance(sp, available, indent, breaks);
@@ -513,7 +559,11 @@ function buildLine(
   // follow each cluster in logical order: on its right in LTR, on its left in RTL.
   const glyphRuns: GlyphRun[] = [];
   const chars: CharBox[] = [];
-  let pen = left;
+  // Hanging trailing spaces (pre-wrap) sit after the content in logical order: on the
+  // right in LTR, on the left in RTL, where they hang outside the aligned line.
+  let hang = 0;
+  for (let i = e; i < truncateAt && i < drawEnd; i++) hang += adv[i - s]!;
+  let pen = rtlPara ? left - hang : left;
   const spacing = (cs: number): number => (sp.advance[cs]! || 0) - sp.glyphAdvance[cs]! + (opportunities[cs - s] ? expansion : 0) + (Number.isNaN(sp.advance[cs]!) ? adv[cs - s]! : 0);
   for (const r of runs) {
     const item = r.item;
@@ -658,13 +708,19 @@ function buildLine(
 }
 
 function shapeEllipsis(sp: ShapedParagraph): { font: FontInstance; gids: number[]; advances: number[]; width: number; box: BoxMetrics } | null {
+  return shapeMarker(sp, "\u2026");
+}
+
+/** Shapes a short string (ellipsis, list marker) in the paragraph's root style with the font of its first character. */
+function shapeMarker(sp: ShapedParagraph, text: string): { font: FontInstance; gids: number[]; advances: number[]; width: number; box: BoxMetrics } | null {
   const root = sp.input.root;
-  const match = sp.fonts.fontFor(0x2026, { families: root.fontFamily, request: requestOf(root) });
+  const match = sp.fonts.fontFor(text.codePointAt(0)!, { families: root.fontFamily, request: requestOf(root) });
   if (!match) return null;
   const font = instanceFor(match, requestOf(root), root.fontSize, root.fontOpticalSizing, root.fontVariationSettings);
-  const glyphs = shapeItem("…", 0, 1, font, false, "Zyyy", root.language, featuresFor(root));
+  const glyphs = shapeItem(text, 0, text.length, font, false, "Zyyy", root.language, featuresFor(root));
   const scale = effectiveFontSize(root.fontSize) / font.unitsPerEm;
-  const advances = Array.from(glyphs.advances, (a) => a * scale + root.letterSpacing / glyphs.advances.length);
+  const spacing = (root.letterSpacing * [...text].length) / Math.max(1, glyphs.advances.length);
+  const advances = Array.from(glyphs.advances, (a) => a * scale + spacing);
   const m = fontMetricsPx(font, root.fontSize);
   return { font, gids: Array.from(glyphs.gids), advances, width: advances.reduce((a, b) => a + b, 0), box: { ...m, lineHeight: sp.rootBox.lineHeight, font, match, size: root.fontSize } };
 }

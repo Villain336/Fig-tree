@@ -289,7 +289,7 @@ export function parseParagraphStyle(input: Declarations, parent: ParagraphStyle 
   for (const [k, v] of declarations(input)) {
     switch (k) {
       case "direction":
-        if (v !== "ltr" && v !== "rtl") throw new TextCssError(k, v);
+        if (v !== "ltr" && v !== "rtl" && v !== "auto") throw new TextCssError(k, v);
         s.direction = v;
         break;
       case "text-align":

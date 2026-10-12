@@ -304,6 +304,7 @@ const COMMON_DEFAULTS: Record<string, unknown> = {
   fontFamily: "sans-serif",
   fontWeight: 400,
   fontStyle: "normal",
+  fontStretch: 100,
   fontSize: 16,
   lineHeight: "normal",
   letterSpacing: { unit: "px", value: 0 },
@@ -317,6 +318,10 @@ const COMMON_DEFAULTS: Record<string, unknown> = {
   paragraphIndent: 0,
   textOverflow: "clip",
   whiteSpace: "pre-wrap",
+  textWrap: "auto",
+  direction: "auto",
+  listStyle: "none",
+  listLevel: 0,
   // Shapes
   arcStart: 0,
   arcSweep: 360,

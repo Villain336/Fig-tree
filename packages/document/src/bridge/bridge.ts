@@ -1,11 +1,13 @@
 import { Path, inflateRect, roundedRectPath, type Mat2D } from "@fig-tree/geometry";
-import type { Color, Paint as RenderPaint, Scene, SceneNode, Stroke } from "@fig-tree/renderer";
+import type { Color, GlyphRun, Paint as RenderPaint, Scene, SceneNode, Stroke } from "@fig-tree/renderer";
+import type { FontRegistry } from "@fig-tree/text";
 import type { DocumentChange, FigDocument } from "../document";
 import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
 import { boxMatrix } from "../transform";
 import { geometryKey, outlinePath, regionPaths, strokeOutline } from "./geometry";
 import { DocumentLayout, type ComputedBox } from "./layout";
 import { toRenderPaint } from "./paints";
+import { SYNTHETIC_OBLIQUE_SKEW, glyphSource, syntheticBoldStrength } from "./text";
 
 /**
  * Projects one page of a document into a renderer {@link Scene} and keeps
@@ -42,16 +44,46 @@ export class SceneBridge {
   readonly layout: DocumentLayout;
   /** Nodes recompiled by the last change only because their computed box moved. */
   lastRelaidOut = 0;
+  /** Fonts text is laid out with (null: text is not drawn and measures as its stored box). */
+  readonly fonts: FontRegistry | null;
+  private readonly unsubscribeFonts: () => void;
+  private fontRefreshScheduled = false;
 
   constructor(
     readonly doc: FigDocument,
     readonly scene: Scene,
-    options: { page?: string } = {},
+    options: { page?: string; fonts?: FontRegistry } = {},
   ) {
     this._page = options.page ?? doc.pages[0] ?? "";
+    this.fonts = options.fonts ?? null;
     this.unsubscribe = doc.onChange(this.onChange);
-    this.layout = new DocumentLayout(doc, this._page);
+    this.layout = new DocumentLayout(doc, this._page, this.fonts);
+    // A face finished loading: lay text out again with its real metrics and redraw it.
+    this.unsubscribeFonts = this.fonts ? this.fonts.onLoad(() => this.scheduleFontRefresh()) : () => {};
     this.build();
+  }
+
+  private scheduleFontRefresh(): void {
+    if (this.fontRefreshScheduled) return;
+    this.fontRefreshScheduled = true;
+    queueMicrotask(() => {
+      this.fontRefreshScheduled = false;
+      this.refreshFonts();
+    });
+  }
+
+  /** Re-lays out and recompiles every text node (and whatever their new sizes moved). Called when fonts load. */
+  refreshFonts(): void {
+    const before = this.totalCompiled;
+    const moved = this.layout.refreshFonts();
+    const done = new Set<string>();
+    for (const id of [...this.layout.textNodes(), ...moved]) {
+      if (done.has(id) || !this.entries.has(id)) continue;
+      done.add(id);
+      this.compile(id);
+    }
+    this.lastCompiled = this.totalCompiled - before;
+    this.onSync?.(this.lastCompiled);
   }
 
   /** The computed box of a node (relative to its parent; groups have none). */
@@ -96,6 +128,7 @@ export class SceneBridge {
 
   dispose(): void {
     this.unsubscribe();
+    this.unsubscribeFonts();
     this.clear();
   }
 
@@ -252,7 +285,6 @@ export class SceneBridge {
       if (blend !== "normal") notes.add(`blend-mode:${blend}`);
       for (const fx of get<Effect[]>("effects")) if (fx.visible !== false) notes.add(`effect:${fx.type}`);
     }
-    if (type === "text") notes.add("text");
     if (type === "image") notes.add("image");
 
     // Geometry.
@@ -276,8 +308,8 @@ export class SceneBridge {
       if (net.vertices.some((v) => v.strokeCap !== undefined)) notes.add("vector-vertex-cap");
     }
 
-    // Paints.
-    const fillsDoc = hasFills(type) ? get<Paint[]>("fills") : [];
+    // Paints (a text node's fills paint its glyphs, not its box).
+    const fillsDoc = hasFills(type) && type !== "text" ? get<Paint[]>("fills") : [];
     const strokesDoc = hasStrokes(type) ? get<Paint[]>("strokes") : [];
     const strokeStyle = hasStrokes(type)
       ? [get("strokeWeight"), get("strokeAlign"), get("strokeCap"), get("strokeJoin"), get("strokeMiterLimit"), get("strokeDashes"), get("strokeDashOffset")]
@@ -289,8 +321,79 @@ export class SceneBridge {
       this.rebuildPaint(id, e, type, fillsDoc, strokesDoc, overflow, width, height, e.paintNotes);
     }
     for (const n of e.paintNotes) notes.add(n);
+    if (type === "text") this.compileText(id, e, width, height, notes);
     if (notes.size) this._unsupported.set(id, notes);
     else this._unsupported.delete(id);
+  }
+
+  /**
+   * Text: one scene node per glyph run and paint (bottom to top), plus
+   * decoration lines, under the node's main scene node. Glyph positions come
+   * from the text engine's layout at the node's computed width; the text is
+   * placed vertically by `verticalAlign` (CSS `align-content`).
+   */
+  private compileText(id: string, e: Entry, width: number, height: number, notes: Set<string>): void {
+    const t = this.layout.text(id);
+    for (const n of e.text) this.disown(n);
+    e.text = [];
+    if (!t) {
+      notes.add("text");
+      this.linkMain(e);
+      return;
+    }
+    const { block, layout } = t;
+    if (block.pendingFonts) notes.add("text-fonts-loading");
+    const valign = this.doc.get<string>(id, "verticalAlign");
+    const dy = valign === "center" ? (height - layout.height) / 2 : valign === "bottom" ? height - layout.height : 0;
+    const nodeFills = this.doc.get<Paint[]>(id, "fills");
+    const shaped = block.shaped;
+    const paintsOf = (paragraph: number, span: number): readonly Paint[] => {
+      const sp = shaped[paragraph]!;
+      const style = span >= 0 ? sp.input.spans[span]?.style : sp.input.root;
+      return (style?.paint as Paint[] | undefined) ?? nodeFills;
+    };
+    const convert = (paints: readonly Paint[]): RenderPaint[] => {
+      const out: RenderPaint[] = [];
+      for (const p of paints) {
+        if (p.visible === false) continue;
+        const r = toRenderPaint(p, width, height);
+        if ("paint" in r) out.push(r.paint);
+        else notes.add(r.unsupported);
+      }
+      return out;
+    };
+    for (const p of layout.paragraphs) {
+      for (const line of p.layout.lines) {
+        if (line.hidden) continue;
+        for (const r of line.runs) {
+          const glyphs = Float64Array.from(r.glyphs);
+          for (let i = 2; i < glyphs.length; i += 3) glyphs[i] = glyphs[i]! + p.top + dy;
+          const run: GlyphRun = {
+            source: glyphSource(r.font),
+            size: r.size,
+            glyphs,
+            skew: r.syntheticOblique ? SYNTHETIC_OBLIQUE_SKEW : 0,
+            embolden: r.syntheticBold ? syntheticBoldStrength(r.size) : 0,
+          };
+          for (const paint of convert(paintsOf(p.index, r.span))) e.text.push(this.scene.createNode({ name: `${id}:glyphs`, glyphs: run, fill: paint }));
+        }
+      }
+      for (const d of p.layout.decorations) {
+        const y = d.y + p.top + dy;
+        const rect = new Path().moveTo(d.x, y).lineTo(d.x + d.width, y).lineTo(d.x + d.width, y + d.thickness).lineTo(d.x, y + d.thickness).close();
+        for (const paint of convert(paintsOf(p.index, d.span))) e.text.push(this.scene.createNode({ name: `${id}:${d.kind}`, path: rect, fill: paint }));
+      }
+    }
+    if (this.doc.get<Paint[]>(id, "strokes").some((s) => s.visible !== false)) notes.add("text-stroke");
+    for (const n of e.text) this.own(n, id);
+    this.linkMain(e);
+  }
+
+  /** Main's children: further fills, the host, text, then strokes. */
+  private linkMain(e: Entry): void {
+    if (e.host === e.main) return;
+    const kids = [...e.fills, ...(e.host ? [e.host] : []), ...e.text, ...e.strokes];
+    if (!sameNodes(e.main.children, kids)) e.main.replaceChildren(kids);
   }
 
   /**
@@ -440,8 +543,7 @@ export class SceneBridge {
     }
     if (restructured) {
       for (const n of [...e.fills, ...e.strokes]) this.own(n, id);
-      const kids = [...e.fills, ...(e.host && e.host !== e.main ? [e.host] : []), ...e.strokes];
-      if (e.host !== e.main && !sameNodes(e.main.children, kids)) e.main.replaceChildren(kids);
+      this.linkMain(e);
     }
   }
 
@@ -475,6 +577,8 @@ class Entry {
   host: SceneNode | null = null;
   fills: SceneNode[] = [];
   strokes: SceneNode[] = [];
+  /** Glyph runs and decorations of a text node. */
+  text: SceneNode[] = [];
   outline: Path | null = null;
   regions: Path[] | null = null;
   strokePath: Path | null = null;
@@ -494,7 +598,7 @@ class Entry {
 
   /** Scene nodes owned by this entry (not the scene nodes of document children). */
   all(): SceneNode[] {
-    const out = [this.main, ...this.fills];
+    const out = [this.main, ...this.fills, ...this.text];
     if (this.host && this.host !== this.main) out.push(this.host);
     for (const s of this.strokes) out.push(s, ...s.children);
     return out;
