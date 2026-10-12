@@ -84,13 +84,13 @@ export interface RenderImage {
  * Applied in this order on unpremultiplied sRGB values (see `docs/architecture.md`).
  */
 export interface ImageAdjustments {
-  readonly exposure?: number;
-  readonly contrast?: number;
-  readonly saturation?: number;
-  readonly temperature?: number;
-  readonly tint?: number;
-  readonly highlights?: number;
-  readonly shadows?: number;
+  readonly exposure?: number | undefined;
+  readonly contrast?: number | undefined;
+  readonly saturation?: number | undefined;
+  readonly temperature?: number | undefined;
+  readonly tint?: number | undefined;
+  readonly highlights?: number | undefined;
+  readonly shadows?: number | undefined;
 }
 
 /**

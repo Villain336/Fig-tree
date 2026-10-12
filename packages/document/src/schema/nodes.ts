@@ -58,6 +58,13 @@ const layerProps = {
   isolation: z.enum(["auto", "isolate"]),
   effects: EffectStack,
   /**
+   * Makes the layer a mask for the siblings above it in its parent: `alpha`
+   * uses its rendered alpha, `luminance` its luminance times alpha (CSS
+   * `mask-mode`), `vector` its shape whatever its paint. A mask is not drawn
+   * itself. CSS: `mask-image` / `clip-path` on the masked layers.
+   */
+  mask: z.enum(["none", "alpha", "luminance", "vector"]),
+  /**
    * Reserved for components (module 7): the id of the node in the main
    * component that this node mirrors, as in an instance's subtree.
    */
@@ -261,6 +268,7 @@ const COMMON_DEFAULTS: Record<string, unknown> = {
   blendMode: "normal",
   isolation: "auto",
   effects: [],
+  mask: "none",
   overrides: [],
   x: 0,
   y: 0,

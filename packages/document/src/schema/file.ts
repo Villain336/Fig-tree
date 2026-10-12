@@ -4,7 +4,7 @@ import { AssetId, NodeId, optionalShape } from "./primitives";
 import { TextContent } from "./text";
 
 /** Current `.figtree` format version. Bump it with a migration in `format/migrations.ts`. */
-export const FORMAT_VERSION = 2;
+export const FORMAT_VERSION = 3;
 
 export const ASSET_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "font/ttf", "font/otf", "font/woff", "font/woff2"] as const;
 
@@ -95,7 +95,10 @@ export function assetRefs(props: Record<string, unknown>): string[] {
   const scan = (paints: unknown): void => {
     if (!Array.isArray(paints)) return;
     for (const p of paints) {
-      if (p && typeof p === "object" && (p as { type?: unknown }).type === "image") refs.push((p as { asset: string }).asset);
+      if (!p || typeof p !== "object") continue;
+      const paint = p as { type?: unknown; asset?: unknown; params?: { asset?: unknown } };
+      if (paint.type === "image" && typeof paint.asset === "string") refs.push(paint.asset);
+      if (paint.type === "shader" && typeof paint.params?.asset === "string") refs.push(paint.params.asset);
     }
   };
   scan(props.fills);

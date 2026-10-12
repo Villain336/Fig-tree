@@ -37,7 +37,7 @@ export interface MeshGradientParams {
   readonly columns: number;
   readonly rows: number;
   readonly points: readonly MeshPoint[];
-  readonly motion?: number;
+  readonly motion?: number | undefined;
 }
 
 /** Film grain: seeded value noise in cells of `size` px, mixing two colors. */
@@ -49,7 +49,7 @@ export interface GrainParams {
   /** Share of cells that take the front color, 0..1. */
   readonly density: number;
   /** 0: hard grains; 1: smooth. */
-  readonly softness?: number;
+  readonly softness?: number | undefined;
 }
 
 /** Halftone screen of a tone source: dots or lines, one ink or four CMYK screens. */
@@ -64,9 +64,9 @@ export interface HalftoneParams {
   readonly angle: number;
   readonly source: ToneSource;
   /** Direction of the linear source, degrees. */
-  readonly sourceAngle?: number;
+  readonly sourceAngle?: number | undefined;
   /** Tone contrast, -1..1. */
-  readonly contrast?: number;
+  readonly contrast?: number | undefined;
 }
 
 /**
@@ -103,8 +103,8 @@ export interface DitheringParams {
   readonly colorBack: Color;
   readonly colorFront: Color;
   readonly source: ToneSource;
-  readonly sourceAngle?: number;
-  readonly contrast?: number;
+  readonly sourceAngle?: number | undefined;
+  readonly contrast?: number | undefined;
 }
 
 export interface ShaderParamsByKind {
@@ -121,17 +121,17 @@ interface ShaderPaintBase {
   /** The node's box: the shader's (0, 0)..(1, 1) maps to (0, 0)..(width, height) in local space. */
   readonly size: { readonly width: number; readonly height: number };
   /** Integer seed (0..2^24) for the shader's random choices. */
-  readonly seed?: number;
+  readonly seed?: number | undefined;
   /** Time in seconds at which the shader is evaluated when the clock is 0. */
-  readonly time?: number;
+  readonly time?: number | undefined;
   /** How fast the renderer's clock advances this shader's time. 0 (the default) is static. */
-  readonly speed?: number;
+  readonly speed?: number | undefined;
   /** Multiplies the result's alpha. Default 1. */
-  readonly opacity?: number;
+  readonly opacity?: number | undefined;
   /** The image an `image` tone source reads. */
   readonly image?: RenderImage | null;
   /** Image pixel space → local space for `image`. */
-  readonly imageTransform?: Mat2D;
+  readonly imageTransform?: Mat2D | undefined;
 }
 
 export type ShaderPaint = { [K in ShaderKind]: ShaderPaintBase & { readonly shader: K; readonly params: ShaderParamsByKind[K] } }[ShaderKind];

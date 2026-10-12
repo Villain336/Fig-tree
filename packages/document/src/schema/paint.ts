@@ -78,16 +78,121 @@ export const ImagePaint = z.strictObject({
 });
 
 /**
- * Reserved: a custom GPU paint. `shader` names a shader asset or built-in;
- * uniforms are plain numbers or vectors. Rendering arrives with the shader
- * fill module; the field shape is fixed now so files stay forward compatible.
+ * Shader paints: procedural fills drawn on the GPU (see `docs/architecture.md`,
+ * "Shader fills"). Each built-in shader has typed parameters; `seed` makes
+ * its random choices repeatable, `time` is the moment it shows and `speed`
+ * how fast it moves when the canvas animates (0, the default, is static).
+ * Positions and sizes are in the node's local px, except mesh points
+ * (normalized to the box).
  */
-export const ShaderPaint = z.strictObject({
+const shaderBase = {
   type: z.literal("shader"),
-  shader: z.string().min(1),
-  uniforms: z.record(z.string(), z.union([Num, z.array(Num).max(16)])).optional(),
+  /** Integer seed, 0 to 2^24 − 1. Default 0. */
+  seed: z.number().int().min(0).max(0xffffff).optional(),
+  /** Seconds. Default 0. */
+  time: Num.optional(),
+  /** Time scale while animating. Default 0 (static). */
+  speed: z.number().min(-100).max(100).optional(),
   ...paintBase,
+};
+
+/** Where halftone and dithering read their tone: a linear ramp, a radial falloff, noise or an image asset. */
+export const ToneSource = z.enum(["linear", "radial", "noise", "image"]);
+
+export const MeshPoint = z.strictObject({ x: Num, y: Num, color: Color }).meta({ id: "MeshPoint" });
+
+export const MeshGradientShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("mesh-gradient"),
+  params: z.strictObject({
+    columns: z.number().int().min(2).max(6),
+    rows: z.number().int().min(2).max(6),
+    /** columns × rows control points, row by row, positions normalized to the box. */
+    points: z.array(MeshPoint).min(4).max(36),
+    /** Drift of the points while animating, in box units. */
+    motion: z.number().min(0).max(0.5).optional(),
+  }).refine((p) => p.points.length === p.columns * p.rows, { message: "a mesh gradient needs columns × rows points" }),
 });
+
+export const GrainShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("grain"),
+  params: z.strictObject({
+    colorBack: Color,
+    colorFront: Color,
+    /** Grain size in px. */
+    size: z.number().min(0.25).max(256),
+    /** Share of grains in the front color. */
+    density: Unit,
+    softness: Unit.optional(),
+  }),
+});
+
+export const HalftoneShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("halftone"),
+  params: z.strictObject({
+    style: z.enum(["dots", "lines"]),
+    /** Four screens (cyan, magenta, yellow, black) at the classic angles instead of one ink. */
+    cmyk: z.boolean(),
+    colorBack: Color,
+    colorFront: Color,
+    cellSize: z.number().min(1).max(256),
+    /** Screen angle in degrees. */
+    angle: Num,
+    source: ToneSource,
+    sourceAngle: Num.optional(),
+    contrast: z.number().min(-1).max(1).optional(),
+    /** The image of an `image` source (covering the box). */
+    asset: AssetId.optional(),
+  }),
+});
+
+export const FlutedGlassShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("fluted-glass"),
+  params: z.strictObject({
+    fluteWidth: z.number().min(1).max(512),
+    angle: Num,
+    distortion: Unit,
+    shading: Unit,
+    /** Blur radius of what is seen through the glass (like background blur). */
+    frost: z.number().min(0).max(256),
+    tint: Color,
+  }),
+});
+
+export const LiquidShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("liquid"),
+  params: z.strictObject({
+    colors: z.array(Color).min(2).max(5),
+    /** Feature size in px. */
+    scale: z.number().min(1).max(4096),
+    warp: z.number().min(0).max(2),
+    detail: z.number().int().min(1).max(6),
+  }),
+});
+
+export const DitheringShader = z.strictObject({
+  ...shaderBase,
+  shader: z.literal("dithering"),
+  params: z.strictObject({
+    pattern: z.enum(["bayer2", "bayer4", "bayer8", "noise"]),
+    pixelSize: z.number().min(1).max(256),
+    colorBack: Color,
+    colorFront: Color,
+    source: ToneSource,
+    sourceAngle: Num.optional(),
+    contrast: z.number().min(-1).max(1).optional(),
+    asset: AssetId.optional(),
+  }),
+});
+
+export const ShaderPaint = z.discriminatedUnion("shader", [MeshGradientShader, GrainShader, HalftoneShader, FlutedGlassShader, LiquidShader, DitheringShader]).meta({ id: "ShaderPaint" });
+export type ShaderPaint = z.infer<typeof ShaderPaint>;
+export type ShaderName = ShaderPaint["shader"];
+export const SHADER_NAMES = ["mesh-gradient", "grain", "halftone", "fluted-glass", "liquid", "dithering"] as const satisfies readonly ShaderName[];
 
 export const Paint = z.discriminatedUnion("type", [
   SolidPaint,

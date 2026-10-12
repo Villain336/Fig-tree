@@ -1,6 +1,7 @@
 import {
   BooleanEvaluator,
   Path,
+  ellipsePath,
   contoursBounds,
   contoursToPath,
   inflateRect,
@@ -12,7 +13,18 @@ import {
   type Mat2D,
   type VectorNetwork as GeometryNetwork,
 } from "@fig-tree/geometry";
-import { runOutlinePath, type Color, type GlyphRun, type Paint as RenderPaint, type Scene, type SceneNode, type Stroke } from "@fig-tree/renderer";
+import {
+  runOutlinePath,
+  type BlendMode,
+  type Color,
+  type Effect as RenderEffect,
+  type GlyphRun,
+  type MaskType,
+  type Paint as RenderPaint,
+  type Scene,
+  type SceneNode,
+  type Stroke,
+} from "@fig-tree/renderer";
 import { SYNTHETIC_OBLIQUE_SKEW, syntheticBoldStrength, type FontRegistry } from "@fig-tree/text";
 import type { DocumentChange, FigDocument } from "../document";
 import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
@@ -20,7 +32,16 @@ import { boxMatrix } from "../transform";
 import { booleanContours, isBooleanGroup, type GeometryOptions, type GeometrySource } from "../vector-geometry";
 import { geometryKey, outlinePath } from "./geometry";
 import { DocumentLayout, type ComputedBox } from "./layout";
-import { toRenderPaint } from "./paints";
+import { objectFitPlacement, toRenderPaint, type ImageLookup } from "./paints";
+
+/**
+ * Decoded images for the bridge, by asset id (the editor decodes them from
+ * the document's asset store; tests decode PNGs). `get` returns null while
+ * an image loads; `onLoad` tells the bridge to draw it once it has.
+ */
+export interface ImageProvider extends ImageLookup {
+  onLoad(listener: () => void): () => void;
+}
 import { glyphSource } from "./text";
 
 /**
@@ -60,6 +81,9 @@ export class SceneBridge {
   lastRelaidOut = 0;
   /** Fonts text is laid out with (null: text is not drawn and measures as its stored box). */
   readonly fonts: FontRegistry | null;
+  /** Decoded images (null: image paints and image nodes are not drawn). */
+  readonly images: ImageProvider | null;
+  private readonly unsubscribeImages: () => void;
   private readonly unsubscribeFonts: () => void;
   private fontRefreshScheduled = false;
   /** Incremental boolean evaluation, per boolean group. */
@@ -90,10 +114,12 @@ export class SceneBridge {
   constructor(
     readonly doc: FigDocument,
     readonly scene: Scene,
-    options: { page?: string; fonts?: FontRegistry } = {},
+    options: { page?: string; fonts?: FontRegistry; images?: ImageProvider } = {},
   ) {
     this._page = options.page ?? doc.pages[0] ?? "";
     this.fonts = options.fonts ?? null;
+    this.images = options.images ?? null;
+    this.unsubscribeImages = this.images ? this.images.onLoad(() => this.refreshImages()) : () => {};
     this.unsubscribe = doc.onChange(this.onChange);
     this.layout = new DocumentLayout(doc, this._page, this.fonts);
     // A face was added or finished loading: lay text out again and redraw it.
@@ -109,6 +135,19 @@ export class SceneBridge {
       this.fontRefreshScheduled = false;
       this.refreshFonts();
     });
+  }
+
+  /** Recompiles the nodes waiting for an image (called when images finish decoding). */
+  refreshImages(): void {
+    const before = this.totalCompiled;
+    for (const [id, notes] of [...this._unsupported]) {
+      if (![...notes].some((n) => n.startsWith("image-loading:"))) continue;
+      const e = this.entries.get(id);
+      if (e) e.paintKey = "";
+      this.compile(id);
+    }
+    this.lastCompiled = this.totalCompiled - before;
+    if (this.lastCompiled > 0) this.onSync?.(this.lastCompiled);
   }
 
   /** Re-lays out and recompiles every text node (and whatever their new sizes moved). Called when fonts load. */
@@ -251,6 +290,7 @@ export class SceneBridge {
   dispose(): void {
     this.unsubscribe();
     this.unsubscribeFonts();
+    this.unsubscribeImages();
     this.clear();
   }
 
@@ -434,11 +474,15 @@ export class SceneBridge {
     const opacity = type === "page" ? 1 : get<number>("opacity");
     if (e.main.opacity !== opacity) e.main.opacity = opacity;
     if (type !== "page") {
-      const blend = get<string>("blendMode");
-      if (blend !== "normal") notes.add(`blend-mode:${blend}`);
-      for (const fx of get<Effect[]>("effects")) if (fx.visible !== false) notes.add(`effect:${fx.type}`);
+      const blend = get<BlendMode>("blendMode");
+      if (e.main.blendMode !== blend) e.main.blendMode = blend;
+      const isolate = get<string>("isolation") === "isolate";
+      if (e.main.isolate !== isolate) e.main.isolate = isolate;
+      const mask = get<string>("mask");
+      const maskType = mask === "none" ? null : (mask as MaskType);
+      if (e.main.mask !== maskType) e.main.mask = maskType;
+      if (blend === "plus-darker") notes.add("blend-mode:plus-darker-untested");
     }
-    if (type === "image") notes.add("image");
 
     // Geometry.
     const gk = boolean ? `boolean:${++this.booleanGeneration}` : geometryKey(doc, id, type, width, height);
@@ -468,12 +512,21 @@ export class SceneBridge {
       ? [get("strokeWeight"), get("strokeAlign"), get("strokeCap"), get("strokeJoin"), get("strokeMiterLimit"), get("strokeDashes"), get("strokeDashOffset")]
       : [];
     const overflow = hasHostClip(type) ? [get<string>("overflowX"), get<string>("overflowY")] : ["visible", "visible"];
-    const pk = JSON.stringify([fillsDoc, strokesDoc, strokeStyle, overflow, width, height, type === "vector" ? get("vectorNetwork") : null]);
+    const imageNode = type === "image" ? [get<string>("asset"), get<string>("objectFit")] : null;
+    const pk = JSON.stringify([fillsDoc, strokesDoc, strokeStyle, overflow, width, height, type === "vector" ? get("vectorNetwork") : null, imageNode]);
     if (pk !== e.paintKey) {
       e.paintKey = pk;
       this.rebuildPaint(id, e, type, fillsDoc, strokesDoc, overflow, width, height, e.paintNotes);
     }
     for (const n of e.paintNotes) notes.add(n);
+    if (type !== "page") {
+      const fx = get<Effect[]>("effects");
+      const fxKey = JSON.stringify([fx, e.geometryKey]);
+      if (fxKey !== e.effectsKey) {
+        e.effectsKey = fxKey;
+        e.main.effects = renderEffects(this.doc, id, type, fx, width, height);
+      }
+    }
     if (type === "text") this.compileText(id, e, width, height, notes);
     if (notes.size) this._unsupported.set(id, notes);
     else this._unsupported.delete(id);
@@ -512,7 +565,8 @@ export class SceneBridge {
         const out: RenderPaint[] = [];
         for (const p of paints) {
           if (p.visible === false) continue;
-          const r = toRenderPaint(p, width, height);
+          if (p.blendMode && p.blendMode !== "normal") notes.add(`text-paint-blend-mode:${p.blendMode}`);
+          const r = toRenderPaint(p, width, height, this.images);
           if ("paint" in r) out.push(r.paint);
           else notes.add(r.unsupported);
         }
@@ -616,7 +670,7 @@ export class SceneBridge {
   /** Main's children: further fills, the host, text, then strokes. */
   private linkMain(e: Entry): void {
     if (e.host === e.main) return;
-    const kids = [...e.fills, ...(e.host ? [e.host] : []), ...e.text, ...e.strokes];
+    const kids = [...(e.fillGroup ? [e.fillGroup] : e.fills), ...(e.host ? [e.host] : []), ...e.text, ...e.strokes];
     if (!sameNodes(e.main.children, kids)) e.main.replaceChildren(kids);
   }
 
@@ -638,19 +692,22 @@ export class SceneBridge {
   ): void {
     notes.clear();
     const get = <T>(k: string): T => this.doc.get<T>(id, k);
+    const blends = new Map<RenderPaint, BlendMode>();
     const convert = (paints: readonly Paint[]): RenderPaint[] => {
       const out: RenderPaint[] = [];
       for (const p of paints) {
         if (p.visible === false) continue;
-        if (p.blendMode && p.blendMode !== "normal") notes.add(`paint-blend-mode:${p.blendMode}`);
-        const r = toRenderPaint(p, width, height);
-        if ("paint" in r) out.push(r.paint);
-        else notes.add(r.unsupported);
+        const r = toRenderPaint(p, width, height, this.images);
+        if ("paint" in r) {
+          out.push(r.paint);
+          if (p.blendMode && p.blendMode !== "normal") blends.set(r.paint, p.blendMode);
+        } else notes.add(r.unsupported);
       }
       return out;
     };
 
     // Fills: the bottom one on main, the rest as nodes with the same outline above it.
+    // With paint blend modes, every fill is a node in an isolated group (CSS `background-blend-mode`).
     const outline = e.outline;
     let mainFill: RenderPaint | null = null;
     const fillSpecs: { name: string; path: Path; fill: RenderPaint; rule: "nonzero" | "evenodd" }[] = [];
@@ -660,9 +717,18 @@ export class SceneBridge {
       });
     } else if (outline) {
       const paints = convert(fillsDoc);
-      mainFill = paints[0] ?? null;
-      for (const paint of paints.slice(1)) fillSpecs.push({ name: `${id}:fill`, path: outline, fill: paint, rule: "nonzero" });
+      // An image node's bitmap sits above its fills (its background), like an <img> over its background color.
+      if (type === "image") {
+        const asset = get<string>("asset");
+        const image = this.images?.get(asset) ?? null;
+        if (image) paints.push({ type: "image", image, transform: objectFitPlacement(get<string>("objectFit"), image.width, image.height, width, height) });
+        else notes.add(this.images ? `image-loading:${asset.slice(0, 8)}` : "image");
+      }
+      const isolated = paints.some((p) => blends.has(p));
+      mainFill = isolated ? null : (paints[0] ?? null);
+      for (const paint of isolated ? paints : paints.slice(1)) fillSpecs.push({ name: `${id}:fill`, path: outline, fill: paint, rule: "nonzero" });
     }
+    const fillGroup = fillSpecs.some((f) => blends.has(f.fill));
     // Vectors fill their regions in child nodes; main carries the stroke outline for its stroke.
     setPath(e.main, type === "vector" ? e.strokePath : outline);
     setFill(e.main, mainFill);
@@ -742,6 +808,21 @@ export class SceneBridge {
       e.fills = fillSpecs.map((f) => this.scene.createNode({ name: f.name, path: f.path, fill: f.fill, fillRule: f.rule }));
       restructured = true;
     }
+    fillSpecs.forEach((f, i) => {
+      const mode = blends.get(f.fill) ?? "normal";
+      if (e.fills[i]!.blendMode !== mode) e.fills[i]!.blendMode = mode;
+    });
+    if (fillGroup !== (e.fillGroup !== null)) {
+      if (e.fillGroup) {
+        e.fillGroup.replaceChildren([]);
+        this.disown(e.fillGroup);
+        e.fillGroup = null;
+      } else {
+        e.fillGroup = this.scene.createNode({ name: `${id}:fills`, isolate: true });
+      }
+      restructured = true;
+    }
+    if (e.fillGroup && !sameNodes(e.fillGroup.children, e.fills)) e.fillGroup.replaceChildren(e.fills);
     const strokeShape = (specs: typeof strokeSpecs): string => specs.map((sp) => sp.clip?.align ?? "center").join(",");
     if (e.strokeShape === strokeShape(strokeSpecs) && e.strokes.length === strokeSpecs.length) {
       strokeSpecs.forEach((sp, i) => {
@@ -765,8 +846,17 @@ export class SceneBridge {
       e.strokeShape = strokeShape(strokeSpecs);
       restructured = true;
     }
+    // Stroke blend modes blend each stroke with everything below it.
+    const strokeBlend = (n: SceneNode, paint: RenderPaint | undefined): void => {
+      const mode = (paint && blends.get(paint)) ?? "normal";
+      if (n.blendMode !== mode) n.blendMode = mode;
+    };
+    strokeSpecs.forEach((sp, i) => {
+      const n = e.strokes[i]!;
+      strokeBlend(sp.clip ? n.children[0]! : n, sp.stroke.paint);
+    });
     if (restructured) {
-      for (const n of [...e.fills, ...e.strokes]) this.own(n, id);
+      for (const n of [...e.fills, ...e.strokes, ...(e.fillGroup ? [e.fillGroup] : [])]) this.own(n, id);
       this.linkMain(e);
     }
   }
@@ -800,6 +890,9 @@ export class SceneBridge {
 class Entry {
   host: SceneNode | null = null;
   fills: SceneNode[] = [];
+  /** Isolated group holding the fills when one of them has a blend mode. */
+  fillGroup: SceneNode | null = null;
+  effectsKey = "";
   strokes: SceneNode[] = [];
   /** Glyph runs and decorations of a text node. */
   text: SceneNode[] = [];
@@ -822,7 +915,7 @@ class Entry {
 
   /** Scene nodes owned by this entry (not the scene nodes of document children). */
   all(): SceneNode[] {
-    const out = [this.main, ...this.fills, ...this.text];
+    const out = [this.main, ...this.fills, ...this.text, ...(this.fillGroup ? [this.fillGroup] : [])];
     if (this.host && this.host !== this.main) out.push(this.host);
     for (const s of this.strokes) out.push(s, ...s.children);
     return out;
@@ -895,6 +988,67 @@ function offsetRect(width: number, height: number, radius: CornerRadius, smoothi
   const [a, b, c, e] = radii as [number, number, number, number];
   if (a + b > w + 1e-9 || e + c > w + 1e-9 || a + e > h + 1e-9 || b + c > h + 1e-9) return null;
   return roundedRectPath(-d, -d, w, h, [a, b, c, e]);
+}
+
+/**
+ * Renderer effects of a node. Shadow spread on rectangles, frames and
+ * images follows CSS Backgrounds 3 §7.1.1 exactly (radii grow by the spread,
+ * with the cubic adjustment for radii smaller than it, so sharp corners
+ * stay sharp); full ellipses grow as ellipses; other shapes are dilated on
+ * the GPU.
+ */
+function renderEffects(doc: FigDocument, id: string, type: NodeType, effects: readonly Effect[], width: number, height: number): RenderEffect[] {
+  const out: RenderEffect[] = [];
+  for (const fx of effects) {
+    if (fx.visible === false) continue;
+    if (fx.type === "layer-blur" || fx.type === "background-blur") {
+      out.push({ type: fx.type, radius: fx.radius });
+      continue;
+    }
+    let spreadPath: Path | null = null;
+    if (fx.spread !== 0) spreadPath = spreadShape(doc, id, type, width, height, fx.type === "inner-shadow" ? -fx.spread : fx.spread);
+    out.push({
+      type: fx.type,
+      color: fx.color,
+      offset: fx.offset,
+      radius: fx.blur,
+      spread: fx.spread,
+      ...(fx.type === "drop-shadow" ? { showBehind: fx.showBehindNode ?? false } : {}),
+      ...(fx.blendMode ? { blendMode: fx.blendMode } : {}),
+      spreadPath,
+    });
+  }
+  return out;
+}
+
+/** The node's outline grown (s > 0) or shrunk (s < 0) by s, when that has an exact CSS form. */
+function spreadShape(doc: FigDocument, id: string, type: NodeType, w: number, h: number, s: number): Path | null {
+  if (hasBoxOutline(type)) {
+    if (doc.get<number>(id, "cornerSmoothing") > 0) return null;
+    const r = doc.get<CornerRadius>(id, "cornerRadius");
+    const raw = typeof r === "number" ? [r, r, r, r] : [r.topLeft, r.topRight, r.bottomRight, r.bottomLeft];
+    const [tl, tr, br, bl] = raw as [number, number, number, number];
+    // Used radii first (CSS clamps overlapping radii), then the spread adjustment.
+    const f = Math.min(1, tl + tr > 0 ? w / (tl + tr) : 1, bl + br > 0 ? w / (bl + br) : 1, tl + bl > 0 ? h / (tl + bl) : 1, tr + br > 0 ? h / (tr + br) : 1);
+    const adjust = (radius: number): number => {
+      const used = radius * f;
+      if (s < 0) return Math.max(0, used + s);
+      if (used >= s) return used + s;
+      const ratio = used / s;
+      return Math.max(0, used + s * (1 + (ratio - 1) ** 3));
+    };
+    const W = w + 2 * s;
+    const H = h + 2 * s;
+    if (W <= 0 || H <= 0) return new Path();
+    return roundedRectPath(-s, -s, W, H, raw.map(adjust) as [number, number, number, number]);
+  }
+  if (type === "ellipse" && doc.get<number>(id, "arcSweep") === 360 && doc.get<number>(id, "innerRadius") === 0) {
+    const W = w + 2 * s;
+    const H = h + 2 * s;
+    if (W <= 0 || H <= 0) return new Path();
+    return ellipsePath(w / 2, h / 2, W / 2, H / 2);
+  }
+  return null;
 }
 
 function hasHostClip(type: NodeType): boolean {
