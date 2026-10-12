@@ -23,7 +23,7 @@ export interface PathToNetworkOptions {
  * segment per drawing command (quadratics elevated exactly to cubics, a
  * closing line where a closed contour does not end at its start), and one
  * region holding every closed contour as a loop, with the given fill rule.
- * Zero-length segments are dropped.
+ * Zero-length segments are dropped, and so are vertices left with no segment.
  */
 export function pathToNetwork(path: Path, options: PathToNetworkOptions = {}): VectorNetwork {
   const vertices: NetworkVertex[] = [];
@@ -126,7 +126,29 @@ export function pathToNetwork(path: Path, options: PathToNetworkOptions = {}): V
     }
   }
   const regions: NetworkRegion[] = options.fill === false || loops.length === 0 ? [] : [{ loops, fillRule: options.fillRule ?? "nonzero" }];
-  return { vertices, segments, regions };
+  return dropLoneVertices({ vertices, segments, regions });
+}
+
+/**
+ * Removes vertices no segment uses. They come from contours that draw nothing
+ * (a bare move-to, or one followed only by zero-length commands), which SVG
+ * does not render either, and they could not survive a round trip through
+ * path data.
+ */
+function dropLoneVertices(net: VectorNetwork): VectorNetwork {
+  const used = new Uint8Array(net.vertices.length);
+  for (const s of net.segments) used[s.start] = used[s.end] = 1;
+  if (used.every((u) => u === 1)) return net;
+  const remap = new Int32Array(net.vertices.length).fill(-1);
+  const vertices: NetworkVertex[] = [];
+  net.vertices.forEach((v, i) => {
+    if (used[i]) {
+      remap[i] = vertices.length;
+      vertices.push(v);
+    }
+  });
+  const segments = net.segments.map((s) => ({ ...s, start: remap[s.start]!, end: remap[s.end]! }));
+  return { vertices, segments, regions: net.regions };
 }
 
 /**

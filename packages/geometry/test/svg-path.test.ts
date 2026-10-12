@@ -134,6 +134,16 @@ describe("SVG path data", () => {
     );
   });
 
+  it("drops contours that draw nothing, so they round-trip", () => {
+    for (const d of ["M0 0 A0.25 0.25 0 0 0 0 0", "M5 5", "M1 1L1 1M2 2L3 3", "M1 1 A2 2 0 0 0 1 1 M2 2L3 3Z"]) {
+      const n1 = svgPathToNetwork(d);
+      expect(validateNetwork(n1)).toEqual([]);
+      for (let i = 0; i < n1.vertices.length; i++) expect(n1.segments.some((s) => s.start === i || s.end === i)).toBe(true);
+      expectNetworksEqual(n1, svgPathToNetwork(networkToSvgPath(n1)));
+    }
+    expect(svgPathToNetwork("M1 1L1 1M2 2L3 3").vertices).toEqual([{ x: 2, y: 2 }, { x: 3, y: 3 }]);
+  });
+
   it("round-trips networks with branches through path data", () => {
     const d = "M0 0L100 0L100 100L0 0ZM100 0L150 50C160 60 170 60 180 50";
     const n1 = svgPathToNetwork(d);
