@@ -102,7 +102,8 @@ export function TypographySection({ ids, fonts }: { ids: readonly string[]; font
   const valign = prop<string>(editor, texts, "verticalAlign");
   const wm = prop<string>(editor, texts, "widthMode");
   const hm = prop<string>(editor, texts, "heightMode");
-  const resize = wm === MIXED || hm === MIXED ? MIXED : wm === "hug" && hm === "hug" ? "auto-width" : wm === "fixed" && hm === "hug" ? "auto-height" : "fixed";
+  // Fill (in auto layout) is none of the three: no button is pressed then.
+  const resize = wm === MIXED || hm === MIXED ? MIXED : wm === "hug" && hm === "hug" ? "auto-width" : wm === "fixed" && hm === "hug" ? "auto-height" : wm === "fixed" && hm === "fixed" ? "fixed" : null;
   const overflow = prop<string>(editor, texts, "textOverflow");
   const maxLines = prop<number>(editor, texts, "maxLines");
 

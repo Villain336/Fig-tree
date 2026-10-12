@@ -26,9 +26,10 @@ interface EditorHarness {
   /** The framework-free editor (packages/editor-core Editor). */
   readonly editor: any;
   anchors(): { id: string; kind: string; label: string; rect: { x: number; y: number; width: number; height: number } | null }[];
-  takeSamples(): { wall: number; latency: number; input: number; frameCpu: number; compiled: number }[];
+  takeSamples(): { wall: number; latency: number; input: number; frameCpu: number; compiled: number; fonts: readonly string[] }[];
   selection(): readonly string[];
-  afterFrame(): Promise<void>;
+  frames(): number;
+  afterFrame(count: number): Promise<void>;
   readonly bridge: { readonly lastCompiled: number };
   apply(commands: unknown[]): { affected: readonly string[] } | { error: string };
   renderPixels(): Promise<RenderTestResult>;

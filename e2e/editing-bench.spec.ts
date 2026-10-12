@@ -21,6 +21,8 @@ interface Sample {
   input: number;
   frameCpu: number;
   compiled: number;
+  /** Font faces that arrived before the frame: every text is laid out again then, which is not the edit's doing. */
+  fonts: readonly string[];
 }
 
 interface Result {
@@ -33,6 +35,8 @@ interface Result {
   frameCpuMedianMs: number;
   wallMedianMs: number;
   maxCompiled: number;
+  /** Frames that followed a font arrival (excluded from maxCompiled). */
+  fontFrames: string[];
 }
 
 const results: Result[] = [];
@@ -62,10 +66,17 @@ async function at(page: Page, x: number, y: number): Promise<[number, number]> {
  */
 async function slowMove(page: Page, from: [number, number], to: [number, number], steps: number): Promise<void> {
   for (let i = 1; i <= steps; i++) {
-    const frame = page.evaluate(() => window.__figtree!.afterFrame());
+    const before = await page.evaluate(() => window.__figtree!.frames());
     await page.mouse.move(from[0] + ((to[0] - from[0]) * i) / steps, from[1] + ((to[1] - from[1]) * i) / steps);
-    await frame;
+    await withTimeout(page.evaluate((n) => window.__figtree!.afterFrame(n), before));
   }
+}
+
+/** A frame that does not come within 20 s means the input did nothing: fail instead of hanging. */
+async function withTimeout(p: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([p, new Promise((_, reject) => (timer = setTimeout(() => reject(new Error("no frame within 20 s after an input")), 20_000)))]);
+  clearTimeout(timer);
 }
 
 function record(backend: string, scenario: string, samples: Sample[]): Result {
@@ -78,19 +89,20 @@ function record(backend: string, scenario: string, samples: Sample[]): Result {
     inputMedianMs: pct(samples.map((s) => s.input), 0.5),
     frameCpuMedianMs: pct(samples.map((s) => s.frameCpu), 0.5),
     wallMedianMs: pct(samples.map((s) => s.wall), 0.5),
-    maxCompiled: Math.max(...samples.map((s) => s.compiled)),
+    maxCompiled: Math.max(...samples.filter((s) => s.fonts.length === 0).map((s) => s.compiled)),
+    fontFrames: samples.filter((s) => s.fonts.length > 0).map((s) => `${s.compiled} nodes after ${s.fonts.join(", ")}`),
   };
   results.push(r);
   console.log(
     `[editing-bench] ${backend} ${scenario}: ${r.frames} frames, input-to-frame CPU median ${r.latencyMedianMs.toFixed(1)} ms, p95 ${r.latencyP95Ms.toFixed(1)} ms ` +
-      `(input handling ${r.inputMedianMs.toFixed(1)} ms + frame ${r.frameCpuMedianMs.toFixed(1)} ms), wall clock median ${r.wallMedianMs.toFixed(0)} ms, at most ${r.maxCompiled} nodes recompiled per frame`,
+      `(input handling ${r.inputMedianMs.toFixed(1)} ms + frame ${r.frameCpuMedianMs.toFixed(1)} ms), wall clock median ${r.wallMedianMs.toFixed(0)} ms, at most ${r.maxCompiled} nodes recompiled per frame${r.fontFrames.length ? ` (font arrivals: ${r.fontFrames.join("; ")})` : ""}`,
   );
   return r;
 }
 
 for (const backend of backends) {
   test(`drag and resize on a 10k-node document (${backend})`, async ({ page }) => {
-    await open(page, backend, "grid10k", [1.5, -1200, -400]);
+    await open(page, backend, "grid10k", [1.5, -1500, -400]);
     expect(await page.evaluate(() => window.__figtree!.doc.tree.size)).toBe(10_001);
     // n12-11: frame 12 at (1200, 400), shape at (70, 47) in it, 50×30.
     const start = await at(page, 1295, 462);
@@ -131,13 +143,15 @@ for (const backend of backends) {
     await page.mouse.dblclick(...(await at(page, b.x + b.width - 4, b.y + 6)));
     await page.mouse.dblclick(...(await at(page, b.x + b.width - 4, b.y + 6)));
     await expect.poll(() => page.evaluate(() => window.__figtree!.editor.session?.nodeId ?? null)).toBe("t12-1");
+    const beforeEnd = await page.evaluate(() => window.__figtree!.frames());
     await page.keyboard.press("End");
+    await withTimeout(page.evaluate((n) => window.__figtree!.afterFrame(n), beforeEnd));
     await page.evaluate(() => window.__figtree!.takeSamples());
     const typed = " The quick brown fox jumps over the lazy dog.";
     for (const ch of typed) {
-      const frame = page.evaluate(() => window.__figtree!.afterFrame());
+      const before = await page.evaluate(() => window.__figtree!.frames());
       await page.keyboard.type(ch);
-      await frame;
+      await withTimeout(page.evaluate((n) => window.__figtree!.afterFrame(n), before));
     }
     const samples = await page.evaluate(() => window.__figtree!.takeSamples());
     expect(await page.evaluate(() => window.__figtree!.doc.text("t12-1").content as string)).toContain("lazy dog.");

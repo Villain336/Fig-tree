@@ -259,8 +259,7 @@ test("types and styles text with caret navigation", async ({ page }) => {
     { start: 12, end: 18, style: { fontWeight: 700, fontSize: 32 } },
   ]);
   // The second paragraph is drawn larger: its box grew.
-  const box = (await page.evaluate((i) => window.__figtree!.box(i), id))!;
-  expect(box.height).toBeGreaterThan(55);
+  await expect.poll(() => page.evaluate((i) => window.__figtree!.box(i)?.height ?? 0, id)).toBeGreaterThan(55);
   // Escape leaves editing with the text selected; undo steps back through the edits.
   await page.keyboard.press("Escape");
   expect(await page.evaluate(() => window.__figtree!.editor.session)).toBeNull();
@@ -602,7 +601,8 @@ test("edits every design panel field: math, mixed values, scrubbing, paints, typ
   await page.locator('[data-anchor="design.text.decoration.underline"]').click();
   await page.locator('[data-anchor="design.text.case.uppercase"]').click();
   await page.locator('[data-anchor="design.text.resize.auto-height"]').click();
-  await page.locator('[data-anchor="design.text.truncate"]').check();
+  // The panel re-renders on the next animation frame: click, then read the document.
+  await page.locator('[data-anchor="design.text.truncate"]').click();
   expect(await page.evaluate((i) => {
     const d = window.__figtree!.doc;
     return ["fontWeight", "fontSize", "lineHeight", "letterSpacing", "textAlign", "textDecoration", "textTransform", "widthMode", "heightMode", "textOverflow"].map((k) => d.get(i, k));
@@ -620,9 +620,10 @@ test("documentation screenshots", async ({ page }) => {
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(dir, "editor-auto-layout.png") });
   // Text editing with a selection, and the typography panel.
+  await page.evaluate(() => window.__figtree!.editor.select(["type"]));
+  await page.keyboard.press("Shift+2");
   await page.evaluate(() => window.__figtree!.editor.enterEditMode("type-body"));
   await page.evaluate(() => window.__figtree!.editor.session.setSelection(0, 24));
-  await page.keyboard.press("Shift+2");
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(dir, "editor-text.png") });
   await page.keyboard.press("Escape");

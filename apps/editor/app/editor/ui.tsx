@@ -132,6 +132,8 @@ export function NumberField({
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState(false);
   const input = useRef<HTMLInputElement | null>(null);
+  /** Set once Enter or Escape handled the edit, so the blur that follows does not apply it again. */
+  const done = useRef(false);
   useEffect(() => {
     if (!editing) setText(shown);
   }, [shown, editing]);
@@ -188,6 +190,8 @@ export function NumberField({
           scrub.current = null;
           editor.history.end();
         }}
+        // A scrub is not a click on the label (which would focus the field).
+        onClick={(e) => e.preventDefault()}
       >
         {icon ?? label}
       </span>
@@ -203,21 +207,28 @@ export function NumberField({
         value={editing ? text : shown}
         placeholder={value === MIXED ? "Mixed" : ""}
         onFocus={(e) => {
+          done.current = false;
           setEditing(true);
           setText(shown);
           e.target.select();
         }}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          done.current = false;
+          setText(e.target.value);
+        }}
         onBlur={() => {
-          commitText();
+          if (!done.current) commitText();
+          done.current = false;
           setEditing(false);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             commitText();
+            done.current = true;
             setEditing(false);
             input.current?.blur();
           } else if (e.key === "Escape") {
+            done.current = true;
             setText(shown);
             setEditing(false);
             setError(false);
@@ -226,6 +237,7 @@ export function NumberField({
             e.preventDefault();
             const d = (e.key === "ArrowUp" ? step : -step) * (e.shiftKey ? 10 : 1);
             onCommit((old) => clampV(old + d / scale));
+            done.current = true;
             setEditing(false);
           }
           e.stopPropagation();

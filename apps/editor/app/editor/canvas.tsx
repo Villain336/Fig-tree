@@ -45,8 +45,12 @@ export interface FrameSample {
   readonly latency: number;
   /** Handling the frame's inputs only. */
   readonly input: number;
+  /** The frame's render CPU. */
   readonly frameCpu: number;
+  /** Nodes the bridge recompiled since the previous frame. */
   readonly compiled: number;
+  /** Font faces that arrived before this frame (their text was laid out again). */
+  readonly fonts: readonly string[];
 }
 
 /**

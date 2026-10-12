@@ -53,8 +53,10 @@ export interface EditorHarness {
   takeSamples(): FrameSample[];
   /** Selected node ids. */
   selection(): readonly string[];
-  /** Resolves once the next frame was rendered and the GPU finished it. */
-  afterFrame(): Promise<void>;
+  /** Frames rendered so far. */
+  frames(): number;
+  /** Resolves once more than `count` frames have been rendered. */
+  afterFrame(count: number): Promise<void>;
 }
 
 declare global {
@@ -111,6 +113,11 @@ export function Editor() {
     let scheduled = false;
     let samples: FrameSample[] = [];
     const frameWaiters: (() => void)[] = [];
+    let framesRendered = 0;
+    /** Font faces added or loaded since the last frame (text lays out again then, recompiling every text). */
+    const fontEvents: string[] = [];
+    /** Nodes the bridge recompiled since the last frame (a frame without a document change recompiled nothing). */
+    let compiledSinceFrame = 0;
     const assets = new AssetStore();
 
     const renderNow = (): FrameStats | null => {
@@ -121,9 +128,11 @@ export function Editor() {
       const now = performance.now();
       if (inputs.length) {
         const input = inputs.reduce((sum, i) => sum + i.cpu, 0);
-        samples.push({ wall: now - Math.min(...inputs.map((i) => i.at)), latency: input + stats.cpuMs, input, frameCpu: stats.cpuMs, compiled: bridge.lastCompiled });
+        samples.push({ wall: now - Math.min(...inputs.map((i) => i.at)), latency: input + stats.cpuMs, input, frameCpu: stats.cpuMs, compiled: compiledSinceFrame, fonts: fontEvents.splice(0) });
       }
+      compiledSinceFrame = 0;
       if (samples.length > 5000) samples = samples.slice(-5000);
+      framesRendered++;
       for (const w of frameWaiters.splice(0)) w();
       setStatus(`${renderer.backendKind} · ${doc.tree.size} nodes · last update compiled ${bridge.lastCompiled} · frame cpu ${stats.cpuMs.toFixed(1)} ms · ${Math.round(editor.viewport.scale * 100)}%`);
       return stats;
@@ -155,12 +164,14 @@ export function Editor() {
       const registry = await editorFonts();
       if (disposed) return;
       bridge = new SceneBridge(doc, scene, { fonts: registry });
+      registry.onLoad((entry) => fontEvents.push(`${entry.family} ${entry.state}`));
       editor = new CoreEditor(doc, bridge, { platform: mac ? "mac" : "other", assets });
       editor.subscribe((changes) => {
         if (changes.has("view") || changes.has("document") || changes.has("page")) schedule();
       });
       // Fonts arriving lay text out again without a document change.
-      bridge.onSync = () => {
+      bridge.onSync = (compiled) => {
+        compiledSinceFrame += compiled;
         editor.emit("document");
         schedule();
       };
@@ -237,9 +248,11 @@ export function Editor() {
         selection() {
           return editor.selection;
         },
-        async afterFrame() {
-          await new Promise<void>((resolve) => frameWaiters.push(resolve));
-          await r.finish();
+        frames() {
+          return framesRendered;
+        },
+        async afterFrame(count) {
+          while (framesRendered <= count) await new Promise<void>((resolve) => frameWaiters.push(resolve));
         },
       };
     })().catch((err: unknown) => setError(String(err)));
