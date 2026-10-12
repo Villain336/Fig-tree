@@ -48,7 +48,7 @@ export function ContextMenu({ where, at, onClose }: { where: "canvas" | "layers"
           ) : (
             <ContextItem key={e.action} item={e} where={where} onRun={() => {
               onClose();
-              if (e.action.startsWith("edit.c") || e.action === "edit.paste") void clipboardAction(editor, e.action);
+              if (e.action === "edit.copy" || e.action === "edit.cut" || e.action === "edit.paste") void clipboardAction(editor, e.action);
               else editor.run(e.action);
             }} />
           ),

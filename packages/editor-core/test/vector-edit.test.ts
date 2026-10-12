@@ -157,6 +157,15 @@ describe("vector edit mode", () => {
     expect(s.doc.get("v", "x")).toBe(100);
   });
 
+  it("drags a point pressed again right after a click (a double press is still a drag)", () => {
+    const s = setup(squareWithHole);
+    enter(s.editor, "v");
+    s.editor.updateSettings({ snapping: false });
+    click(s.editor, 300, 300);
+    drag(s.editor, [300, 300], [320, 330], { clickCount: 2 });
+    expect(worldVertices(s.editor, "v")[2]).toEqual({ x: 320, y: 330 });
+  });
+
   it("moves an outer corner past the box: the box follows and nothing else moves on the canvas", () => {
     const s = setup(squareWithHole);
     enter(s.editor, "v");

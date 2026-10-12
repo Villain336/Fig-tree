@@ -286,7 +286,7 @@ export function TextField({ anchor, label, value, onCommit, placeholder, classNa
   );
 }
 
-export function SelectField<T extends string>({ anchor, label, value, options, onChange, width = "100%", testId }: { anchor: string; label: string; value: Maybe<T>; options: readonly (readonly [T, string])[]; onChange: (v: T) => void; width?: number | string; testId?: string }) {
+export function SelectField<T extends string>({ anchor, label, value, options, onChange, width = "100%", testId, disabled = false }: { anchor: string; label: string; value: Maybe<T>; options: readonly (readonly [T, string])[]; onChange: (v: T) => void; width?: number | string; testId?: string; disabled?: boolean }) {
   const ref = useAnchor<HTMLSelectElement>(anchor, "field", label);
   return (
     <select
@@ -294,7 +294,8 @@ export function SelectField<T extends string>({ anchor, label, value, options, o
       aria-label={label}
       data-testid={testId}
       title={label}
-      className="h-7 rounded-md border border-transparent bg-stone-100 px-1.5 text-[11px] text-stone-800 outline-none hover:border-stone-200 focus:border-blue-500"
+      disabled={disabled}
+      className="h-7 rounded-md border border-transparent bg-stone-100 px-1.5 text-[11px] text-stone-800 outline-none hover:border-stone-200 focus:border-blue-500 disabled:opacity-40"
       style={{ width }}
       value={value === MIXED ? "" : value}
       onChange={(e) => onChange(e.target.value as T)}

@@ -3,10 +3,10 @@
 import { multiply, scaling, translation } from "@fig-tree/geometry";
 import { Renderer, Scene, backendFromSearch, type FrameStats } from "@fig-tree/renderer";
 import { AssetStore, CommandError, SceneBridge, type Command, type FigDocument } from "@fig-tree/document";
-import { deletePage, Editor as CoreEditor, paste, placeImage, textSession, copySelection, cutSelection, type AnchorRect, type ClipboardIn } from "@fig-tree/editor-core";
+import { deletePage, Editor as CoreEditor, paste, placeImage, selectionToSvg, textSession, copySelection, cutSelection, type AnchorRect, type ClipboardIn } from "@fig-tree/editor-core";
 import type { FontRegistry } from "@fig-tree/text";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Canvas, isPrintable, keyInput, takeInputs, timed, type FrameSample } from "./editor/canvas";
+import { Canvas, isPrintable, keyInput, takeInputs, takeOverlay, timed, type FrameSample } from "./editor/canvas";
 import { PanelBoundary } from "./editor/boundary";
 import { DesignPanel } from "./editor/design";
 import { LayersPanel, PagesPanel } from "./editor/layers";
@@ -53,6 +53,8 @@ export interface EditorHarness {
   takeSamples(): FrameSample[];
   /** Selected node ids. */
   selection(): readonly string[];
+  /** The SVG markup last written by "Copy as SVG" (also on the system clipboard when allowed). */
+  copiedSvg(): string | null;
   /** Frames rendered so far. */
   frames(): number;
   /** Resolves once more than `count` frames have been rendered. */
@@ -118,17 +120,19 @@ export function Editor() {
     const fontEvents: string[] = [];
     /** Nodes the bridge recompiled since the last frame (a frame without a document change recompiled nothing). */
     let compiledSinceFrame = 0;
+    let copiedSvg: string | null = null;
     const assets = new AssetStore();
 
     const renderNow = (): FrameStats | null => {
       if (!renderer || disposed) return null;
       renderer.background = bridge.background;
       const inputs = takeInputs();
+      const overlay = takeOverlay();
       const stats = renderer.render({ transform: editor.viewport.matrix });
       const now = performance.now();
       if (inputs.length) {
         const input = inputs.reduce((sum, i) => sum + i.cpu, 0);
-        samples.push({ wall: now - Math.min(...inputs.map((i) => i.at)), latency: input + stats.cpuMs, input, frameCpu: stats.cpuMs, compiled: compiledSinceFrame, fonts: fontEvents.splice(0) });
+        samples.push({ wall: now - Math.min(...inputs.map((i) => i.at)), latency: input + stats.cpuMs, input, frameCpu: stats.cpuMs, compiled: compiledSinceFrame, fonts: fontEvents.splice(0), overlay });
       }
       compiledSinceFrame = 0;
       if (samples.length > 5000) samples = samples.slice(-5000);
@@ -179,6 +183,13 @@ export function Editor() {
         if (r.kind === "place-image") fileRef.current?.click();
         else if (r.kind === "rename") setRenaming(r.id);
         else if (r.kind === "shortcuts") setShortcuts(true);
+        else if (r.kind === "copy-svg") {
+          const svg = selectionToSvg(editor);
+          if (!svg) return;
+          copiedSvg = svg;
+          // The system clipboard as plain text (pasting it here imports it as vectors).
+          navigator.clipboard?.writeText(svg).catch(() => {});
+        }
       };
       renderer = await Renderer.create(canvas, { backend: backendFromSearch(window.location.search), background: bridge.background });
       if (disposed) {
@@ -247,6 +258,9 @@ export function Editor() {
         },
         selection() {
           return editor.selection;
+        },
+        copiedSvg() {
+          return copiedSvg;
         },
         frames() {
           return framesRendered;

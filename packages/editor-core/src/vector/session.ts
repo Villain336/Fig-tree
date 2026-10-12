@@ -362,8 +362,8 @@ export class VectorEditSession implements EditSession {
         this.addVertexAt(hit.segment, hit.t);
         return true;
       }
-      if (hit) return true;
-      return !this.otherLayerAt(e) && this.insideNode(e.world);
+      // A quick second press on a point or handle is a press like any other (it may start a drag).
+      if (!hit) return !this.otherLayerAt(e) && this.insideNode(e.world);
     }
     if (!hit && this.otherLayerAt(e)) return false;
     let wasSelected = false;

@@ -23,6 +23,8 @@ interface Sample {
   compiled: number;
   /** Font faces that arrived before the frame: every text is laid out again then, which is not the edit's doing. */
   fonts: readonly string[];
+  /** Overlay CPU (build and draw) since the previous frame. */
+  overlay: number;
 }
 
 interface Result {
@@ -34,6 +36,7 @@ interface Result {
   inputMedianMs: number;
   frameCpuMedianMs: number;
   wallMedianMs: number;
+  overlayMedianMs: number;
   maxCompiled: number;
   /** Frames that followed a font arrival (excluded from maxCompiled). */
   fontFrames: string[];
@@ -89,13 +92,14 @@ function record(backend: string, scenario: string, samples: Sample[]): Result {
     inputMedianMs: pct(samples.map((s) => s.input), 0.5),
     frameCpuMedianMs: pct(samples.map((s) => s.frameCpu), 0.5),
     wallMedianMs: pct(samples.map((s) => s.wall), 0.5),
+    overlayMedianMs: pct(samples.map((s) => s.overlay ?? 0), 0.5),
     maxCompiled: Math.max(...samples.filter((s) => s.fonts.length === 0).map((s) => s.compiled)),
     fontFrames: samples.filter((s) => s.fonts.length > 0).map((s) => `${s.compiled} nodes after ${s.fonts.join(", ")}`),
   };
   results.push(r);
   console.log(
     `[editing-bench] ${backend} ${scenario}: ${r.frames} frames, input-to-frame CPU median ${r.latencyMedianMs.toFixed(1)} ms, p95 ${r.latencyP95Ms.toFixed(1)} ms ` +
-      `(input handling ${r.inputMedianMs.toFixed(1)} ms + frame ${r.frameCpuMedianMs.toFixed(1)} ms), wall clock median ${r.wallMedianMs.toFixed(0)} ms, at most ${r.maxCompiled} nodes recompiled per frame${r.fontFrames.length ? ` (font arrivals: ${r.fontFrames.join("; ")})` : ""}`,
+      `(input handling ${r.inputMedianMs.toFixed(1)} ms + frame ${r.frameCpuMedianMs.toFixed(1)} ms; overlay ${r.overlayMedianMs.toFixed(2)} ms), wall clock median ${r.wallMedianMs.toFixed(0)} ms, at most ${r.maxCompiled} nodes recompiled per frame${r.fontFrames.length ? ` (font arrivals: ${r.fontFrames.join("; ")})` : ""}`,
   );
   return r;
 }
@@ -131,6 +135,50 @@ for (const backend of backends) {
     const resized = record(backend, "resize one shape", resize);
     expect(resized.maxCompiled).toBeLessThanOrEqual(2);
     expect(await page.evaluate(() => window.__figtree!.doc.get("n12-11", "width"))).toBeGreaterThan(100);
+  });
+
+  test(`pen preview, pen drag and vertex drag on a 10k-node document (${backend})`, async ({ page }) => {
+    await open(page, backend, "grid10k", [1.5, -1500, -400]);
+    // Start a path with the pen over frame 12 (at 1200, 400).
+    await page.keyboard.press("p");
+    await page.mouse.click(...(await at(page, 1250, 440)));
+    const id = await page.evaluate(() => window.__figtree!.editor.session?.nodeId as string);
+    expect(await page.evaluate((i) => window.__figtree!.doc.typeOf(i), id)).toBe("vector");
+    // The rubber band follows the pointer: no document change, nothing recompiled.
+    const p0 = await at(page, 1250, 440);
+    await page.mouse.move(...p0);
+    await page.evaluate(() => window.__figtree!.takeSamples());
+    await slowMove(page, p0, await at(page, 1400, 520), 30);
+    const preview = record(backend, "pen preview (rubber band)", await page.evaluate(() => window.__figtree!.takeSamples()));
+    expect(preview.maxCompiled).toBe(0);
+    expect(preview.frames).toBeGreaterThan(20);
+    // Press and drag out a smooth point's handles: one vector recompiled per frame.
+    const p1 = await at(page, 1400, 520);
+    await page.mouse.down();
+    await page.evaluate(() => window.__figtree!.takeSamples());
+    await slowMove(page, p1, await at(page, 1460, 560), 30);
+    const penDrag = record(backend, "pen: drag a smooth point", await page.evaluate(() => window.__figtree!.takeSamples()));
+    await page.mouse.up();
+    expect(penDrag.maxCompiled).toBeLessThanOrEqual(2);
+    expect(penDrag.frames).toBeGreaterThan(20);
+    await page.mouse.click(...(await at(page, 1300, 600)));
+    await page.keyboard.press("Escape");
+    expect(await page.evaluate((i) => (window.__figtree!.doc.get(i, "vectorNetwork") as { segments: unknown[] }).segments.length, id)).toBe(2);
+    // Vector edit mode is still open (select points with V): drag the first point.
+    await page.keyboard.press("v");
+    const v0 = await page.evaluate(() => window.__figtree!.anchors().find((a) => a.id === "canvas.vector.vertex.0")!.rect!);
+    const start: [number, number] = [v0.x + v0.width / 2, v0.y + v0.height / 2];
+    await page.mouse.click(...start);
+    await page.waitForTimeout(450);
+    await page.mouse.move(...start);
+    await page.mouse.down();
+    await page.evaluate(() => window.__figtree!.takeSamples());
+    await slowMove(page, start, [start[0] - 120, start[1] + 90], 30);
+    const vertexDrag = record(backend, "vector edit: drag a point", await page.evaluate(() => window.__figtree!.takeSamples()));
+    await page.mouse.up();
+    expect(vertexDrag.maxCompiled).toBeLessThanOrEqual(2);
+    expect(vertexDrag.frames).toBeGreaterThan(20);
+    expect(await page.evaluate(() => window.__figtree!.editor.history.undoDepth)).toBe(4);
   });
 
   test(`type into text on a 10k-node document with 2,000 texts (${backend})`, async ({ page }) => {

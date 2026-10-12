@@ -1,6 +1,6 @@
 "use client";
 
-import { addPage, deletePage, moveInTree, renameNode, setFlag, type Editor } from "@fig-tree/editor-core";
+import { addPage, BOOLEAN_OPS, deletePage, moveInTree, renameNode, setBooleanOperation, setFlag, type Editor } from "@fig-tree/editor-core";
 import type { NodeType } from "@fig-tree/document";
 import {
   ChevronDown,
@@ -31,7 +31,8 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { anchorPart, useAnchor, useEditor, useEditorTick } from "./state";
-import { IconButton } from "./ui";
+import { BOOLEAN_ICONS, BOOLEAN_LABELS } from "./toolbar";
+import { IconButton, Popover } from "./ui";
 
 const ICONS: Record<NodeType, LucideIcon> = {
   page: File,
@@ -68,6 +69,8 @@ interface Row {
   readonly visible: boolean;
   readonly locked: boolean;
   readonly unsupported: readonly string[];
+  /** The operation of a boolean group ("none" for other nodes). */
+  readonly booleanOp: string;
 }
 
 /** Rows shown at most (very large documents are truncated; collapse frames to see the rest). */
@@ -99,6 +102,7 @@ function rowsOf(editor: Editor, collapsed: ReadonlySet<string>): { rows: Row[]; 
         visible: doc.get<boolean>(id, "visible"),
         locked: doc.get<boolean>(id, "locked"),
         unsupported: [...(editor.bridge.unsupported.get(id) ?? [])],
+        booleanOp: type === "group" ? doc.get<string>(id, "booleanOperation") : "none",
       });
       if (n > 0 && !collapsed.has(id)) walk(id, depth + 1);
     }
@@ -114,6 +118,7 @@ export function LayersPanel({ onContextMenu, renaming, setRenaming }: { onContex
   const tick = useEditorTick(["document", "selection", "page", "hover"]);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => (editor.doc.tree.size > EXPAND_ALL_BELOW ? new Set(editor.doc.tree.ids()) : new Set()));
   const [drop, setDrop] = useState<Drop | null>(null);
+  const [boolMenu, setBoolMenu] = useState<{ id: string; at: { x: number; y: number } } | null>(null);
   const anchor = useRef<string | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const dragRef = useRef<{ ids: string[]; startY: number; active: boolean } | null>(null);
@@ -235,13 +240,45 @@ export function LayersPanel({ onContextMenu, renaming, setRenaming }: { onContex
             onStartRename={() => setRenaming(r.id)}
             onHover={() => editor.setHover(r.id)}
             onFlag={(key, value) => setFlag(editor, selected.has(r.id) ? selection : [r.id], key, value)}
+            onBooleanMenu={(at) => setBoolMenu({ id: r.id, at })}
             icon={iconFor(editor, r.id, r.type)}
           />
         ))}
         {rows.length === 0 && <li className="px-3 py-2 text-[12px] text-stone-400">No layers on this page.</li>}
         {truncated > 0 && <li className="px-3 py-1 text-[11px] text-stone-400">{truncated.toLocaleString()} more layers not listed</li>}
       </ul>
+      {boolMenu && editor.doc.has(boolMenu.id) && <BooleanOpMenu id={boolMenu.id} at={boolMenu.at} onClose={() => setBoolMenu(null)} />}
     </div>
+  );
+}
+
+/** Changes a boolean group's operation (or makes it a plain group). */
+function BooleanOpMenu({ id, at, onClose }: { id: string; at: { x: number; y: number }; onClose: () => void }) {
+  const editor = useEditor();
+  const current = editor.doc.get<string>(id, "booleanOperation");
+  return (
+    <Popover at={at} onClose={onClose} width={190} label="Boolean operation" testId="boolean-op-menu">
+      <div className="p-1" role="menu">
+        {[...BOOLEAN_OPS, "none" as const].map((op) => (
+          <BooleanOpRow key={op} op={op} checked={current === op} onPick={() => {
+            onClose();
+            setBooleanOperation(editor, id, op);
+          }} />
+        ))}
+      </div>
+    </Popover>
+  );
+}
+
+function BooleanOpRow({ op, checked, onPick }: { op: string; checked: boolean; onPick: () => void }) {
+  const label = op === "none" ? "Plain group" : BOOLEAN_LABELS[op]!;
+  const ref = useAnchor<HTMLButtonElement>(`menu.booleanOp.${op}`, "menu-item", label);
+  const Icon = op === "none" ? Group : BOOLEAN_ICONS[op]!;
+  return (
+    <button ref={ref} role="menuitem" type="button" data-testid={`boolean-op-${op}`} aria-checked={checked} onClick={onPick} className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] hover:bg-blue-600 hover:text-white ${checked ? "font-medium text-stone-900" : "text-stone-700"}`}>
+      <Icon size={13} strokeWidth={1.75} aria-hidden />
+      {label}
+    </button>
   );
 }
 
@@ -261,6 +298,7 @@ function LayerRow({
   onStartRename,
   onHover,
   onFlag,
+  onBooleanMenu,
   icon: Icon,
 }: {
   row: Row;
@@ -278,6 +316,7 @@ function LayerRow({
   onStartRename: () => void;
   onHover: () => void;
   onFlag: (key: "locked" | "visible", value: boolean) => void;
+  onBooleanMenu: (at: { x: number; y: number }) => void;
   icon: LucideIcon;
 }) {
   const id = anchorPart(row.id);
@@ -310,7 +349,26 @@ function LayerRow({
         ) : (
           <span className="w-4 shrink-0" />
         )}
-        <Icon size={13} strokeWidth={1.75} className="shrink-0 text-stone-500" aria-hidden />
+        {row.booleanOp !== "none" ? (
+          <span onPointerDown={(e) => e.stopPropagation()} className="flex">
+            <IconButton
+              anchor={`layers.row.${id}.boolean`}
+              label={`${BOOLEAN_LABELS[row.booleanOp]} (change the boolean operation)`}
+              icon={BOOLEAN_ICONS[row.booleanOp] ?? Group}
+              size={18}
+              iconSize={13}
+              testId={`layer-boolean-${row.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = e.currentTarget.getBoundingClientRect();
+                onBooleanMenu({ x: r.left, y: r.bottom + 2 });
+              }}
+              className="hover:bg-stone-200"
+            />
+          </span>
+        ) : (
+          <Icon size={13} strokeWidth={1.75} className="shrink-0 text-stone-500" aria-hidden />
+        )}
         {renaming ? (
           <input
             ref={inputRef}

@@ -26,8 +26,9 @@ interface EditorHarness {
   /** The framework-free editor (packages/editor-core Editor). */
   readonly editor: any;
   anchors(): { id: string; kind: string; label: string; rect: { x: number; y: number; width: number; height: number } | null }[];
-  takeSamples(): { wall: number; latency: number; input: number; frameCpu: number; compiled: number; fonts: readonly string[] }[];
+  takeSamples(): { wall: number; latency: number; input: number; frameCpu: number; compiled: number; fonts: readonly string[]; overlay: number }[];
   selection(): readonly string[];
+  copiedSvg(): string | null;
   frames(): number;
   afterFrame(count: number): Promise<void>;
   readonly bridge: { readonly lastCompiled: number };

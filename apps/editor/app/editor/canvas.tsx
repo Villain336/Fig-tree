@@ -21,7 +21,18 @@ const CURSORS: Record<Cursor, string> = {
   // A rotation cursor drawn as an SVG (our own: a circular arrow), centered on its hotspot.
   rotate:
     "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'><path d='M6 14a6 6 0 1 0 2-7' fill='none' stroke='white' stroke-width='4'/><path d='M6 14a6 6 0 1 0 2-7' fill='none' stroke='black' stroke-width='1.5'/><path d='M5 4v4h4' fill='none' stroke='black' stroke-width='1.5'/></svg>\") 12 12, crosshair",
+  // Our own drawings: a pen nib with its tip on the hotspot (top left), with a mark for adding or closing.
+  pen: svgCursor("<path d='M2 2l12 4 4 8-4 4-8-4z' fill='white' stroke='black' stroke-width='1.2' stroke-linejoin='round'/><path d='M2 2l6 6' stroke='black' stroke-width='1.2'/><circle cx='8.5' cy='8.5' r='1.3' fill='black'/>", 2, 2),
+  "pen-add": svgCursor("<path d='M2 2l12 4 4 8-4 4-8-4z' fill='white' stroke='black' stroke-width='1.2' stroke-linejoin='round'/><path d='M2 2l6 6' stroke='black' stroke-width='1.2'/><path d='M19 16v6M16 19h6' stroke='black' stroke-width='1.5'/>", 2, 2),
+  "pen-close": svgCursor("<path d='M2 2l12 4 4 8-4 4-8-4z' fill='white' stroke='black' stroke-width='1.2' stroke-linejoin='round'/><path d='M2 2l6 6' stroke='black' stroke-width='1.2'/><circle cx='19' cy='19' r='2.6' fill='white' stroke='black' stroke-width='1.3'/>", 2, 2),
+  pencil: svgCursor("<path d='M3 21l2-6L17 3l4 4L9 19z' fill='white' stroke='black' stroke-width='1.2' stroke-linejoin='round'/><path d='M3 21l2-6 4 4z' fill='black'/>", 3, 21),
+  bend: svgCursor("<path d='M4 17C8 5 16 5 20 17' fill='none' stroke='white' stroke-width='4'/><path d='M4 17C8 5 16 5 20 17' fill='none' stroke='black' stroke-width='1.5'/><circle cx='12' cy='8' r='2' fill='white' stroke='black' stroke-width='1.2'/>", 12, 8),
+  bucket: svgCursor("<path d='M6 9l7-6 8 8-7 7z' fill='white' stroke='black' stroke-width='1.2' stroke-linejoin='round'/><path d='M6 9c-2 3-4 6-4 8a2 2 0 0 0 4 0c0-2-1-4 0-8z' fill='black'/>", 4, 19),
 };
+
+function svgCursor(body: string, x: number, y: number): string {
+  return `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>${body}</svg>") ${x} ${y}, crosshair`;
+}
 
 /** Modifier state of a DOM event in the editor's terms (⌘ on macOS, Ctrl elsewhere). */
 export function mods(e: { shiftKey: boolean; altKey: boolean; metaKey: boolean; ctrlKey: boolean }, mac: boolean): { shift: boolean; alt: boolean; mod: boolean } {
@@ -51,6 +62,8 @@ export interface FrameSample {
   readonly compiled: number;
   /** Font faces that arrived before this frame (their text was laid out again). */
   readonly fonts: readonly string[];
+  /** CPU time spent building and drawing the overlay (selection, handles, vector points) since the previous frame. */
+  readonly overlay: number;
 }
 
 /**
@@ -85,8 +98,10 @@ export function Canvas({ onContextMenu, render }: { onContextMenu: (at: { x: num
       }
       const ctx = c.getContext("2d")!;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const t0 = performance.now();
       ctx.clearRect(0, 0, w, h);
       drawOverlay(ctx as unknown as Parameters<typeof drawOverlay>[0], editor.overlay(), w, h);
+      markOverlay(performance.now() - t0);
       setCursor(CURSORS[editor.cursor]);
       positionTextInput(editor, textRef.current);
     };
@@ -251,6 +266,17 @@ function positionTextInput(editor: Editor, ta: HTMLTextAreaElement | null): void
   ta.style.left = `${Math.round(r.x)}px`;
   ta.style.top = `${Math.round(r.y)}px`;
   ta.style.height = `${Math.max(12, Math.round(r.height))}px`;
+}
+
+/** Overlay CPU time (build and draw) since the last frame. */
+let overlayCpu = 0;
+export function markOverlay(ms: number): void {
+  overlayCpu += ms;
+}
+export function takeOverlay(): number {
+  const v = overlayCpu;
+  overlayCpu = 0;
+  return v;
 }
 
 /** Inputs waiting for a frame (for input-to-frame latency): event timestamp and handling time. */

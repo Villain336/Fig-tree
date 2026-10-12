@@ -1,7 +1,7 @@
 "use client";
 
 import { cssDeclarations, hasProp, type Color, type ComputedBox, type CornerRadius, type Effect } from "@fig-tree/document";
-import { FRAME_PRESETS, geometryValue, isInFlow, layoutDisplay, newFrameAt, setGeometry, setProps, type GeometryKey, type ShapeTool } from "@fig-tree/editor-core";
+import { FRAME_PRESETS, geometryValue, isInFlow, layoutDisplay, newFrameAt, setGeometry, setProps, vectorSession, type GeometryKey, type HandleMirroring, type ShapeTool } from "@fig-tree/editor-core";
 import type { FontRegistry } from "@fig-tree/text";
 import {
   AlignCenterHorizontal,
@@ -16,9 +16,12 @@ import {
   FlipVertical2,
   Link2,
   Link2Off,
+  Merge,
   RotateCw,
   Scan,
+  Scissors,
   SquareDashed,
+  Trash2,
 } from "lucide-react";
 import { Fragment, useState } from "react";
 import { HexField } from "./color-picker";
@@ -33,9 +36,10 @@ type Tab = "design" | "css";
 
 export function DesignPanel({ fonts }: { fonts: FontRegistry | null }) {
   const editor = useEditor();
-  useEditorTick(["selection", "tool", "page", "document"]);
+  useEditorTick(["selection", "tool", "page", "document", "session"]);
   const [tab, setTab] = useState<Tab>("design");
   const ids = editor.selection.filter((id) => editor.doc.has(id));
+  const editingPoints = vectorSession(editor) !== null;
   return (
     <aside className="flex w-64 shrink-0 flex-col border-l border-stone-200 bg-white" aria-label="Properties" data-testid="design-panel">
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-stone-200 px-2" role="tablist">
@@ -48,7 +52,17 @@ export function DesignPanel({ fonts }: { fonts: FontRegistry | null }) {
         ) : (
           <>
             {editor.tool.id === "frame" && <FramePresets />}
-            {ids.length === 0 ? (
+            {editingPoints ? (
+              <>
+                <VectorSection />
+                {ids.length > 0 && (
+                  <>
+                    <PaintSection ids={ids} keyName="fills" />
+                    <PaintSection ids={ids} keyName="strokes" />
+                  </>
+                )}
+              </>
+            ) : ids.length === 0 ? (
               <PageSection />
             ) : (
               <>
@@ -67,6 +81,53 @@ export function DesignPanel({ fonts }: { fonts: FontRegistry | null }) {
         )}
       </div>
     </aside>
+  );
+}
+
+const MIRRORING: readonly (readonly [HandleMirroring, string])[] = [
+  ["none", "No mirroring"],
+  ["angle", "Mirror angle"],
+  ["angle-length", "Mirror angle and length"],
+];
+
+/** Vector edit mode: the selected points' position, handle mirroring and corner radius, and point actions. */
+function VectorSection() {
+  const editor = useEditor();
+  useEditorTick(["session", "document", "selection"]);
+  const s = vectorSession(editor);
+  if (!s) return null;
+  const pos = s.pointPosition();
+  const mirroring = s.mirroring;
+  const radius = s.cornerRadius;
+  const count = s.selectedVertices.length;
+  const type = editor.doc.typeOf(s.nodeId);
+  const run = (a: string) => () => editor.run(a);
+  return (
+    <Section title="Edit points" testId="section-vector">
+      {s.convertsOnEdit && <p className="mb-2 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-4 text-amber-800" data-testid="vector-convert-note">Editing points turns this {type} into a vector.</p>}
+      <div className="grid grid-cols-2 gap-1.5">
+        <NumberField anchor="design.vector.x" label="Point X" icon={<span className="text-[10px]">X</span>} value={pos ? pos.x : null} disabled={!pos} onCommit={(f) => pos && s.setPointPosition("x", f(pos.x))} testId="vector-x" />
+        <NumberField anchor="design.vector.y" label="Point Y" icon={<span className="text-[10px]">Y</span>} value={pos ? pos.y : null} disabled={!pos} onCommit={(f) => pos && s.setPointPosition("y", f(pos.y))} testId="vector-y" />
+        <SelectField
+          anchor="design.vector.mirroring"
+          label="Handle mirroring"
+          value={mirroring === "mixed" ? MIXED : (mirroring ?? "none")}
+          options={MIRRORING}
+          disabled={mirroring === null}
+          onChange={(v) => s.setMirroring(v)}
+          testId="vector-mirroring"
+        />
+        <NumberField anchor="design.vector.radius" label="Point corner radius" icon={<Scan size={12} aria-hidden />} value={radius === null ? null : radius === "mixed" ? MIXED : radius} min={0} disabled={radius === null} onCommit={(f) => s.setCornerRadius(f)} testId="vector-radius" />
+      </div>
+      <div className="mt-2 flex items-center gap-0.5">
+        <IconButton anchor="design.vector.join" label="Join points" icon={Merge} size={26} disabled={!editor.canRun("vector.join")} onClick={run("vector.join")} testId="vector-join" />
+        <IconButton anchor="design.vector.disconnect" label="Disconnect points" icon={Scissors} size={26} disabled={!editor.canRun("vector.disconnect")} onClick={run("vector.disconnect")} testId="vector-disconnect" />
+        <IconButton anchor="design.vector.flipX" label="Flip points horizontally" icon={FlipHorizontal2} size={26} disabled={!editor.canRun("vector.flipX")} onClick={run("vector.flipX")} />
+        <IconButton anchor="design.vector.flipY" label="Flip points vertically" icon={FlipVertical2} size={26} disabled={!editor.canRun("vector.flipY")} onClick={run("vector.flipY")} />
+        <IconButton anchor="design.vector.delete" label="Delete points, keeping the shape" icon={Trash2} size={26} disabled={!editor.canRun("vector.deleteKeep")} onClick={run("vector.deleteKeep")} testId="vector-delete" />
+      </div>
+      <p className="mt-1.5 text-[11px] text-stone-500" data-testid="vector-count">{count === 0 ? "No points selected" : count === 1 ? "1 point selected" : `${count} points selected`}</p>
+    </Section>
   );
 }
 
