@@ -83,7 +83,7 @@ describe("outline stroke", () => {
 
   it("handles a width larger than the curvature radius (the inner side vanishes)", () => {
     // A circle of radius 5 stroked 20 wide covers the disk of radius 15 entirely.
-    // (The polygon stroker leaves winding-0 holes here, so compare with the exact answer.)
+    // Compared with the exact answer rather than the polygon stroker.
     const outline = outlineStroke(ellipsePath(0, 0, 5, 5), { width: 20 });
     expect(outline).toHaveLength(1);
     expect(Math.abs(contoursArea(outline)) / (Math.PI * 225)).toBeCloseTo(1, 3);
