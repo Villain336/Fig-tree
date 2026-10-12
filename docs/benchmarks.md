@@ -178,6 +178,21 @@ Measured on 2026-10-12 on the machine above (`e2e/editing-bench.spec.ts`, part o
 | Type 45 characters into a paragraph (`/?doc=text10k`, 2,000 texts) | WebGPU | 14.5–15.8 / 25–30 ms | 2.4–3.3 ms | 11.9–12.5 ms | 292–373 ms | 1 |
 | | WebGL2 | 8.5–10.7 / 19–29 ms | 2.7–3.4 ms | 5.2–7.1 ms | 201–236 ms | 1 |
 
+Vector editing (module 5c), measured on 2026-10-12 the same way, two runs (the second in the gate run of `npm run bench`). On `/?doc=grid10k` at 150%, the pen draws a vector over a board of 99 shapes: the rubber band follows the pointer before the second click, a press is dragged to pull out a smooth point's handles, then, in vector edit mode, the path's first point is dragged.
+
+| Scenario | Backend | Input-to-frame CPU, median / p95 | Input handling (median) | Frame CPU (median) | Overlay CPU (median) | Wall clock (median) | Nodes recompiled per frame (max) |
+|---|---|---|---|---|---|---|---|
+| Pen preview (rubber band, no document change) | WebGPU | 0.7–0.8 / 4.7–5.3 ms | 0.3 ms | 0.4–0.5 ms | 1.2 ms | 9 ms | 0 |
+| | WebGL2 | 0.5 / 4.0 ms | 0.3 ms | 0.2 ms | 1.0–1.2 ms | 6–7 ms | 0 |
+| Pen: drag out a smooth point (30 steps) | WebGPU | 3.6–4.1 / 6.6–7.8 ms | 1.3–1.4 ms | 2.1–2.3 ms | 3.3–4.6 ms | 325–351 ms | 1 |
+| | WebGL2 | 5.4–5.8 / 11.1–11.2 ms | 1.3–1.4 ms | 3.0–3.8 ms | 4.2–4.9 ms | 189–191 ms | 1 |
+| Vector edit mode: drag a point (30 steps) | WebGPU | 4.1–4.5 / 8.7–10.5 ms | 1.6–2.0 ms | 2.3–2.8 ms | 3.3–3.5 ms | 331–337 ms | 1 |
+| | WebGL2 | 4.8–5.3 / 8.2–8.8 ms | 1.7–2.0 ms | 3.0–3.4 ms | 3.1–3.6 ms | 202–204 ms | 1 |
+
+- **One node per frame.** Every step of a pen drag or a point drag is one `editVector` batch with the box update, which recompiles the vector and nothing else (asserted: at most 2; measured 1 on every frame). The rubber band changes no document state, so its frames recompile nothing and render from the unchanged scene.
+- **Where the time goes.** Handling a step (the session's state machine, the operations previewed locally to keep the box tight, zod validation, the Yjs transaction, layout of the vector's board, the bridge recompiling the vector) takes 1.3–2 ms. The overlay, built and drawn on a 2D canvas over the GPU canvas, is recorded separately since module 5c and is not in the input-to-frame column: 1–5 ms here, mostly the board name labels and outlines of the 10k-node page, not the vector's points (the vector's screen geometry is cached per network and view).
+- The drag and typing scenarios measured in the same run stayed within the ranges above.
+
 What the numbers and the assertions show:
 - **Edits touch one node.** A drag or resize step recompiles exactly the dragged node, and a keystroke the edited text (asserted: at most 2 for gestures and well under the card's size for typing; measured 1 in every frame). Gestures write to the document on every pointer move (that is what collaborators see), and all the steps of a gesture are one undo step.
 - **Where the time goes.** Handling one pointer move takes about 1–4 ms (the command layer and layout dominate; hit-testing is not involved during a drag). Typing pays for shaping and laying out the paragraph again (about 3 ms with the editor around it) and a frame with more glyph work (5–13 ms CPU, the WebGPU encoder doing more per glyph entry than WebGL2's instanced draw).

@@ -232,7 +232,11 @@ export function Canvas({ onContextMenu, render }: { onContextMenu: (at: { x: num
   // Focus the textarea when a text session starts (not on every render: panel fields may have focus).
   const sessionNode = textSession(editor)?.nodeId ?? null;
   useEffect(() => {
-    if (sessionNode) textRef.current?.focus({ preventScroll: true });
+    if (!sessionNode) return;
+    // A panel field the user is typing in keeps its focus (this effect can run late, on the next render).
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== textRef.current && (active.tagName === "INPUT" || active.tagName === "SELECT" || active.tagName === "TEXTAREA")) return;
+    textRef.current?.focus({ preventScroll: true });
   }, [sessionNode]);
 
   return (
