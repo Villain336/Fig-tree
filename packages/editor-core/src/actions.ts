@@ -479,10 +479,7 @@ export function addAutoLayout(editor: Editor): boolean {
         },
       },
     ];
-    if (guess.order.length > 0) {
-      cmds.push({ type: "setParent", ids: guess.order, parent: frame, index: 0, keepPosition: false });
-      for (const id of guess.order) cmds.push({ type: "updateProps", id, props: { position: "relative" } });
-    }
+    if (guess.order.length > 0) cmds.push(...flowOrderCommands(frame, guess.order));
     editor.history.apply(cmds);
     return true;
   }
@@ -494,12 +491,19 @@ export function addAutoLayout(editor: Editor): boolean {
   return editor.history.group(() => {
     if (!frameSelection(editor, { display: "flex", flexDirection: guess.direction, [guess.direction === "row" ? "columnGap" : "rowGap"]: guess.gap, alignItems: "flex-start", widthMode: "hug", heightMode: "hug" })) return false;
     const frame = editor.selection[0]!;
-    const cmds: Command[] = [{ type: "setParent", ids: guess.order, parent: frame, index: 0, keepPosition: false }];
-    for (const id of guess.order) cmds.push({ type: "updateProps", id, props: { position: "relative" } });
-    editor.history.apply(cmds);
+    editor.history.apply(flowOrderCommands(frame, guess.order));
     editor.select([frame]);
     return true;
   });
+}
+
+/** Puts nodes into a container's flow in the given order (first = first in the flow). */
+function flowOrderCommands(parent: string, order: readonly string[]): Command[] {
+  const cmds: Command[] = [];
+  // setParent keeps the moved nodes' relative tree order, so place them one by one.
+  order.forEach((id, i) => cmds.push({ type: "setParent", ids: [id], parent, index: i, keepPosition: false }));
+  for (const id of order) cmds.push({ type: "updateProps", id, props: { position: "relative" } });
+  return cmds;
 }
 
 function guessFlow(items: readonly { id: string; box: Box }[], frame: Box): { direction: "row" | "column"; gap: number; padding: { top: number; right: number; bottom: number; left: number }; order: string[] } {

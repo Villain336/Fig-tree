@@ -36,7 +36,7 @@ export class TextSession implements EditSession {
   /** Style for the next typed text when the selection is collapsed (Bold with nothing selected). */
   pendingStyle: TextStyle | null = null;
   /** An IME composition in progress: the range its text occupies. */
-  composition: { start: number; length: number } | null = null;
+  composition: { start: number; length: number; replaced: boolean } | null = null;
   private dragging = false;
   private dragUnit: "grapheme" | "word" | "paragraph" = "grapheme";
   private dragOrigin: { start: number; end: number } | null = null;
@@ -137,6 +137,8 @@ export class TextSession implements EditSession {
     if (this.editor.history.apply(cmds, { group: this.typingGroup() })) {
       this.anchor = this.focus = s + text.length;
       this.goalX = null;
+      // Typed text carries the pending style; what follows continues it (Yjs formatting rules).
+      this.pendingStyle = null;
       this.publish();
     }
   }
@@ -171,11 +173,12 @@ export class TextSession implements EditSession {
     this.breakTyping();
     this.editor.history.begin();
     const s = this.start;
-    if (!this.collapsed) {
+    const replaced = !this.collapsed;
+    if (replaced) {
       this.editor.history.apply([{ type: "deleteText", id: this.nodeId, index: s, length: this.end - s }]);
       this.anchor = this.focus = s;
     }
-    this.composition = { start: s, length: 0 };
+    this.composition = { start: s, length: 0, replaced };
     this.publish();
   }
 
@@ -191,7 +194,9 @@ export class TextSession implements EditSession {
     if (!c) return;
     this.replaceComposition(data);
     this.composition = null;
-    this.editor.history.end();
+    // A cancelled composition that replaced nothing leaves no undo step behind.
+    if (data === "" && !c.replaced) this.editor.history.abort();
+    else this.editor.history.end();
     this.publish();
   }
 
@@ -206,7 +211,7 @@ export class TextSession implements EditSession {
       cmds.push(style ? { type: "insertText", id: this.nodeId, index: c.start, text: data, style } : { type: "insertText", id: this.nodeId, index: c.start, text: data });
     }
     if (this.editor.history.apply(cmds)) {
-      this.composition = { start: c.start, length: data.length };
+      this.composition = { start: c.start, length: data.length, replaced: c.replaced };
       this.anchor = this.focus = c.start + data.length;
       this.publish();
     }

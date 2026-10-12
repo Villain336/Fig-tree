@@ -218,13 +218,9 @@ export class ShapeTool implements Tool {
   }
 
   cancel(editor: Editor): boolean {
-    if (!this.drag) {
-      editor.setTool("select");
-      return true;
-    }
+    if (!this.drag) return false;
     this.drag = null;
     editor.history.abort();
-    editor.setTool("select");
     return true;
   }
 
@@ -307,7 +303,9 @@ export class TextTool implements Tool {
   }
 
   cancel(editor: Editor): boolean {
-    editor.setTool("select");
+    if (!this.drag) return false;
+    this.drag = null;
+    editor.history.abort();
     return true;
   }
 }
@@ -373,9 +371,4 @@ export class ImageTool implements Tool {
   pointerMove(): void {}
 
   pointerUp(): void {}
-
-  cancel(editor: Editor): boolean {
-    editor.setTool("select");
-    return true;
-  }
 }

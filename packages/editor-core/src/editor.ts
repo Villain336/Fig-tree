@@ -386,7 +386,14 @@ export class Editor {
         return true;
       }
       if (this._tool.keyDown?.(this, e)) return true;
-      if (e.key === "Escape" && this._tool.cancel?.(this)) return true;
+      if (e.key === "Escape") {
+        if (this._tool.cancel?.(this)) return true;
+        // Escape leaves a creation tool before it clears the selection.
+        if (this._tool.id !== "select") {
+          this.setTool("select");
+          return true;
+        }
+      }
       const action = actionFor(e);
       if (!action) return false;
       return this.run(action);

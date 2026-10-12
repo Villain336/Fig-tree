@@ -172,7 +172,8 @@ export function pasteCommands(doc: FigDocument, payload: ClipPayload, parent: st
     // Ids of components and instances are not carried over (module 7 decides how copies link).
     delete props.componentRef;
     if (root) {
-      props.position = flow ? "relative" : "absolute";
+      if (flow) props.position = "relative";
+      else if (props.position === "relative") props.position = "absolute";
       roots.push(id);
     }
     if (root || n.world) place(n, props);
