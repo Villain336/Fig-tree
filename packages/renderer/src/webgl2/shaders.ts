@@ -126,7 +126,7 @@ export const glyphVertexShader = /* glsl */ `#version 300 es
 precision highp float;
 layout(location = 1) in vec4 a_rect;
 layout(location = 2) in vec2 a_atlas;
-uniform int u_entry;
+layout(location = 3) in float a_entry;
 uniform vec2 u_viewport;
 flat out int v_id;
 out vec2 v_atlas;
@@ -134,7 +134,7 @@ void main() {
   int corner = gl_VertexID % 6;
   vec2 uv = vec2(corner == 1 || corner == 2 || corner == 4 ? 1.0 : 0.0, corner == 2 || corner == 4 || corner == 5 ? 1.0 : 0.0);
   vec2 p = a_rect.xy + uv * a_rect.zw;
-  v_id = u_entry;
+  v_id = int(a_entry);
   v_atlas = a_atlas + uv * a_rect.zw;
   gl_Position = vec4(p.x / u_viewport.x * 2.0 - 1.0, 1.0 - p.y / u_viewport.y * 2.0, 0.0, 1.0);
 }

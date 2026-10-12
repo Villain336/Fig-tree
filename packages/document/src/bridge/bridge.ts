@@ -58,9 +58,10 @@ export class SceneBridge {
     this.fonts = options.fonts ?? null;
     this.unsubscribe = doc.onChange(this.onChange);
     this.layout = new DocumentLayout(doc, this._page, this.fonts);
-    // A face finished loading: lay text out again with its real metrics and redraw it.
+    // A face was added or finished loading: lay text out again and redraw it.
     this.unsubscribeFonts = this.fonts ? this.fonts.onLoad(() => this.scheduleFontRefresh()) : () => {};
-    this.build();
+    // The layout was just built for this page.
+    this.build(false);
   }
 
   private scheduleFontRefresh(): void {
@@ -141,11 +142,11 @@ export class SceneBridge {
     this._unsupported = new Map();
   }
 
-  private build(): void {
+  private build(relayout = true): void {
     this.clear();
     if (!this.doc.has(this._page)) this._page = this.doc.pages[0] ?? "";
     if (!this._page) return;
-    this.layout.build(this._page);
+    if (relayout || this.layout.currentPage !== this._page) this.layout.build(this._page);
     const before = this.totalCompiled;
     const ids = this.doc.tree.subtree(this._page);
     for (const id of ids) this.compile(id);
@@ -334,9 +335,9 @@ export class SceneBridge {
    */
   private compileText(id: string, e: Entry, width: number, height: number, notes: Set<string>): void {
     const t = this.layout.text(id);
-    for (const n of e.text) this.disown(n);
-    e.text = [];
     if (!t) {
+      for (const n of e.text) this.disown(n);
+      e.text = [];
       notes.add("text");
       this.linkMain(e);
       return;
@@ -352,38 +353,77 @@ export class SceneBridge {
       const style = span >= 0 ? sp.input.spans[span]?.style : sp.input.root;
       return (style?.paint as Paint[] | undefined) ?? nodeFills;
     };
-    const convert = (paints: readonly Paint[]): RenderPaint[] => {
-      const out: RenderPaint[] = [];
-      for (const p of paints) {
-        if (p.visible === false) continue;
-        const r = toRenderPaint(p, width, height);
-        if ("paint" in r) out.push(r.paint);
-        else notes.add(r.unsupported);
+    const converted = new Map<readonly Paint[], { paints: RenderPaint[]; key: string }>();
+    const convert = (paints: readonly Paint[]): { paints: RenderPaint[]; key: string } => {
+      let c = converted.get(paints);
+      if (!c) {
+        const out: RenderPaint[] = [];
+        for (const p of paints) {
+          if (p.visible === false) continue;
+          const r = toRenderPaint(p, width, height);
+          if ("paint" in r) out.push(r.paint);
+          else notes.add(r.unsupported);
+        }
+        c = { paints: out, key: JSON.stringify(out) };
+        converted.set(paints, c);
       }
-      return out;
+      return c;
     };
+    // Runs with the same font instance, size, synthesis and paints draw as one glyph
+    // run, so typing (which moves glyphs between lines) only changes geometry.
+    const groups = new Map<string, { source: GlyphRun["source"]; size: number; skew: number; embolden: number; paints: RenderPaint[]; glyphs: number[] }>();
+    const decorations: { path: Path; paints: RenderPaint[] }[] = [];
     for (const p of layout.paragraphs) {
       for (const line of p.layout.lines) {
         if (line.hidden) continue;
         for (const r of line.runs) {
-          const glyphs = Float64Array.from(r.glyphs);
-          for (let i = 2; i < glyphs.length; i += 3) glyphs[i] = glyphs[i]! + p.top + dy;
-          const run: GlyphRun = {
-            source: glyphSource(r.font),
-            size: r.size,
-            glyphs,
-            skew: r.syntheticOblique ? SYNTHETIC_OBLIQUE_SKEW : 0,
-            embolden: r.syntheticBold ? syntheticBoldStrength(r.size) : 0,
-          };
-          for (const paint of convert(paintsOf(p.index, r.span))) e.text.push(this.scene.createNode({ name: `${id}:glyphs`, glyphs: run, fill: paint }));
+          const paints = convert(paintsOf(p.index, r.span));
+          if (paints.paints.length === 0) continue;
+          const source = glyphSource(r.font);
+          const skew = r.syntheticOblique ? SYNTHETIC_OBLIQUE_SKEW : 0;
+          const embolden = r.syntheticBold ? syntheticBoldStrength(r.size) : 0;
+          const key = `${source.key}|${r.size}|${skew}|${embolden}|${paints.key}`;
+          let g = groups.get(key);
+          if (!g) groups.set(key, (g = { source, size: r.size, skew, embolden, paints: paints.paints, glyphs: [] }));
+          const gl = r.glyphs;
+          for (let i = 0; i + 2 < gl.length; i += 3) g.glyphs.push(gl[i]!, gl[i + 1]!, gl[i + 2]! + p.top + dy);
         }
       }
       for (const d of p.layout.decorations) {
         const y = d.y + p.top + dy;
         const rect = new Path().moveTo(d.x, y).lineTo(d.x + d.width, y).lineTo(d.x + d.width, y + d.thickness).lineTo(d.x, y + d.thickness).close();
-        for (const paint of convert(paintsOf(p.index, d.span))) e.text.push(this.scene.createNode({ name: `${id}:${d.kind}`, path: rect, fill: paint }));
+        decorations.push({ path: rect, paints: convert(paintsOf(p.index, d.span)).paints });
       }
     }
+    // Fills stack bottom to top over the whole text: every run's first paint, then every run's second, ...
+    const specs: ({ glyphs: GlyphRun; fill: RenderPaint } | { path: Path; fill: RenderPaint; name: string })[] = [];
+    const layers = Math.max(0, ...[...groups.values()].map((g) => g.paints.length));
+    for (let l = 0; l < layers; l++) {
+      for (const g of groups.values()) {
+        if (l >= g.paints.length) continue;
+        specs.push({ glyphs: { source: g.source, size: g.size, glyphs: Float64Array.from(g.glyphs), skew: g.skew, embolden: g.embolden }, fill: g.paints[l]! });
+      }
+    }
+    for (const d of decorations) for (const fill of d.paints) specs.push({ path: d.path, fill, name: `${id}:decoration` });
+    // Reuse the text's scene nodes where the kind matches; create or drop the rest.
+    const nodes: SceneNode[] = [];
+    specs.forEach((spec, i) => {
+      const old = e.text[i];
+      if ("glyphs" in spec) {
+        if (old && old.glyphs !== null) {
+          old.glyphs = spec.glyphs;
+          setFill(old, spec.fill);
+          nodes.push(old);
+        } else nodes.push(this.scene.createNode({ name: `${id}:glyphs`, glyphs: spec.glyphs, fill: spec.fill }));
+      } else if (old && old.glyphs === null) {
+        old.path = spec.path;
+        setFill(old, spec.fill);
+        nodes.push(old);
+      } else nodes.push(this.scene.createNode({ name: spec.name, path: spec.path, fill: spec.fill }));
+    });
+    const kept = new Set(nodes);
+    for (const n of e.text) if (!kept.has(n)) this.disown(n);
+    e.text = nodes;
     if (this.doc.get<Paint[]>(id, "strokes").some((s) => s.visible !== false)) notes.add("text-stroke");
     for (const n of e.text) this.own(n, id);
     this.linkMain(e);

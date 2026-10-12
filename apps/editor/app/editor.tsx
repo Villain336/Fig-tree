@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { editorFonts } from "./fonts";
-import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildLayoutDocument, buildSampleDocument } from "./sample-document";
+import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildLayoutDocument, buildSampleDocument, buildTextDocument } from "./sample-document";
 
 const ICONS: Record<NodeType, LucideIcon> = {
   page: File,
@@ -141,8 +141,8 @@ export function Editor() {
   useEffect(() => {
     const canvas = canvasRef.current!;
     const which = new URLSearchParams(window.location.search).get("doc");
-    const doc = which === "grid10k" ? buildGridDocument() : which === "layout10k" ? buildLayoutDocument() : buildSampleDocument();
-    const bounds = which === "grid10k" || which === "layout10k" ? GRID_BOUNDS : SAMPLE_BOUNDS;
+    const doc = which === "grid10k" ? buildGridDocument() : which === "layout10k" ? buildLayoutDocument() : which === "text10k" ? buildTextDocument() : buildSampleDocument();
+    const bounds = which === "grid10k" || which === "layout10k" || which === "text10k" ? GRID_BOUNDS : SAMPLE_BOUNDS;
     const scene = new Scene();
     // Created once HarfBuzz is ready (text is laid out as the bridge builds the scene).
     let bridge!: SceneBridge;

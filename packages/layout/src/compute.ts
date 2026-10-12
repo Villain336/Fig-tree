@@ -3,7 +3,7 @@ import { blockChildWidth, intrinsicBlock, layoutBlock } from "./block";
 import { intrinsicFlex, layoutFlex } from "./flex";
 import { intrinsicGrid, layoutGrid } from "./grid/grid";
 import { intrinsicLeaf, layoutLeaf } from "./leaf";
-import { spaceKey, type Edges, type Intrinsic, type LayoutNode, type LayoutResult, type LayoutStats, type Space } from "./node";
+import { layoutKey, type Edges, type Intrinsic, type LayoutNode, type LayoutResult, type LayoutStats, type Space } from "./node";
 import {
   INF,
   aspectRatioOf,
@@ -79,7 +79,7 @@ export function layout(node: LayoutNode, s: Space, perform: boolean): LayoutResu
     if (perform) hide(node);
     return NONE;
   }
-  const key = spaceKey(s);
+  const key = layoutKey(node, s);
   const cached = node.cacheGet(key);
   if (cached && (!perform || node.placedKey === key)) {
     stats.cacheHits++;

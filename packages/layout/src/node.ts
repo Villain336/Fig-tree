@@ -301,6 +301,27 @@ export function spaceKey(s: Space): string {
   return `${s.width}|${s.height}|${s.contentHeight ? 1 : 0}${s.heightIndefinite ? 1 : 0}|${s.cbWidth}|${s.cbHeight}`;
 }
 
+const percentFree = new WeakMap<Style, boolean>();
+
+/**
+ * Cache key of a constraint space for `node`: a leaf whose style has no
+ * percentages lays out the same in any containing block, so the key leaves
+ * the containing block's size out (a sibling growing in a flex row does
+ * not make a text label lay out again).
+ */
+export function layoutKey(node: LayoutNode, s: Space): string {
+  if (node.children.length > 0) return spaceKey(s);
+  let free = percentFree.get(node.style);
+  if (free === undefined) {
+    const st = node.style;
+    const pct = (v: unknown): boolean => typeof v === "object" && v !== null && "pct" in v;
+    const sides = (v: { top: unknown; right: unknown; bottom: unknown; left: unknown }): boolean => pct(v.top) || pct(v.right) || pct(v.bottom) || pct(v.left);
+    free = ![st.width, st.height, st.minWidth, st.minHeight, st.maxWidth, st.maxHeight, st.flexBasis, st.rowGap, st.columnGap].some(pct) && !sides(st.margin) && !sides(st.padding) && !sides(st.inset);
+    percentFree.set(node.style, free);
+  }
+  return free ? `${s.width}|${s.height}|${s.contentHeight ? 1 : 0}${s.heightIndefinite ? 1 : 0}` : spaceKey(s);
+}
+
 /** @internal Records an out-of-flow child's static position (see {@link LayoutNode.staticX}). */
 export function setStatic(node: LayoutNode, x: number, y: number, w: number, h: number, alignX: number, alignY: number): void {
   node.staticX = x;

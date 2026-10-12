@@ -97,6 +97,11 @@ export class DocumentLayout {
     return this.boxes.get(id);
   }
 
+  /** The page laid out. */
+  get currentPage(): string {
+    return this.page;
+  }
+
   /** The layout node of a document node (for tests and tools). */
   layoutNode(id: string): LayoutNode | undefined {
     return this.nodes.get(id);

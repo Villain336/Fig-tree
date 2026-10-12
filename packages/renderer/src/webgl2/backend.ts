@@ -136,7 +136,7 @@ export class WebGL2Backend implements Backend {
     this.samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) as number);
     this.stencilProgram = link(gl, stencilVertexShader(this.multiDraw !== null), stencilFragmentShader, ["u_entryBase", "u_viewport", "u_entries"]);
     this.coverProgram = link(gl, coverVertexShader, coverFragmentShader, ["u_entryBase", "u_viewport", "u_entries", "u_paints", "u_stops", "u_layer"]);
-    this.glyphProgram = link(gl, glyphVertexShader, glyphFragmentShader, ["u_entry", "u_viewport", "u_entries", "u_paints", "u_stops", "u_atlas"]);
+    this.glyphProgram = link(gl, glyphVertexShader, glyphFragmentShader, ["u_viewport", "u_entries", "u_paints", "u_stops", "u_atlas"]);
     this.glyphBuffer = gl.createBuffer()!;
     this.glyphVao = gl.createVertexArray()!;
     this.vertexBuffer = gl.createBuffer()!;
@@ -268,7 +268,11 @@ export class WebGL2Backend implements Backend {
       const e = entries[i]!;
       if (e.kind === ItemKind.Fill && e.glyphs) {
         flush(i);
-        this.drawGlyphs(i);
+        // Consecutive glyph entries draw together.
+        let j = i + 1;
+        while (j < entries.length && entries[j]!.kind === ItemKind.Fill && entries[j]!.glyphs) j++;
+        this.drawGlyphs(i, j);
+        i = j - 1;
         continue;
       }
       if (e.kind === ItemKind.Fill) {
@@ -388,13 +392,21 @@ export class WebGL2Backend implements Backend {
     let count = 0;
     for (const e of entries) if (e.glyphs) count += e.glyphs.length;
     if (count === 0) return;
-    const data = new Float32Array(count * 6);
+    // Per glyph: device rect (x, y, w, h), atlas origin (x, y) and the entry index.
+    const data = new Float32Array(count * GLYPH_FLOATS);
     let k = 0;
     entries.forEach((e, i) => {
       if (!e.glyphs) return;
       this.glyphRanges.set(i, [k, e.glyphs.length]);
       for (const g of e.glyphs) {
-        data.set([g.x, g.y, g.glyph.width, g.glyph.height, g.glyph.x, g.glyph.y], k * 6);
+        const o = k * GLYPH_FLOATS;
+        data[o] = g.x;
+        data[o + 1] = g.y;
+        data[o + 2] = g.glyph.width;
+        data[o + 3] = g.glyph.height;
+        data[o + 4] = g.glyph.x;
+        data[o + 5] = g.glyph.y;
+        data[o + 6] = i;
         k++;
       }
     });
@@ -407,28 +419,43 @@ export class WebGL2Backend implements Backend {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
   }
 
-  /** Draws one glyph entry: a quad per glyph, coverage from the atlas, paint from the entry. */
-  private drawGlyphs(entry: number): void {
-    const range = this.glyphRanges.get(entry);
-    if (!range || !this.glyphAtlas) return;
+  /**
+   * Draws glyph entries `[first, end)` (consecutive in paint order) as one
+   * instanced draw: a quad per glyph, coverage from the atlas, paint from
+   * the glyph's entry. Instances draw in order, so overlaps blend in paint order.
+   */
+  private drawGlyphs(first: number, end: number): void {
+    if (!this.glyphAtlas) return;
+    let start = -1;
+    let count = 0;
+    for (let i = first; i < end; i++) {
+      const range = this.glyphRanges.get(i);
+      if (!range) continue;
+      if (start < 0) start = range[0];
+      count = range[0] + range[1] - start;
+    }
+    if (start < 0 || count === 0) return;
     const gl = this.gl;
     const p = this.glyphProgram;
     gl.useProgram(p.program);
-    gl.uniform1i(p.uniforms["u_entry"]!, entry);
     gl.uniform2f(p.uniforms["u_viewport"]!, this.width, this.height);
     gl.bindVertexArray(this.glyphVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
-    const base = range[0] * 24;
+    const stride = GLYPH_FLOATS * 4;
+    const base = start * stride;
     gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, base);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, base);
     gl.vertexAttribDivisor(1, 1);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, base + 16);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, base + 16);
     gl.vertexAttribDivisor(2, 1);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, base + 24);
+    gl.vertexAttribDivisor(3, 1);
     gl.colorMask(true, true, true, true);
     gl.enable(gl.BLEND);
     gl.disable(gl.STENCIL_TEST);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, range[1]);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
     gl.enable(gl.STENCIL_TEST);
     gl.bindVertexArray(null);
   }
@@ -712,6 +739,8 @@ function scissorRect(e: FrameEntry, height: number): [number, number, number, nu
 const LAYER_UNIT = 3;
 /** Texture unit of the glyph atlas (R8 coverage). */
 const GLYPH_UNIT = 4;
+/** Floats per glyph instance: device rect, atlas origin, entry index. */
+const GLYPH_FLOATS = 7;
 
 /** Allocates RGBA8 storage for a new texture on the layer unit, keeping the active unit. */
 function allocateTexture(gl: WebGL2RenderingContext, width: number, height: number): WebGLTexture {

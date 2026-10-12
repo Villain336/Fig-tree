@@ -120,11 +120,14 @@ export class ShapedParagraph {
   /** A tab stop closer than this is skipped (half the root font's space, as Chromium does). */
   readonly tabMinimum: number;
   private minMax: { min: number; max: number } | null = null;
+  /** Paragraphs shaped since the program started (for tests and benchmarks of incremental layout). */
+  static shapedCount = 0;
 
   constructor(
     readonly input: ParagraphInput,
     readonly fonts: FontRegistry,
   ) {
+    ShapedParagraph.shapedCount++;
     const { style, spans, root } = input;
     const prepared = prepareText(input.text, spans, style);
     this.prepared = prepared;

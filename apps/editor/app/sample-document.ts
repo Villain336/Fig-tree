@@ -371,3 +371,48 @@ export function buildLayoutDocument(): FigDocument {
   doc.apply(commands, doc.actor("sample", "system"));
   return doc;
 }
+
+/**
+ * A 10,001-node document with 2,000 text nodes (`/?doc=text10k`): 100
+ * auto-layout cards, each a column of a heading, a row of six hugging
+ * labels, thirteen wrapping paragraphs and a wrapping frame of 77 swatches.
+ * The same document as packages/document/test/text-perf.test.ts.
+ */
+export function buildTextDocument(): FigDocument {
+  const doc = FigDocument.create({ random: seededRandom(10_002), clientId: 1, name: "Text", pageName: "Text" });
+  const page = doc.pages[0]!;
+  const ink = solid(24, 24, 27);
+  const body = [
+    "Typography follows CSS, so the code you export renders what you designed.",
+    "Line breaking, kerning and ligatures come from the same rules browsers use, with fonts from the file. Long paragraphs wrap.",
+    "Auto layout hugs text and wraps it in fixed columns.",
+  ];
+  const text = (id: string, parent: string, content: string, props: Record<string, unknown>): Command => ({
+    type: "createNode",
+    node: { id, type: "text", props: { fontFamily: "Inter", fills: [ink], ...props }, text: { content, runs: [] } },
+    parent,
+  });
+  const commands: Command[] = [{ type: "updateProps", id: page, props: { backgroundColor: rgb(238, 238, 234) } }];
+  for (let f = 0; f < 100; f++) {
+    const card = `c${f}`;
+    commands.push({
+      type: "createNode",
+      node: {
+        id: card,
+        type: "frame",
+        props: { name: `Card ${f + 1}`, x: (f % 10) * 600, y: Math.floor(f / 10) * 400, width: 580, height: 380, cornerRadius: 12, fills: [solid(255, 255, 255)], display: "flex", flexDirection: "column", rowGap: 4, padding: { top: 12, right: 12, bottom: 12, left: 12 } },
+      },
+      parent: page,
+    });
+    commands.push(text(`h${f}`, card, `Card ${f + 1}: text layout`, { fontSize: 20, fontWeight: 700 }));
+    commands.push({ type: "createNode", node: { id: `r${f}`, type: "frame", props: { width: 10, height: 10, widthMode: "hug", heightMode: "hug", display: "flex", columnGap: 6 } }, parent: card });
+    for (let i = 0; i < 6; i++) commands.push(text(`l${f}-${i}`, `r${f}`, ["Save", "Cancel", "Share", "Export code", "Duplicate", "More"][i]!, { fontSize: 12, fontWeight: 500 }));
+    for (let i = 0; i < 13; i++) commands.push(text(`t${f}-${i}`, card, body[(f + i) % 3]!, { fontSize: 12, widthMode: "fill", lineHeight: { unit: "percent", value: 130 } }));
+    commands.push({ type: "createNode", node: { id: `s${f}`, type: "frame", props: { width: 10, height: 10, widthMode: "fill", heightMode: "hug", display: "flex", flexWrap: "wrap", columnGap: 2, rowGap: 2 } }, parent: card });
+    for (let i = 0; i < 77; i++) {
+      commands.push({ type: "createNode", node: { id: `q${f}-${i}`, type: "rectangle", props: { width: 12, height: 8, fills: [solid((i * 13) % 255, 128, (f * 7) % 255)] } }, parent: `s${f}` });
+    }
+  }
+  doc.apply(commands, doc.actor("sample", "system"));
+  return doc;
+}
