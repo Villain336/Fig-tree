@@ -24,11 +24,17 @@ export interface Shortcut {
   readonly keys: readonly string[];
   readonly label: string;
   readonly group: ShortcutGroup;
+  /**
+   * Where the shortcut applies when not everywhere: `vector-edit` keys are
+   * handled by vector edit mode (its session sees keys first), so they may
+   * reuse global bindings. `actionFor` only matches global shortcuts.
+   */
+  readonly context?: "vector-edit";
 }
 
-export type ShortcutGroup = "Tools" | "Edit" | "Selection" | "Arrange" | "Align" | "View" | "Text" | "Layout" | "Help";
+export type ShortcutGroup = "Tools" | "Edit" | "Selection" | "Arrange" | "Align" | "View" | "Text" | "Layout" | "Vector" | "Help";
 
-export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["Tools", "Edit", "Selection", "Arrange", "Align", "Layout", "Text", "View", "Help"];
+export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = ["Tools", "Edit", "Selection", "Arrange", "Align", "Layout", "Vector", "Text", "View", "Help"];
 
 export const SHORTCUTS: readonly Shortcut[] = [
   { action: "tool.select", keys: ["V"], label: "Move and select", group: "Tools" },
@@ -36,9 +42,10 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { action: "tool.frame", keys: ["F", "A"], label: "Frame", group: "Tools" },
   { action: "tool.rectangle", keys: ["R"], label: "Rectangle", group: "Tools" },
   { action: "tool.ellipse", keys: ["O"], label: "Ellipse", group: "Tools" },
-  { action: "tool.polygon", keys: ["Shift+P"], label: "Polygon", group: "Tools" },
   { action: "tool.star", keys: ["Shift+S"], label: "Star", group: "Tools" },
   { action: "tool.line", keys: ["L"], label: "Line", group: "Tools" },
+  { action: "tool.pen", keys: ["P"], label: "Pen", group: "Tools" },
+  { action: "tool.pencil", keys: ["Shift+P"], label: "Pencil", group: "Tools" },
   { action: "tool.text", keys: ["T"], label: "Text", group: "Tools" },
   { action: "tool.image", keys: ["Shift+Mod+K"], label: "Place an image", group: "Tools" },
 
@@ -50,10 +57,11 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { action: "edit.duplicate", keys: ["Mod+D"], label: "Duplicate", group: "Edit" },
   { action: "edit.delete", keys: ["Delete", "Backspace"], label: "Delete", group: "Edit" },
   { action: "edit.rename", keys: ["Mod+R"], label: "Rename the selected layer", group: "Edit" },
+  { action: "edit.copyAsSvg", keys: ["Shift+Mod+C"], label: "Copy as SVG", group: "Edit" },
 
   { action: "select.all", keys: ["Mod+A"], label: "Select all", group: "Selection" },
   { action: "select.none", keys: ["Escape"], label: "Select the parent, then nothing", group: "Selection" },
-  { action: "select.children", keys: ["Enter"], label: "Select children (edit text)", group: "Selection" },
+  { action: "select.children", keys: ["Enter"], label: "Select children (edit text, or the points of a vector or shape)", group: "Selection" },
   { action: "select.parent", keys: ["Shift+Enter"], label: "Select parent", group: "Selection" },
   { action: "select.next", keys: ["Tab"], label: "Select next sibling", group: "Selection" },
   { action: "select.previous", keys: ["Shift+Tab"], label: "Select previous sibling", group: "Selection" },
@@ -82,6 +90,26 @@ export const SHORTCUTS: readonly Shortcut[] = [
   { action: "distribute.y", keys: ["Shift+Alt+V"], label: "Distribute vertical spacing", group: "Align" },
 
   { action: "layout.add", keys: ["Shift+A"], label: "Add auto layout (flex)", group: "Layout" },
+
+  { action: "boolean.union", keys: ["Shift+Alt+U"], label: "Union selection", group: "Vector" },
+  { action: "boolean.subtract", keys: ["Shift+Alt+S"], label: "Subtract selection", group: "Vector" },
+  { action: "boolean.intersect", keys: ["Shift+Alt+I"], label: "Intersect selection", group: "Vector" },
+  { action: "boolean.exclude", keys: ["Shift+Alt+E"], label: "Exclude selection", group: "Vector" },
+  { action: "object.flatten", keys: ["Mod+E"], label: "Flatten (text becomes outlines)", group: "Vector" },
+  { action: "object.outlineStroke", keys: ["Shift+Mod+O"], label: "Outline stroke", group: "Vector" },
+  { action: "vector.done", keys: ["Escape", "Enter"], label: "Finish the path, then leave vector editing", group: "Vector", context: "vector-edit" },
+  { action: "vector.select", keys: ["V"], label: "Vector editing: select and move points", group: "Vector", context: "vector-edit" },
+  { action: "vector.pen", keys: ["P"], label: "Vector editing: pen (add points and branches)", group: "Vector", context: "vector-edit" },
+  { action: "vector.bucket", keys: ["B"], label: "Vector editing: paint bucket (fill or unfill an area)", group: "Vector", context: "vector-edit" },
+  { action: "vector.bend", keys: ["Mod"], label: "Hold and drag a segment to bend it, a point to pull handles", group: "Vector", context: "vector-edit" },
+  { action: "vector.breakHandles", keys: ["Alt"], label: "Hold while dragging a handle to move it alone", group: "Vector", context: "vector-edit" },
+  { action: "vector.angle", keys: ["Shift"], label: "Hold to snap segments and handles to 15°", group: "Vector", context: "vector-edit" },
+  { action: "vector.deleteKeep", keys: ["Delete", "Backspace"], label: "Delete points, keeping the shape (Backspace while drawing: last point)", group: "Vector", context: "vector-edit" },
+  { action: "vector.deleteGap", keys: ["Shift+Delete", "Shift+Backspace"], label: "Delete points and their segments", group: "Vector", context: "vector-edit" },
+  { action: "vector.join", keys: ["Mod+J"], label: "Join two points", group: "Vector", context: "vector-edit" },
+  { action: "vector.disconnect", keys: ["Shift+Mod+J"], label: "Disconnect segments at the selected points", group: "Vector", context: "vector-edit" },
+  { action: "vector.flipX", keys: ["Shift+H"], label: "Flip the selected points horizontally", group: "Vector", context: "vector-edit" },
+  { action: "vector.flipY", keys: ["Shift+V"], label: "Flip the selected points vertically", group: "Vector", context: "vector-edit" },
 
   { action: "text.bold", keys: ["Mod+B"], label: "Bold", group: "Text" },
   { action: "text.italic", keys: ["Mod+I"], label: "Italic", group: "Text" },
@@ -148,7 +176,10 @@ export function matchesBinding(binding: string, e: KeyInput): boolean {
 
 /** The action bound to a key press, if any. */
 export function actionFor(e: KeyInput, shortcuts: readonly Shortcut[] = SHORTCUTS): string | null {
-  for (const s of shortcuts) for (const k of s.keys) if (matchesBinding(k, e)) return s.action;
+  for (const s of shortcuts) {
+    if (s.context) continue;
+    for (const k of s.keys) if (matchesBinding(k, e)) return s.action;
+  }
   return null;
 }
 
@@ -168,7 +199,8 @@ const KEY_LABELS: Record<string, string> = {
 export function formatBinding(binding: string, platform: Platform): string {
   const parts = binding.split("+");
   const last = parts.pop()!;
-  const keyLabel = KEY_LABELS[last] ?? last;
+  // A lone modifier ("hold ⌘") is shown like one in a combination.
+  const keyLabel = KEY_LABELS[last] ?? (platform === "mac" ? MAC_SYMBOLS[last] : last === "Mod" ? "Ctrl" : undefined) ?? last;
   if (platform === "mac") return [...parts.map((p) => MAC_SYMBOLS[p] ?? p), keyLabel].join("");
   return [...parts.map((p) => (p === "Mod" ? "Ctrl" : p)), keyLabel].join("+");
 }

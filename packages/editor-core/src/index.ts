@@ -32,3 +32,8 @@ export { looksLikeSvg, parseColor, parseTransform, svgToPayload } from "./clipbo
 export { parsePathData, subpathsToNetwork, arcToCubics, type Subpath } from "./clipboard/svg-path";
 export { parseXml, type XmlElement } from "./clipboard/xml";
 export { dragGradientHandle, editedGradient, gradientHandles, hitGradientHandle, type GradientHandle, type PaintTarget } from "./gradient";
+export { VectorEditSession, VERTEX_HIT, HANDLE_HIT, SEGMENT_HIT, type VectorHit, type VectorSubTool, type HandleMirroring } from "./vector/session";
+export { VectorEditMode, PenToolTool, PencilTool, drawFreehand, editVectorWith, vectorSession } from "./vector/tools";
+export { BOOLEAN_OPS, booleanSelection, flattenSelection, outlineStrokeSelection, selectionToSvg, setBooleanOperation, textOutlineCommands, type BooleanOp } from "./vector/actions";
+export { VECTOR_EDITABLE, commitVectorOps, editableNetwork, previewOps, scaledNetwork, translateOp, vectorEditCommands, vectorResizeProps, type VectorCommit } from "./vector/edit";
+export { snapPoint, type PointSnap, type PointSnapContext } from "./vector/snap";

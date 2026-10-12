@@ -6,6 +6,10 @@ import { multiply, type Mat2D } from "@fig-tree/geometry";
 import { layoutDisplay, reparentCommands } from "./placement";
 import { isBoard, isContainer, normalizeSelection, selectableChildren, selectionScope, sortByPaintOrder } from "./selection";
 import { textSession } from "./text/mode";
+import { booleanSelection, flattenSelection, outlineStrokeSelection } from "./vector/actions";
+import { VECTOR_EDITABLE, vectorResizeProps } from "./vector/edit";
+import { vectorSession } from "./vector/tools";
+import type { VectorSubTool } from "./vector/session";
 import { boxedNodes, capture, constrainChild, isInFlow, moveProps, placementProps, resizeProps, rotateProps, scaleProps } from "./transform";
 
 /**
@@ -31,6 +35,8 @@ export const ACTIONS: Record<string, Action> = {
   "tool.line": tool("line"),
   "tool.text": tool("text"),
   "tool.image": tool("image"),
+  "tool.pen": tool("pen"),
+  "tool.pencil": tool("pencil"),
 
   "edit.undo": (e) => {
     const ok = e.history.undo();
@@ -48,6 +54,11 @@ export const ACTIONS: Record<string, Action> = {
   "edit.paste": () => false,
   "edit.duplicate": (e) => duplicateSelection(e),
   "edit.delete": (e) => deleteSelection(e),
+  "edit.copyAsSvg": (e) => {
+    if (e.selection.length === 0) return false;
+    e.request({ kind: "copy-svg" });
+    return true;
+  },
   "edit.rename": (e) => {
     const id = e.selection[0];
     if (!id) return false;
@@ -113,6 +124,35 @@ export const ACTIONS: Record<string, Action> = {
   "distribute.x": (e) => distributeSelection(e, "x"),
   "distribute.y": (e) => distributeSelection(e, "y"),
 
+  "boolean.union": (e) => booleanSelection(e, "union"),
+  "boolean.subtract": (e) => booleanSelection(e, "subtract"),
+  "boolean.intersect": (e) => booleanSelection(e, "intersect"),
+  "boolean.exclude": (e) => booleanSelection(e, "exclude"),
+  "object.flatten": (e) => flattenSelection(e),
+  "object.outlineStroke": (e) => outlineStrokeSelection(e),
+  "vector.edit": (e) => {
+    const [id] = e.selection;
+    if (!id || e.selection.length !== 1 || !(VECTOR_EDITABLE as readonly string[]).includes(e.doc.typeOf(id) ?? "")) return false;
+    return e.enterEditMode(id);
+  },
+  "vector.done": (e) => {
+    const s = vectorSession(e);
+    if (!s) return false;
+    const id = s.nodeId;
+    e.exitEditMode();
+    if (e.doc.has(id)) e.select([id]);
+    return true;
+  },
+  "vector.select": (e) => subTool(e, "select"),
+  "vector.pen": (e) => subTool(e, "pen"),
+  "vector.bend": (e) => subTool(e, "bend"),
+  "vector.bucket": (e) => subTool(e, "bucket"),
+  "vector.deleteKeep": (e) => vectorSession(e)?.deleteSelection("keep-shape") ?? false,
+  "vector.deleteGap": (e) => vectorSession(e)?.deleteSelection("gap") ?? false,
+  "vector.join": (e) => vectorSession(e)?.join() ?? false,
+  "vector.disconnect": (e) => vectorSession(e)?.disconnect() ?? false,
+  "vector.flipX": (e) => vectorSession(e)?.flip("x") ?? false,
+  "vector.flipY": (e) => vectorSession(e)?.flip("y") ?? false,
   "layout.add": (e) => addAutoLayout(e),
   "layout.remove": (e) => removeAutoLayout(e),
 
@@ -151,12 +191,19 @@ export const ACTIONS: Record<string, Action> = {
   },
 };
 
+function subTool(editor: Editor, tool: VectorSubTool): boolean {
+  const s = vectorSession(editor);
+  if (!s) return false;
+  s.setSubTool(tool);
+  return true;
+}
+
 export function runAction(editor: Editor, action: string): boolean {
   const a = ACTIONS[action];
   return a ? a(editor) : false;
 }
 
-const NEEDS_SELECTION = /^(edit\.(duplicate|delete|rename|copy|cut)|arrange\.|object\.|align\.|select\.(parent|next|previous|children)|view\.zoomSelection|text\.)/;
+const NEEDS_SELECTION = /^(edit\.(duplicate|delete|rename|copy|cut|copyAsSvg)|arrange\.|object\.|boolean\.|align\.|select\.(parent|next|previous|children)|view\.zoomSelection|text\.)/;
 
 /** Whether an action applies now (for enabling menu items). */
 export function actionEnabled(editor: Editor, action: string): boolean {
@@ -167,6 +214,16 @@ export function actionEnabled(editor: Editor, action: string): boolean {
   if (action === "arrange.ungroup") return editor.selection.some((id) => ["group", "frame"].includes(editor.doc.typeOf(id) ?? ""));
   if (action.startsWith("distribute.")) return editor.selection.length >= 3;
   if (action === "layout.remove") return editor.selection.some((id) => layoutDisplay(editor.doc, id) !== null);
+  if (action === "object.outlineStroke") return editor.selection.some((id) => editor.doc.typeOf(id) === "text" || (editor.doc.typeOf(id) !== "group" && editor.doc.get<{ visible?: boolean }[]>(id, "strokes")?.some((p) => p.visible !== false)));
+  if (action === "vector.edit") return editor.selection.length === 1 && (VECTOR_EDITABLE as readonly string[]).includes(editor.doc.typeOf(editor.selection[0]!) ?? "");
+  if (action.startsWith("vector.")) {
+    const s = vectorSession(editor);
+    if (!s) return false;
+    if (action === "vector.join") return s.selectedVertices.length === 2;
+    if (action === "vector.disconnect") return s.selectedVertices.length > 0;
+    if (action.startsWith("vector.delete")) return s.selectedVertices.length + s.selectedSegments.length > 0;
+    if (action.startsWith("vector.flip")) return s.selectedVertices.length + s.selectedSegments.length > 0;
+  }
   return true;
 }
 
@@ -684,7 +741,11 @@ export function setGeometry(editor: Editor, ids: readonly string[], key: Geometr
       } else if (key === "width" || key === "height") {
         if (next <= 0) continue;
         const to = { x: b.x, y: b.y, width: key === "width" ? next : b.width, height: key === "height" ? next : b.height };
-        for (const k of kids) cmds.push({ type: "updateProps", id: k, props: scaleProps(capture(geom, k), b, to) as Record<string, unknown> });
+        for (const k of kids) {
+          const ck = capture(geom, k);
+          const sp = scaleProps(ck, b, to);
+          cmds.push({ type: "updateProps", id: k, props: { ...sp, ...vectorResizeProps(ck, sp) } as Record<string, unknown> });
+        }
       } else {
         const pivot = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
         for (const k of kids) cmds.push({ type: "updateProps", id: k, props: rotateProps(capture(geom, k), next - old, pivot) as Record<string, unknown> });
@@ -714,7 +775,7 @@ export function setGeometry(editor: Editor, ids: readonly string[], key: Geometr
       if (p.height !== undefined && doc.get(id, "heightMode") !== "fixed" && type !== "text") modes.heightMode = "fixed";
       if (type === "text" && p.width !== undefined && p.height === undefined && doc.get(id, "heightMode") === "hug") modes.heightMode = "hug";
       if (type === "text" && p.height !== undefined) modes.heightMode = "fixed";
-      cmds.push({ type: "updateProps", id, props: { ...p, ...modes } });
+      cmds.push({ type: "updateProps", id, props: { ...p, ...modes, ...vectorResizeProps(c, p) } });
       if (["frame", "component", "instance"].includes(type!)) {
         for (const k of boxedNodes(doc, doc.tree.childrenOf(id))) {
           if (isInFlow(doc, k)) continue;

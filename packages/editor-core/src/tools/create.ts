@@ -56,7 +56,7 @@ export function creationProps(type: NodeType): Record<string, unknown> {
 
 /** A numbered default name ("Rectangle 3") unique among the page's nodes of that type. */
 export function nextName(editor: Editor, type: NodeType): string {
-  const base = { frame: "Frame", rectangle: "Rectangle", ellipse: "Ellipse", polygon: "Polygon", star: "Star", line: "Line", text: "Text", image: "Image" }[type as string] ?? type;
+  const base = { frame: "Frame", rectangle: "Rectangle", ellipse: "Ellipse", polygon: "Polygon", star: "Star", line: "Line", text: "Text", image: "Image", vector: "Vector" }[type as string] ?? type;
   let max = 0;
   const re = new RegExp(`^${base} (\\d+)$`);
   for (const id of editor.doc.tree.subtree(editor.page)) {

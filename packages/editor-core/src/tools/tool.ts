@@ -31,7 +31,13 @@ export type Cursor =
   | "ns-resize"
   | "nesw-resize"
   | "nwse-resize"
-  | "rotate";
+  | "rotate"
+  | "pen"
+  | "pen-add"
+  | "pen-close"
+  | "pencil"
+  | "bend"
+  | "bucket";
 
 /**
  * A canvas tool. The editor routes pointer and key events to the active

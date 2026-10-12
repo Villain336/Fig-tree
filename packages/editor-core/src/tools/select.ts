@@ -29,6 +29,7 @@ import {
   type PlacementProps,
 } from "../transform";
 import type { Cursor, Tool, ToolPointer } from "./tool";
+import { vectorResizeProps } from "../vector/edit";
 
 /** Pressing on empty space inside a multi-selection's bounds drags the whole selection. */
 const SELECTION = "\u0000selection";
@@ -452,7 +453,7 @@ export class SelectTool implements Tool {
       const c = g.captured[0]!;
       let props = resizeProps(c, rect);
       if (editor.settings.pixelSnap && g.axisAligned) props = roundPlacement(props);
-      cmds.push({ type: "updateProps", id: c.id, props: { ...props, ...sizingModes(editor, c.id, props, g.handle) } as Record<string, unknown> });
+      cmds.push({ type: "updateProps", id: c.id, props: { ...props, ...sizingModes(editor, c.id, props, g.handle), ...vectorResizeProps(c, props) } as Record<string, unknown> });
       if (!e.mod && g.children.length > 0) {
         const before = { width: c.width, height: c.height };
         const after = { width: props.width ?? c.width, height: props.height ?? c.height };
@@ -473,7 +474,7 @@ export class SelectTool implements Tool {
       for (const c of g.captured) {
         let props = scaleProps(c, from, to);
         if (editor.settings.pixelSnap) props = roundPlacement(props, doc.get<number>(c.id, "rotation"));
-        cmds.push({ type: "updateProps", id: c.id, props: { ...props, ...sizingModes(editor, c.id, props, g.handle) } as Record<string, unknown> });
+        cmds.push({ type: "updateProps", id: c.id, props: { ...props, ...sizingModes(editor, c.id, props, g.handle), ...vectorResizeProps(c, props) } as Record<string, unknown> });
       }
       g.guides = [];
     }

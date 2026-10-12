@@ -158,5 +158,5 @@ export { closePath, faceAt, fillAllFaces, networkFaces, toggleFaceFill, type Net
 export { roundNetworkCorners } from "./vector-network/corners";
 export { fitCurve, fitSingleCubic, maxDistanceToCurves, type FitOptions } from "./path-edit/fit";
 export { deleteVertexPreservingShape, deviation, freehandToNetwork, joinCurves, simplifyNetwork } from "./path-edit/refit";
-export { PenTool, constrainAngle, type PenHit, type PenModifiers, type PenOptions, type PenPreview, type PenResult } from "./pen/pen-tool";
+export { PenTool, constrainAngle, type PenHit, type PenModifiers, type PenOp, type PenOptions, type PenPreview, type PenResult } from "./pen/pen-tool";
 export { dashCurves, outlineStroke, strokeShapes, type OutlineOptions, type OutlineStrokeStyle } from "./outline/outline-stroke";

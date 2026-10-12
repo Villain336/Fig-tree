@@ -23,6 +23,8 @@ export interface Captured {
   readonly stored: { readonly x: number; readonly y: number; readonly rotation: number; readonly flipX: boolean; readonly flipY: boolean };
   /** In a flex or grid parent's flow: layout places it, x/y are ignored. */
   readonly inFlow: boolean;
+  /** A vector's network at the start of the gesture (resizing scales it). */
+  readonly network?: unknown;
   /**
    * Keys a gesture has written so far. A later step of the same gesture
    * writes them again even when they are back at their captured value.
@@ -62,6 +64,7 @@ export function capture(geom: CanvasGeometry, id: string): Captured {
     },
     inFlow: isInFlow(doc, id),
     touched: new Set(),
+    ...(doc.typeOf(id) === "vector" ? { network: doc.get(id, "vectorNetwork") } : {}),
   };
 }
 

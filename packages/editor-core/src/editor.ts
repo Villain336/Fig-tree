@@ -15,6 +15,7 @@ import { buildOverlay } from "./overlay-build";
 import { EditModeRegistry, ToolRegistry, type Cursor, type EditSession, type Tool, type ToolPointer } from "./tools/tool";
 import { registerBuiltinTools } from "./tools/builtin";
 import { TextEditMode } from "./text/mode";
+import { VectorEditMode } from "./vector/tools";
 import { Viewport } from "./viewport";
 
 /** A pointer event as the host reports it: canvas CSS pixels and modifier state. */
@@ -127,6 +128,7 @@ export class Editor {
     this.measureText = options.measureText ?? ((t) => t.length * 6.5);
     registerBuiltinTools(this);
     this.editModes.register(new TextEditMode());
+    this.editModes.register(new VectorEditMode());
     this._tool = this.tools.get("select")!;
     this.disposers.push(
       doc.onChange((change) => {
@@ -270,6 +272,15 @@ export class Editor {
     this.select([id]);
     this.emit("session", "overlay");
     return true;
+  }
+
+  /** Opens an edit session a tool built itself (the pen tool's session for the vector it is about to draw). */
+  openSession(session: EditSession): void {
+    this.batch(() => {
+      this.exitEditMode();
+      this._session = session;
+      this.emit("session", "overlay");
+    });
   }
 
   exitEditMode(): void {
@@ -515,5 +526,6 @@ export type EditorRequest =
   | { readonly kind: "rename"; readonly id: string }
   | { readonly kind: "shortcuts" }
   | { readonly kind: "copy" }
+  | { readonly kind: "copy-svg" }
   | { readonly kind: "cut" }
   | { readonly kind: "paste" };

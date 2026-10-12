@@ -91,6 +91,25 @@ export class History {
     if (recorded && this.doc.undo(this.actor)) this.um.redoStack.pop();
   }
 
+  /** How many undo steps the user has (to tell later whether a step is still the latest). */
+  get undoDepth(): number {
+    return this.um.undoStack.length;
+  }
+
+  /**
+   * Reverts the user's latest undo step and drops it from the redo stack
+   * (taking back the last point while drawing). With `expectedDepth`, only
+   * when the stack still has that many steps, i.e. the step is still the latest.
+   */
+  revertLast(expectedDepth?: number): boolean {
+    this.endAll();
+    const um = this.um;
+    if (expectedDepth !== undefined && um.undoStack.length !== expectedDepth) return false;
+    if (um.undoStack.length === 0 || !this.doc.undo(this.actor)) return false;
+    um.redoStack.pop();
+    return true;
+  }
+
   /** Whether a merge is open. */
   get grouping(): boolean {
     return this.depth > 0;

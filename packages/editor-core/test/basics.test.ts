@@ -92,14 +92,17 @@ describe("keymap", () => {
     expect(formatBinding("Alt+Mod+G", "mac")).toBe("⌥⌘G");
   });
 
-  it("has no binding claimed by two actions", () => {
+  it("has no binding claimed by two actions in the same context", () => {
     const seen = new Map<string, string>();
     for (const s of SHORTCUTS) {
       for (const b of s.keys) {
-        expect(seen.get(b), `${b} is bound to ${seen.get(b)} and ${s.action}`).toBeUndefined();
-        seen.set(b, s.action);
+        const k = `${s.context ?? ""}|${b}`;
+        expect(seen.get(k), `${b} is bound to ${seen.get(k)} and ${s.action}`).toBeUndefined();
+        seen.set(k, s.action);
       }
     }
+    // Vector edit mode's keys only apply there.
+    expect(SHORTCUTS.filter((s) => s.action.startsWith("vector.")).every((s) => s.context === "vector-edit")).toBe(true);
   });
 });
 

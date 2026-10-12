@@ -15,11 +15,17 @@ export type OverlayItem =
   | { readonly kind: "label"; readonly at: Point; readonly text: string; readonly role: LabelRole; readonly align?: "left" | "center"; readonly selected?: boolean }
   | { readonly kind: "caret"; readonly from: Point; readonly to: Point }
   | { readonly kind: "pixel-grid"; readonly scale: number; readonly offsetX: number; readonly offsetY: number }
-  | { readonly kind: "image-placeholder"; readonly points: readonly Point[] };
+  | { readonly kind: "image-placeholder"; readonly points: readonly Point[] }
+  /** Polylines (open contours) of vector segments, previews and freehand strokes. */
+  | { readonly kind: "path"; readonly contours: readonly (readonly Point[])[]; readonly role: PathRole }
+  /** A filled area (contours under the even-odd rule): the face the paint bucket would fill or unfill. */
+  | { readonly kind: "region"; readonly contours: readonly (readonly Point[])[]; readonly role: RegionRole };
 
 export type OutlineRole = "selection" | "hover" | "editing" | "parent" | "drop-target" | "remote";
 export type RectRole = "selection-bounds" | "marquee" | "text-selection" | "gradient-line";
-export type LineRole = "snap" | "spacing" | "measure" | "drop" | "gradient";
+export type LineRole = "snap" | "spacing" | "measure" | "drop" | "gradient" | "handle";
+export type PathRole = "vector" | "vector-selected" | "vector-hover" | "pen-preview" | "pencil";
+export type RegionRole = "region-hover" | "region-hover-filled";
 export type LabelRole = "size" | "measure" | "frame-name" | "spacing";
 
 /** Colors of the overlay (our own palette). */
@@ -39,6 +45,9 @@ export const OVERLAY_THEME = {
   frameName: "#57534e",
   frameNameSelected: "#2563eb",
   pixelGrid: "rgba(120, 120, 120, 0.18)",
+  regionHover: "rgba(37, 99, 235, 0.18)",
+  regionHoverFilled: "rgba(225, 29, 72, 0.16)",
+  vertexSelected: "#2563eb",
 } as const;
 
 /** The subset of the Canvas 2D API the overlay uses (so it can be drawn in tests or workers). */
@@ -51,7 +60,7 @@ export interface OverlayContext {
   lineTo(x: number, y: number): void;
   rect(x: number, y: number, w: number, h: number): void;
   arc(x: number, y: number, r: number, a0: number, a1: number): void;
-  fill(): void;
+  fill(rule?: "nonzero" | "evenodd"): void;
   stroke(): void;
   fillRect(x: number, y: number, w: number, h: number): void;
   fillText(text: string, x: number, y: number): void;
@@ -147,8 +156,27 @@ export function drawOverlay(ctx: OverlayContext, items: readonly OverlayItem[], 
         ctx.stroke();
         break;
       }
+      case "path": {
+        ctx.strokeStyle = t.selection;
+        ctx.lineWidth = item.role === "vector-selected" || item.role === "vector-hover" ? 2 : item.role === "pencil" ? 1.5 : 1;
+        if (item.role === "pen-preview") ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        for (const c of item.contours) c.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+        ctx.stroke();
+        break;
+      }
+      case "region": {
+        ctx.fillStyle = item.role === "region-hover-filled" ? t.regionHoverFilled : t.regionHover;
+        ctx.beginPath();
+        for (const c of item.contours) {
+          c.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+          ctx.closePath();
+        }
+        ctx.fill("evenodd");
+        break;
+      }
       case "line": {
-        ctx.strokeStyle = item.role === "drop" ? t.selection : item.role === "gradient" ? t.selection : t.snap;
+        ctx.strokeStyle = item.role === "drop" || item.role === "gradient" || item.role === "handle" ? t.selection : t.snap;
         ctx.lineWidth = item.role === "drop" ? 2 : 1;
         ctx.beginPath();
         ctx.moveTo(item.from.x, item.from.y);

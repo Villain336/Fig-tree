@@ -1,4 +1,5 @@
 import {
+  PenTool,
   booleanOperation,
   contoursArea,
   pathContours,
@@ -14,7 +15,7 @@ import { Scene, type SceneNode } from "@fig-tree/renderer";
 import { FontRegistry, loadHarfBuzz } from "@fig-tree/text";
 import { beforeAll, describe, expect, it } from "vitest";
 import { fixtureRegistry } from "../../text/conformance/fonts";
-import { CommandError, FigDocument, SceneBridge, VectorNetwork, booleanContours, seededRandom, textToVectorNetwork, type Command } from "../src";
+import { CommandError, FigDocument, SceneBridge, VectorNetwork, applyVectorOps, booleanContours, seededRandom, textToVectorNetwork, type Command, type VectorOp } from "../src";
 import { outlinePath } from "../src/bridge/geometry";
 import { makeDoc } from "./helpers";
 
@@ -113,6 +114,53 @@ describe("editVector", () => {
     }
     expect(applied).toBeGreaterThan(1500);
     expect(validateNetwork(doc.get<GeometryNetwork>("v", "vectorNetwork"))).toEqual([]);
+  });
+});
+
+describe("pen operations", () => {
+  it("replaying the pen tool's operation log through editVector gives the pen's network (200 random sessions)", () => {
+    const rand = seededRandom(77);
+    const fail = (...issues: string[]): never => {
+      throw new Error(issues.join("; "));
+    };
+    for (let session = 0; session < 200; session++) {
+      const pen = new PenTool<GeometryNetwork>({ vertices: [], segments: [], regions: [] }, { hitRadius: 6 });
+      let replayed: GeometryNetwork = { vertices: [], segments: [], regions: [] };
+      const flush = (): void => {
+        const ops = pen.takeOps();
+        if (ops.length) replayed = applyVectorOps(replayed, ops as VectorOp[], fail);
+        expect(JSON.stringify(replayed)).toBe(JSON.stringify(pen.network));
+      };
+      const pts: { x: number; y: number }[] = [];
+      for (let step = 0; step < 14; step++) {
+        const r = rand();
+        // Mostly fresh points, sometimes an existing vertex (connect, close) or a segment midpoint (branch).
+        let p = { x: Math.round(rand() * 400), y: Math.round(rand() * 400) };
+        if (r < 0.15 && pts.length > 0) p = pts[Math.floor(rand() * pts.length)]!;
+        else if (r < 0.25 && pen.network.segments.length > 0) {
+          const s = pen.network.segments[Math.floor(rand() * pen.network.segments.length)]!;
+          const a = pen.network.vertices[s.start]!, b = pen.network.vertices[s.end]!;
+          p = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        }
+        pts.push(p);
+        const shift = rand() < 0.2, alt = rand() < 0.2;
+        pen.pointerDown(p, { shift });
+        flush();
+        if (rand() < 0.5) {
+          for (let k = 1; k <= 3; k++) {
+            pen.pointerMove({ x: p.x + k * 12, y: p.y - k * 7 }, { shift, alt: alt && k >= 2 });
+            flush();
+          }
+        }
+        pen.pointerUp(p, {});
+        flush();
+        if (rand() < 0.1) {
+          pen.keyDown("Enter");
+          flush();
+        }
+      }
+      expect(validateNetwork(pen.network)).toEqual([]);
+    }
   });
 });
 

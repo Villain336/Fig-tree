@@ -1,6 +1,6 @@
 import { closestParam, type Cubic } from "../bezier/cubic";
 import { addSegment, addVertex, splitSegment, updateVertex } from "../vector-network/edit";
-import { segmentCubic, type Vec, type VectorNetwork } from "../vector-network/network";
+import { segmentCubic, type HandleMirroring, type Vec, type VectorNetwork } from "../vector-network/network";
 import { closePath } from "../vector-network/regions";
 
 /**
@@ -41,6 +41,20 @@ export interface PenOptions {
   /** Extra snapping (grid, guides, other layers): returns the snapped point, or null for none. */
   readonly snap?: (p: Vec, context: { readonly network: VectorNetwork; readonly from: number | null }) => Vec | null;
 }
+
+/**
+ * One change the pen made to the network, in the vocabulary of the
+ * document's `editVector` operations (same names and fields), so an editor
+ * can replay exactly what the pen did as commands. Applying a session's ops
+ * in order to the network the pen started from gives {@link PenTool.network}.
+ */
+export type PenOp =
+  | { readonly op: "addVertex"; readonly x: number; readonly y: number }
+  | { readonly op: "splitSegment"; readonly segment: number; readonly t: number }
+  | { readonly op: "addSegment"; readonly start: number; readonly end: number; readonly tangentStart?: Vec }
+  | { readonly op: "closePath"; readonly start: number; readonly end: number; readonly tangentStart?: Vec }
+  | { readonly op: "setTangents"; readonly segment: number; readonly tangentStart: Vec | null; readonly tangentEnd: Vec | null }
+  | { readonly op: "setVertex"; readonly vertex: number; readonly handleMirroring: HandleMirroring | null };
 
 export type PenHit =
   | { readonly kind: "vertex"; readonly vertex: number }
@@ -92,9 +106,38 @@ export class PenTool<N extends VectorNetwork> {
   private drag: Drag | null = null;
   private history: { net: N; active: number | null; pathStart: number | null; pendingOut: Vec | null }[] = [];
   private lastPointer: Vec | null = null;
+  private log: PenOp[] = [];
+  private options: PenOptions;
 
-  constructor(network: N, private readonly options: PenOptions) {
+  constructor(network: N, options: PenOptions) {
     this.net = network;
+    this.options = options;
+  }
+
+  /**
+   * The operations applied since the last call, in order (see {@link PenOp}).
+   * Backspace restores an earlier network instead of applying an operation:
+   * it clears the log, and callers revert the step themselves.
+   */
+  takeOps(): PenOp[] {
+    const out = this.log;
+    this.log = [];
+    return out;
+  }
+
+  /** Changes the hit radius (and the default drag threshold), e.g. when the view zooms. */
+  setHitRadius(hitRadius: number): void {
+    this.options = { ...this.options, hitRadius };
+  }
+
+  /** The pending outgoing handle of the active vertex (relative to it), shown while drawing. */
+  get pendingHandle(): Vec | null {
+    return this.pendingOut;
+  }
+
+  /** The first vertex of the path in progress. */
+  get pathStartVertex(): number | null {
+    return this.pathStart;
   }
 
   get network(): N {
@@ -180,6 +223,7 @@ export class PenTool<N extends VectorNetwork> {
         if (vertex === this.pathStart) {
           const r = closePath(this.net, from, vertex, this.pendingOut ? { start: this.pendingOut } : {});
           this.net = r.network;
+          this.log.push({ op: "closePath", start: from, end: vertex, ...(this.pendingOut ? { tangentStart: this.pendingOut } : {}) });
           incoming = r.segment;
         } else {
           incoming = this.connect(from, vertex);
@@ -233,6 +277,7 @@ export class PenTool<N extends VectorNetwork> {
     const before = this.net;
     if (key === "Backspace") {
       const prev = this.history.pop();
+      this.log = [];
       if (prev && this.active !== null) {
         this.net = prev.net;
         this.active = prev.active;
@@ -259,18 +304,21 @@ export class PenTool<N extends VectorNetwork> {
   private place(p: Vec): number {
     const r = addVertex(this.net, p.x, p.y);
     this.net = r.network;
+    this.log.push({ op: "addVertex", x: p.x, y: p.y });
     return r.vertex;
   }
 
   private split(hit: Extract<PenHit, { kind: "segment" }>): number {
     const r = splitSegment(this.net, hit.segment, hit.t);
     this.net = r.network;
+    this.log.push({ op: "splitSegment", segment: hit.segment, t: hit.t });
     return r.vertex;
   }
 
   private connect(from: number, to: number): number {
     const r = addSegment(this.net, from, to, this.pendingOut ?? undefined, undefined);
     this.net = r.network;
+    this.log.push({ op: "addSegment", start: from, end: to, ...(this.pendingOut ? { tangentStart: this.pendingOut } : {}) });
     return r.segment;
   }
 
@@ -289,9 +337,13 @@ export class PenTool<N extends VectorNetwork> {
       const ts = atEnd ? seg.tangentStart : h;
       const te = atEnd ? h : seg.tangentEnd;
       this.net = setTangents(this.net, drag.incoming, ts, te);
+      const nz = (v: Vec | undefined): Vec | null => (v && (v.x !== 0 || v.y !== 0) ? { x: v.x, y: v.y } : null);
+      this.log.push({ op: "setTangents", segment: drag.incoming, tangentStart: nz(ts), tangentEnd: nz(te) });
     }
     if (!drag.ends) this.pendingOut = zero ? null : { x: d.x, y: d.y };
-    this.net = updateVertex(this.net, drag.vertex, { handleMirroring: broken || zero ? undefined : "angle-length" });
+    const mirroring = broken || zero ? undefined : "angle-length";
+    this.net = updateVertex(this.net, drag.vertex, { handleMirroring: mirroring });
+    this.log.push({ op: "setVertex", vertex: drag.vertex, handleMirroring: mirroring ?? null });
   }
 
   private snapPoint(p: Vec, mods: PenModifiers, from: number | null): Vec {
