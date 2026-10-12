@@ -235,7 +235,7 @@ function vectorNode(ctx: Ctx, subpaths: Subpath[], props: Record<string, unknown
   const b = subpathBounds(world);
   const scale = Math.sqrt(Math.abs(ctx.space[0] * ctx.space[3] - ctx.space[1] * ctx.space[2]));
   const p = paints(ctx.style, scale);
-  const fills = fillable ? p.fills : [];
+  const fills = fillable ? (p.fills as Paint[]) : [];
   const network = subpathsToNetwork(world, { x: b.x, y: b.y }, ctx.style.fillRule, fills.length > 0);
   if (network.segments.length === 0) return null;
   return {

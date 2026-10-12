@@ -1,6 +1,7 @@
 import { AssetStore, type FigDocument, type SceneBridge } from "@fig-tree/document";
 import type { Point } from "@fig-tree/geometry";
 import { AnchorRegistry, type AnchorRect } from "./anchors";
+import type { ClipPayload } from "./clipboard/format";
 import { runAction, actionEnabled } from "./actions";
 import { CanvasGeometry } from "./geometry";
 import { History } from "./history";
@@ -104,6 +105,8 @@ export class Editor {
   overlayVersion = 0;
   /** Bumped on document changes seen by the editor. */
   docVersion = 0;
+  /** The last copied nodes, for pasting when the system clipboard is unavailable. */
+  internalClipboard: ClipPayload | null = null;
   /** Called when the user asks for something the host provides (file picker, rename field, shortcuts sheet). */
   onRequest: ((request: EditorRequest) => void) | null = null;
 

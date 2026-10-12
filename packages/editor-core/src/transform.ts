@@ -23,6 +23,11 @@ export interface Captured {
   readonly stored: { readonly x: number; readonly y: number; readonly rotation: number; readonly flipX: boolean; readonly flipY: boolean };
   /** In a flex or grid parent's flow: layout places it, x/y are ignored. */
   readonly inFlow: boolean;
+  /**
+   * Keys a gesture has written so far. A later step of the same gesture
+   * writes them again even when they are back at their captured value.
+   */
+  readonly touched?: Set<string>;
 }
 
 /** Whether a node is placed by its parent's flex or grid layout (its x/y are ignored). */
@@ -56,6 +61,7 @@ export function capture(geom: CanvasGeometry, id: string): Captured {
       flipY: doc.get<boolean>(id, "flipY"),
     },
     inFlow: isInFlow(doc, id),
+    touched: new Set(),
   };
 }
 
@@ -97,16 +103,23 @@ export function placementProps(c: Captured, newWorld: Mat2D, width: number, heig
   const before = boxFromMatrix(multiply(inv, c.world), c.width, c.height, c.stored.flipX, c.stored.flipY);
   const after = boxFromMatrix(multiply(inv, newWorld), width, height, c.stored.flipX, c.stored.flipY);
   const out: PlacementProps = {};
+  const t = c.touched;
+  const put = <K extends keyof PlacementProps>(key: K, value: PlacementProps[K], changed: boolean): void => {
+    if (changed || t?.has(key)) {
+      out[key] = value;
+      t?.add(key);
+    }
+  };
   if (!c.inFlow) {
-    out.x = clean(c.stored.x + (after.x - before.x));
-    out.y = clean(c.stored.y + (after.y - before.y));
+    put("x", clean(c.stored.x + (after.x - before.x)), Math.abs(after.x - before.x) > 1e-9);
+    put("y", clean(c.stored.y + (after.y - before.y)), Math.abs(after.y - before.y) > 1e-9);
   }
-  if (Math.abs(width - c.width) > 1e-9) out.width = clean(width);
-  if (Math.abs(height - c.height) > 1e-9) out.height = clean(height);
+  put("width", clean(width), Math.abs(width - c.width) > 1e-9);
+  put("height", clean(height), Math.abs(height - c.height) > 1e-9);
   const rotation = clean(after.rotation, 1e4);
-  if (Math.abs(angleDiff(rotation, c.stored.rotation)) > 1e-6) out.rotation = rotation;
-  if (after.flipX !== c.stored.flipX) out.flipX = after.flipX;
-  if (after.flipY !== c.stored.flipY) out.flipY = after.flipY;
+  put("rotation", rotation, Math.abs(angleDiff(rotation, c.stored.rotation)) > 1e-6);
+  put("flipX", after.flipX, after.flipX !== c.stored.flipX);
+  put("flipY", after.flipY, after.flipY !== c.stored.flipY);
   return out;
 }
 
@@ -125,6 +138,7 @@ export function moveProps(c: Captured, dx: number, dy: number): PlacementProps {
   // Delta in the parent's space (linear part only).
   const lx = inv[0] * dx + inv[2] * dy;
   const ly = inv[1] * dx + inv[3] * dy;
+  c.touched?.add("x").add("y");
   return { x: clean(c.stored.x + lx), y: clean(c.stored.y + ly) };
 }
 

@@ -470,7 +470,10 @@ export class SelectTool implements Tool {
   private finish(editor: Editor, g: Gesture, e: ToolPointer): void {
     void e;
     if (g.kind === "marquee") return;
-    if (g.kind === "move" && g.drop) {
+    if (g.kind === "move" && g.drop && g.drop.target === g.flowParent) {
+      // Reordering inside the flow: the layout places the nodes.
+      editor.history.apply([{ type: "setParent", ids: g.ids, parent: g.flowParent, index: g.drop.index ?? 0, keepPosition: false }]);
+    } else if (g.kind === "move" && g.drop) {
       const inFlow = new Set(g.captured.filter((c) => c.inFlow).map((c) => c.id));
       const cmds = reparentCommands(editor, g.ids, g.drop.target, g.drop.index, g.delta, inFlow);
       editor.history.apply(cmds);

@@ -47,7 +47,7 @@ export function parsePathData(d: string): Subpath[] {
   let cur: Subpath | null = null;
   let p: Point = { x: 0, y: 0 };
   let start: Point = { x: 0, y: 0 };
-  let lastCtrl: Point | null = null;
+  let lastCtrl = null as Point | null;
   let lastCmd = "";
   let i = 0;
   const num = (): number => {
@@ -112,7 +112,7 @@ export function parsePathData(d: string): Subpath[] {
         break;
       }
       case "s": {
-        const c1 = lastCtrl && "cs".includes(lastCmd.toLowerCase()) ? { x: 2 * p.x - lastCtrl.x, y: 2 * p.y - lastCtrl.y } : p;
+        const c1: Point = lastCtrl && "cs".includes(lastCmd.toLowerCase()) ? { x: 2 * p.x - lastCtrl.x, y: 2 * p.y - lastCtrl.y } : p;
         const c2 = { x: o.x + num(), y: o.y + num() };
         const q = { x: o.x + num(), y: o.y + num() };
         ensure().segments.push({ p0: p, c1, c2, p1: q, line: false });
@@ -129,7 +129,7 @@ export function parsePathData(d: string): Subpath[] {
         break;
       }
       case "t": {
-        const c = lastCtrl && "qt".includes(lastCmd.toLowerCase()) ? { x: 2 * p.x - lastCtrl.x, y: 2 * p.y - lastCtrl.y } : p;
+        const c: Point = lastCtrl && "qt".includes(lastCmd.toLowerCase()) ? { x: 2 * p.x - lastCtrl.x, y: 2 * p.y - lastCtrl.y } : p;
         const q = { x: o.x + num(), y: o.y + num() };
         ensure().segments.push(quadToCubic(p, c, q));
         p = q;

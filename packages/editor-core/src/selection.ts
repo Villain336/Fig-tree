@@ -43,10 +43,10 @@ export function enteredContainers(doc: FigDocument, selection: readonly string[]
  */
 export function clickTarget(doc: FigDocument, path: readonly string[], selection: readonly string[], deep: boolean): string | null {
   if (path.length === 0) return null;
-  if (deep) return path[path.length - 1]!;
   const entered = enteredContainers(doc, selection);
   let i = 0;
-  while (i + 1 < path.length && (isBoard(doc, path[i]!) || entered.has(path[i]!))) i++;
+  if (deep) i = path.length - 1;
+  else while (i + 1 < path.length && (isBoard(doc, path[i]!) || entered.has(path[i]!))) i++;
   const target = path[i]!;
   if (i === path.length - 1 && isBoard(doc, target) && doc.tree.childrenOf(target).length > 0 && !selection.includes(target)) return null;
   return target;
