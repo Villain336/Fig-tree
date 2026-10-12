@@ -1,0 +1,15 @@
+import { readFileSync } from "node:fs";
+import { loadHarfBuzz, FontRegistry, Typeface, TextBlock, parseTextStyle, parseParagraphStyle } from "./src/index";
+await loadHarfBuzz();
+const reg = new FontRegistry();
+const load = (p: string) => new Typeface(new Uint8Array(readFileSync("fixtures/fonts/" + p)));
+reg.addTypeface(load("inter/Inter[opsz,wght].ttf"), { family: "Inter" });
+reg.addTypeface(load("noto-sans-arabic/NotoSansArabic[wdth,wght].ttf"), { family: "Arabic" });
+const root = parseTextStyle("font: 16px Inter");
+const para = parseParagraphStyle("");
+const text = "Hello world, this is a test of the text engine. عربي ok";
+const block = new TextBlock(reg, { paragraphs: [{ text, spans: [{ start: 0, end: text.length, style: parseTextStyle("font-family: Inter, Arabic", root) }], style: para, root }] });
+console.log("min", block.minContentWidth(), "max", block.maxContentWidth());
+const lay = block.layout(200);
+for (const p of lay.paragraphs) for (const l of p.layout.lines) console.log(l.start, l.end, JSON.stringify(text.slice(l.start, l.end)), "top", l.top, "h", l.height, "base", l.baseline, "w", l.width.toFixed(3), "runs", l.runs.length);
+console.log("height", lay.height);

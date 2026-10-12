@@ -11,7 +11,7 @@
     "node": ">=20.9.0"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/geometry && tsc -p packages/renderer && tsc -p packages/layout && tsc -p packages/document && tsc -p packages/document/test && tsc -p e2e && npm run typecheck -w @fig-tree/editor",
+    "typecheck": "tsc -p packages/geometry && tsc -p packages/renderer && tsc -p packages/layout && tsc -p packages/text && tsc -p packages/document && tsc -p packages/document/test && tsc -p e2e && npm run typecheck -w @fig-tree/editor",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "npm run build -w @fig-tree/editor",

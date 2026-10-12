@@ -1,0 +1,20 @@
+{
+  "name": "@fig-tree/text",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Fig Tree text engine: font loading and matching, HarfBuzz shaping, Unicode bidi and line breaking, CSS paragraph layout, glyph outlines.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fig-tree/geometry": "0.1.0",
+    "@fig-tree/layout": "0.1.0",
+    "bidi-js": "1.0.3",
+    "brotli": "1.3.3",
+    "harfbuzzjs": "1.6.2",
+    "fflate": "0.8.3"
+  }
+}
