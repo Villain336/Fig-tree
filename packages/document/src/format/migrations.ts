@@ -3,9 +3,8 @@ import { FORMAT_VERSION } from "../schema";
 /**
  * Upgrades `document.json` from one format version to the next. Migrations
  * run on plain JSON before validation, in order, until the file reaches
- * {@link FORMAT_VERSION}. Version 1 is the first format, so the list is
- * empty; add an entry here (and bump `FORMAT_VERSION`) whenever stored
- * semantics change, including schema defaults.
+ * {@link FORMAT_VERSION}. Add an entry here (and bump `FORMAT_VERSION`)
+ * whenever stored semantics change, including schema defaults.
  */
 export interface Migration {
   readonly from: number;
@@ -14,7 +13,15 @@ export interface Migration {
   migrate(json: Record<string, unknown>): Record<string, unknown>;
 }
 
-export const MIGRATIONS: readonly Migration[] = [];
+export const MIGRATIONS: readonly Migration[] = [
+  {
+    from: 1,
+    to: 2,
+    description:
+      "Boolean groups (groups with `booleanOperation` and paints) and vertex handle mirroring. Additive: every version 1 document is a valid version 2 document; the bump lets older readers refuse files that use the new properties.",
+    migrate: (json) => json,
+  },
+];
 
 export class FormatError extends Error {
   constructor(message: string, readonly issues: readonly string[] = []) {

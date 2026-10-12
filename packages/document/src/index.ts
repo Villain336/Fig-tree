@@ -35,3 +35,15 @@ export { SceneBridge } from "./bridge/bridge";
 export { fontAssetDescriptor, registerDocumentFonts, uploadFont } from "./bridge/fonts";
 export { DocumentLayout, type ComputedBox } from "./bridge/layout";
 export { cssDeclarations } from "./css";
+export { VectorOp, applyVectorOps } from "./vector-commands";
+export {
+  booleanContours,
+  booleanPath,
+  isBooleanGroup,
+  nodeFillShapes,
+  nodeNetwork,
+  storedBox,
+  type GeometryOptions,
+  type GeometrySource,
+} from "./vector-geometry";
+export { textToVectorNetwork } from "./bridge/vector";

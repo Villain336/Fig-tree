@@ -53,6 +53,21 @@ describe("strokePath", () => {
     );
   });
 
+  it("covers closed contours narrower than the stroke (no holes from an inverted inner loop)", () => {
+    // Found by the property test above: a 27-wide stroke on a small triangle, and a disk-covering circle stroke.
+    for (const [pts, width, probe] of [
+      [[[44, 66], [2, 59], [83, 7]], 26.78825497163363, [37.37, 52.21]],
+      [[[44, 62], [35, 0], [70, 42]], 29.91709736512052, [57.37, 50.21]],
+    ] as const) {
+      const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+      const outline = strokePath(polyPath(xs, ys, true), { width, join: "round" }, undefined, TOL);
+      expect(distanceToPolyline(probe[0], probe[1], xs, ys, true)).toBeLessThan(width / 2);
+      expect(inside(outline, probe[0], probe[1])).toBe(true);
+    }
+    const ring = strokePath(new Path().moveTo(5, 0).cubicTo(5, 2.76, 2.76, 5, 0, 5).cubicTo(-2.76, 5, -5, 2.76, -5, 0).cubicTo(-5, -2.76, -2.76, -5, 0, -5).cubicTo(2.76, -5, 5, -2.76, 5, 0).close(), { width: 20 }, undefined, TOL);
+    for (const [x, y] of [[0, 0], [3, 0], [0.5, 0.5], [-3, 2], [12, 0]]) expect(inside(ring, x!, y!), `${x},${y}`).toBe(true);
+  });
+
   it("never leaves holes along the spine for any join or cap", () => {
     const joins: LineJoin[] = ["miter", "round", "bevel"];
     const caps: LineCap[] = ["butt", "round", "square"];

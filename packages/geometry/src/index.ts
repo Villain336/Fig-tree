@@ -36,6 +36,55 @@ export {
 } from "./flatten";
 export { dashPolylines, strokePath, strokePolylines, type LineCap, type LineJoin, type StrokeStyle } from "./stroke";
 export {
+  arcLength,
+  areaContribution,
+  closestParam,
+  cubic,
+  cubicBounds,
+  cubicFromArray,
+  cubicRootsIn,
+  cubicToArray,
+  curvatureAt,
+  derivativeAt,
+  flatness,
+  inflectionParams,
+  isDegenerate,
+  lineCubic,
+  monotonicSplits,
+  paramAtLength,
+  pointAt,
+  quadCubic,
+  reverseCubic,
+  secondDerivativeAt,
+  solveCubic,
+  solveQuadratic,
+  splitAt,
+  subCurve,
+  tangentAt,
+  transformCubic,
+  withEndpoints,
+  type Cubic,
+} from "./bezier/cubic";
+export { intersectCurves, type CurveHit, type CurveIntersections, type CurveOverlap } from "./bezier/intersect";
+export { Arrangement, buildArrangement, defaultEps, type ArrangementCurve, type ArrangementEdge, type ArrangementOptions, type EdgeSource } from "./boolean/arrangement";
+export {
+  BooleanEvaluator,
+  booleanOperation,
+  clusterOperands,
+  contoursArea,
+  contoursBounds,
+  contoursToPath,
+  pathContours,
+  pathContoursDetailed,
+  pathShape,
+  simplifyShape,
+  type BooleanOperand,
+  type BooleanOperation,
+  type BooleanOptions,
+  type BooleanResult,
+  type FillShape,
+} from "./boolean/boolean";
+export {
   ellipseArcPath,
   ellipsePath,
   polygonPath,
@@ -44,3 +93,70 @@ export {
   starPath,
   type CornerRadii,
 } from "./shapes";
+export { appendSvgArc, formatSvgPath, parseSvgPath, type SvgFormatOptions, type SvgParseResult } from "./svg-path";
+export {
+  EMPTY_NETWORK,
+  incidence,
+  isStraightSegment,
+  loopCubics,
+  loopDirections,
+  networkBounds,
+  remapRegions,
+  segmentCubic,
+  segmentFromCubic,
+  validateNetwork,
+  type HandleMirroring,
+  type NetworkRegion,
+  type NetworkSegment,
+  type NetworkVertex,
+  type Vec,
+  type VectorNetwork,
+} from "./vector-network/network";
+export {
+  addSegment,
+  addVertex,
+  bendSegment,
+  connected,
+  curveSegment,
+  disconnectVertex,
+  handleOf,
+  makeCorner,
+  mergeVertices,
+  moveHandle,
+  moveVertices,
+  oppositeEnd,
+  regionsClose,
+  removeIsolatedVertices,
+  removeSegments,
+  removeVertices,
+  reverseSegment,
+  segmentsAt,
+  setSegmentTangents,
+  setVertexMirroring,
+  setVertexPosition,
+  splitSegment,
+  straightenSegment,
+  transformNetwork,
+  updateVertex,
+} from "./vector-network/edit";
+export {
+  ellipseNetwork,
+  lineNetwork,
+  networkStrokePath,
+  networkToSvgPath,
+  pathToNetwork,
+  polygonNetwork,
+  rectangleNetwork,
+  regionPath,
+  starNetwork,
+  strokeChains,
+  svgPathToNetwork,
+  type Chain,
+  type PathToNetworkOptions,
+} from "./vector-network/convert";
+export { closePath, faceAt, fillAllFaces, networkFaces, toggleFaceFill, type NetworkFace } from "./vector-network/regions";
+export { roundNetworkCorners } from "./vector-network/corners";
+export { fitCurve, fitSingleCubic, maxDistanceToCurves, type FitOptions } from "./path-edit/fit";
+export { deleteVertexPreservingShape, deviation, freehandToNetwork, joinCurves, simplifyNetwork } from "./path-edit/refit";
+export { PenTool, constrainAngle, type PenHit, type PenModifiers, type PenOptions, type PenPreview, type PenResult } from "./pen/pen-tool";
+export { dashCurves, outlineStroke, strokeShapes, type OutlineOptions, type OutlineStrokeStyle } from "./outline/outline-stroke";

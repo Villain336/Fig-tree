@@ -21,6 +21,17 @@ import {
 } from "./schema";
 import { contentToSpans, encodeStyle, spansLength, type Span } from "./text";
 import { boxFromMatrix, invert, multiply } from "./transform";
+import {
+  BOOLEAN_PAINT_KEYS,
+  EditVectorCommand,
+  FlattenCommand,
+  OutlineStrokeCommand,
+  booleanPaintValue,
+  editVector,
+  flatten,
+  outlineStrokeOf,
+  type VectorCommandContext,
+} from "./vector-commands";
 
 // ── Command schemas ──────────────────────────────────────────────────────
 
@@ -76,6 +87,8 @@ export const GroupCommand = z.strictObject({
   ids: Ids,
   id: NodeId.optional(),
   name: z.string().max(1_000).optional(),
+  /** Makes a boolean group, which takes its paints from the bottom node. */
+  booleanOperation: z.enum(["union", "subtract", "intersect", "exclude"]).optional(),
 });
 
 export const UngroupCommand = z.strictObject({ type: z.literal("ungroup"), id: NodeId });
@@ -127,6 +140,9 @@ export const Command = z.discriminatedUnion("type", [
   FormatTextCommand,
   AddAssetCommand,
   SetDocumentNameCommand,
+  EditVectorCommand,
+  FlattenCommand,
+  OutlineStrokeCommand,
 ]);
 export type Command = z.input<typeof Command>;
 export type CommandType = Command["type"];
@@ -293,8 +309,26 @@ function execute(d: Draft, cmd: ParsedCommand): CommandResult {
       duplicate(d, rec, cmd.ids, cmd.offset, cmd.newIds);
       break;
     case "group":
-      group(d, rec, cmd.ids, cmd.id, cmd.name);
+      group(d, rec, cmd.ids, cmd.id, cmd.name, cmd.booleanOperation);
       break;
+    case "editVector":
+      editVector(vectorContext(d), cmd);
+      rec.touch(cmd.id);
+      break;
+    case "flatten": {
+      const r = flatten(vectorContext(d), cmd);
+      rec.touch(r.created, ...r.deleted);
+      rec.created.push(r.created);
+      rec.deleted.push(...r.deleted);
+      break;
+    }
+    case "outlineStroke": {
+      const r = outlineStrokeOf(vectorContext(d), cmd);
+      rec.touch(cmd.id, r.created, ...r.deleted);
+      rec.created.push(r.created);
+      rec.deleted.push(...r.deleted);
+      break;
+    }
     case "ungroup":
       ungroup(d, rec, cmd.id);
       break;
@@ -602,7 +636,28 @@ function copyTree(
   }
 }
 
-function group(d: Draft, rec: Recorder, ids: readonly string[], groupId: string | undefined, name: string | undefined): void {
+/** The draft as the vector commands see it. */
+function vectorContext(d: Draft): VectorCommandContext {
+  return {
+    typeOf: (id) => d.typeOf(id),
+    get: <T>(id: string, key: string) => d.get<T>(id, key),
+    childrenOf: (id) => d.childrenOf(id),
+    set: (id, key, value) => d.set(id, key, value),
+    storedProps: (id) => d.storedProps(id),
+    parentOf: (id) => d.parentOf(id),
+    indexOf: (id) => d.indexOf(id),
+    createAt: (id, type, props, parent, index) => {
+      const [key] = d.keysAt(parent, index, 1, new Set());
+      d.create(id, type, props, parent, key!, null);
+    },
+    remove: (id) => d.remove(id),
+    newId: () => newId(d.doc.random),
+    idTaken: (id) => d.idTaken(id),
+    reject: (...issues) => reject(...issues),
+  };
+}
+
+function group(d: Draft, rec: Recorder, ids: readonly string[], groupId: string | undefined, name: string | undefined, booleanOperation?: string): void {
   const unique = [...new Set(ids)];
   for (const id of unique) {
     const type = requireNode(d, id);
@@ -617,7 +672,17 @@ function group(d: Draft, rec: Recorder, ids: readonly string[], groupId: string 
   const top = ordered[ordered.length - 1]!;
   const index = d.indexOf(top) + 1;
   const [key] = d.keysAt(parent, index, 1, new Set());
-  d.create(id, "group", { name: name ?? typeLabel("group") }, parent, key!, null);
+  const props: Record<string, unknown> = { name: name ?? typeLabel("group") };
+  if (booleanOperation) {
+    props.booleanOperation = booleanOperation;
+    if (!name) props.name = booleanOperation[0]!.toUpperCase() + booleanOperation.slice(1);
+    // Paints come from the bottom operand, which is also what "subtract" keeps.
+    for (const k of BOOLEAN_PAINT_KEYS) {
+      const v = booleanPaintValue(d, ordered[0]!, k);
+      if (v !== undefined) props[k] = v;
+    }
+  }
+  d.create(id, "group", props, parent, key!, null);
   rec.touch(id);
   rec.created.push(id);
   const keys = d.keysAt(id, 0, ordered.length, new Set());

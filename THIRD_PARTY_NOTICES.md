@@ -16,6 +16,8 @@ license at file level, are marked with a header naming their origin, and live un
 |---|---|---|
 | `packages/renderer/src/ported/penpot/tiles.ts` | `render-wasm/src/tiles.rs` | Tile rect math, visible/interest viewbox, and pending-tile prioritization (visible first, center-out ordering, deferred interest ring, visible-only during interaction). |
 | `packages/geometry/test/ported/penpot/path-vectors.test.ts` | `common/test/common_tests/types/path_data_test.cljc` | Path test vectors (sample contents, selrect regressions, transform cases); assertions rewritten for our API. |
+| `packages/geometry/test/ported/penpot/bool-vectors.test.ts` | `render-wasm/src/math/bools.rs` (test module), `common/test/common_tests/types/path_data_test.cljc` (`contents-for-bool`, `rect-a`/`rect-b`/`rect-c`) | Boolean regression vectors: operands with opposite windings and their expected areas, subpath counts and orientation; the union of two rounded squares with holes. Asserted against our own boolean engine (Penpot's algorithm was not ported). |
+| `packages/geometry/test/ported/penpot/path-edit-vectors.test.ts` | `common/test/common_tests/types/path_data_test.cljc` (fit-cubic, fit-curve, smooth-points, remove-nodes, bend-curve-deltas tests) | Path-editing test vectors and expectations, asserted against our own fitting, vertex deletion and bending code (written from Schneider's paper and the least-norm solution; Penpot's code was not ported). |
 | `packages/text/src/ported/penpot/fallback.ts` | `common/src/app/common/fonts.cljs` (lines 161-303) | The script → Noto fallback family table and the emoji code point ranges, translated from regular expressions to code point ranges. Devanagari now maps to Noto Sans Devanagari (the original pointed at Noto Sans, which lacks it). Penpot's `closest-variant` weight matching was not ported: Fig Tree uses CSS Fonts 4 matching. |
 
 These files remain available under MPL-2.0. Fig Tree's own code that imports them
@@ -48,6 +50,8 @@ Development-only tools (Vitest, Playwright, fast-check, ajv, pngjs, Tailwind CSS
 ## Fonts
 
 `fixtures/fonts/` holds subsets of fonts from the Google Fonts repository, all under the SIL Open Font License 1.1, each with its `OFL.txt`: Inter (The Inter Project Authors), Noto Sans, Noto Sans Arabic and Noto Sans Devanagari (The Noto Project Authors), and Noto Sans SC (Adobe; Reserved Font Name "Source", not used by the subset's name). `fixtures/fonts/README.md` lists the upstream files and what was kept. They are used by tests and by the editor's sample document; no font is bundled into the packages.
+
+Module 5b (the vector toolkit in `packages/geometry`: curve intersection, booleans, vector networks, path editing, the pen tool, outline stroke, SVG path data) ports no code. Its algorithms come from public literature and specifications: Bézier clipping (Sederberg and Nishita, 1990), curve fitting (Schneider, Graphics Gems, 1990), and the SVG 1.1 arc implementation notes (Appendix F.6); the arrangement and winding-number booleans are our own. Penpot's boolean and path-editing code was read only for its test cases, which are ported as test data under MPL-2.0 (above). Penpot's arc conversion (`arc_to_bezier.js`, MIT, from fontello/svgpath) was not used. Module 5b adds no npm dependencies.
 
 Module 2 (the document model) ports no Penpot code. It used Penpot's document invariants and component override model (`docs/reference/penpot.md` §1.3 and §1.9) only as a reference, to check that our schema leaves room for touched-group overrides.
 

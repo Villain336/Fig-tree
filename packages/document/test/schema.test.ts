@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   Effect,
+  FORMAT_VERSION,
   FigtreeFile,
   NODE_TYPES,
   PROPS,
@@ -235,7 +236,7 @@ describe("value schemas", () => {
 
 describe("document.json schema", () => {
   const page = (children: unknown[] = []) => ({ id: "p", type: "page", children });
-  const file = (pages: unknown[], assets: Record<string, unknown> = {}) => ({ format: "figtree", version: 1, name: "Doc", pages, assets });
+  const file = (pages: unknown[], assets: Record<string, unknown> = {}) => ({ format: "figtree", version: FORMAT_VERSION, name: "Doc", pages, assets });
 
   it("accepts a minimal document", () => {
     expect(FigtreeFile.safeParse(file([page()])).success).toBe(true);
@@ -247,6 +248,6 @@ describe("document.json schema", () => {
     expect(firstIssue(FigtreeFile, file([page([{ id: "r", type: "rectangle", children: [] }])]))).toMatch(/Unrecognized key: "children"/);
     expect(firstIssue(FigtreeFile, file([page([{ id: "r", type: "frame", text: { content: "", runs: [] } }])]))).toMatch(/Unrecognized key: "text"/);
     expect(firstIssue(FigtreeFile, file([page([{ id: "x", type: "page", children: [] }])]))).toMatch(/pages\.0\.children\.0\.type: Invalid discriminator value/);
-    expect(firstIssue(FigtreeFile, { ...file([page()]), version: 2 })).toMatch(/^version: Invalid input: expected 1/);
+    expect(firstIssue(FigtreeFile, { ...file([page()]), version: FORMAT_VERSION + 1 })).toMatch(new RegExp(`^version: Invalid input: expected ${FORMAT_VERSION}`));
   });
 });

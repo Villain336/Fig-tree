@@ -1,6 +1,6 @@
 # Architecture
 
-This document covers what Modules 1 to 5a built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), the text engine (Module 4) and the editor (Module 5a). It also covers how later modules plug in.
+This document covers what Modules 1 to 5 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), the text engine (Module 4), the vector toolkit with boolean groups (Module 5b) and the editor (Module 5a). It also covers how later modules plug in.
 
 ```
 apps/editor ──────────────┐  Next.js: editor UI (/), /bench, /render-test
@@ -41,7 +41,7 @@ All packages are TypeScript-strict internal workspace packages that export their
 | `matrix.ts` | Immutable 2×3 affine tuples (canvas/SVG convention). `maxScale` (the largest singular value) converts screen tolerances to local ones conservatively. |
 | `path.ts` | Packed verbs plus `Float64Array` coordinates. `bounds()` is tight: it solves for curve extrema instead of using control points. |
 | `flatten.ts` | Adaptive flattening with Wang's formula. The number of segments for each curve is `ceil(sqrt(k·M/tol))`, where `M` is the largest second difference of the control polygon and `k` is 1/4 for quadratics and 3/4 for cubics. `tol` is given in *output* space. Callers pass `screenTolerance / scale`, so the error bound holds in device pixels. Also provides winding numbers and point containment. |
-| `stroke.ts` | The stroker emits closed polygons that are correct under the **nonzero** rule. Each contour becomes left-offset forward → cap → right-offset backward → cap (open contours), or two oppositely wound loops (closed contours). Joins: miter (falling back to bevel at the miter limit), round (arc steps from the chord-error tolerance) and bevel. The inner side of a join uses the offset-line intersection when it lies on both segments, and otherwise routes through the vertex, so the winding stays positive. Dashes follow SVG semantics: odd patterns repeat, a dash spanning the start of a closed contour is merged, and zero-length dashes with round or square caps draw dots. Stroking happens in local space, then the result is transformed, so non-uniform scales distort the pen like the canvas does. |
+| `stroke.ts` | The stroker emits closed polygons that are correct under the **nonzero** rule. Each contour becomes left-offset forward → cap → right-offset backward → cap (open contours), or two oppositely wound loops (closed contours). Joins: miter (falling back to bevel at the miter limit), round (arc steps from the chord-error tolerance) and bevel. The inner side of a join uses the offset-line intersection when it lies on both segments, and otherwise routes through the vertex, so the winding stays positive. A closed contour narrower than the stroke (the inner corners at a segment's two ends reach past its length) is stroked as overlapping, consistently wound pieces instead, since its inner loop would turn inside out and cancel the outer one. Dashes follow SVG semantics: odd patterns repeat, a dash spanning the start of a closed contour is merged, and zero-length dashes with round or square caps draw dots. Stroking happens in local space, then the result is transformed, so non-uniform scales distort the pen like the canvas does. |
 | `shapes.ts` | Rounded rectangles with per-corner radii, clamped like CSS `border-radius`. **Corner smoothing** is our own construction (below). Ellipses, and ellipse arcs: pies, ring segments and donuts (oppositely wound contours). Regular polygons and stars stretched to fill their box exactly, and polygons with every corner rounded by a tangent arc whose radius is clamped to half of each adjacent edge. |
 
 ### Corner smoothing
@@ -57,6 +57,45 @@ The free handle `a` is chosen so that the corner begins exactly `r(1+s)` from th
 - curvature values 0 and 1/r;
 - tight bounds;
 - that area shrinks monotonically as `s` grows.
+
+### Vector toolkit (module 5b)
+
+Framework-free building blocks for vector editing: the editor's pen tool and vector edit mode call them, and the document's vector commands are thin wrappers around them. Everything is pure (networks are immutable values) and runs in Node.
+
+| Module | What it is |
+|---|---|
+| `bezier/cubic.ts` | Cubic toolkit. Lines are cubics with a `line` flag, so straightness survives splitting. Sub-curves by blossoming (no error build-up from repeated splits), tight bounds, x/y-monotonic splits, inflections, exact signed area (3-point Gauss–Legendre is exact for the degree-5 integrand), adaptive arc length and its inverse, closest point (bracketed golden-section search, then Newton). Polynomial roots on an interval are found on monotonic pieces between the derivative's roots, so they stay correct when the cubic term nearly vanishes: Cardano's formula lost two of three roots there, which a boolean fuzz case found. |
+| `bezier/intersect.ts` | Curve–curve intersection by Bézier clipping (fat lines, halving when clipping stalls, chords of flat pieces mapped back to curve parameters by closest point, Newton polish when well conditioned). Lines take exact paths (line–line in closed form, line–curve by the roots of the signed distance). It reports **touches** (tangential contacts, end points on the other curve, near misses closer than `eps`) as hits, and **coincident stretches** as parameter intervals, never as points. |
+| `svg-path.ts` | SVG path data: every command, compact numbers, arc flags without separators, errors that keep what came before. Arcs are converted from the endpoint parameterization (SVG 1.1 F.6.5), radii are scaled up when too small (F.6.6), and arcs are split into cubics of at most 90°. Written from the W3C notes; no third-party code. |
+| `vector-network/` | The network model (structurally the document's schema, so stored networks pass straight in) and its operations: add, move, remove and merge vertices; add, split (De Casteljau), remove, bend (least-norm handle change), straighten, curve and reverse segments; handles with mirroring (none, angle, angle and length); disconnect; close path. Every operation returns a valid network: indices are remapped and regions whose boundary breaks are removed. `regions.ts` finds faces (outer loop plus holes) for the fill tool; `corners.ts` bakes vertex corner radii (an arc tangent to both segments, arc length on curves, clamped so neighbouring corners never overlap); `convert.ts` converts paths, SVG data and every primitive shape. |
+| `boolean/` | The planar arrangement and the boolean operations (below). |
+| `path-edit/` | Curve fitting after Schneider (chord-length parameters, closed-form handle lengths, Newton reparameterization, splitting at the worst point, corners kept), with a second-order end-tangent estimate. Deleting a vertex joins its two segments: two collinear lines stay a line, the two halves of a split cubic are recognized and restored exactly, anything else is fitted by least squares with the outer tangents fixed. `simplifyNetwork` removes vertices while every point of the *original* geometry stays within the tolerance. |
+| `pen/pen-tool.ts` | The pen tool as a state machine: pointer and key events in, network and preview out. Clicks place corners, drags pull mirrored handles (Alt breaks them), clicking a vertex or segment connects to it (a branch, since these are networks), clicking the first vertex closes the path and fills the new face, Shift constrains to 15° steps, a `snap` hook handles grids and guides, Backspace removes the last vertex. |
+| `outline/outline-stroke.ts` | Outline stroke as curves: every curve is cut into pieces turning at most 10°, each piece contributes the band between its two offset cubics (handles scaled by the offset's speed ratio 1 ∓ hκ, subdivided until within tolerance of the true offset), joins and caps add their shapes, and the boolean union of all pieces (each its own shape, so overlaps never cancel) is the outline. Dashes are measured exactly along the curves. |
+
+#### Booleans: a planar arrangement with winding numbers
+
+`boolean/arrangement.ts` builds one planar arrangement from every operand's curves, then `boolean.ts` picks faces:
+
+1. **Pieces.** Curves are split at their x and y extrema, so each piece crosses a horizontal line at most once.
+2. **Intersections.** A sweep over x finds pairs with overlapping boxes; `intersectCurves` gives crossings, touches and overlaps. Every hit becomes a split point on both pieces.
+3. **Snapping.** Points closer than `4·eps` (by default `eps` is 1e-8 of the input's extent) merge into one vertex, preferring original vertices; edges are re-attached to the merged positions.
+4. **Coincident edges** between the same two vertices are merged into one edge that carries every operand's winding contribution (with signs for direction). Shared sides, duplicated shapes and the same circle split differently all become single edges, which is where midpoint-sampling approaches go wrong.
+5. **Topology.** Outgoing half-edges are sorted by angle around each vertex. Tangents that agree to within 1e-3 rad are ordered by where the curves actually go: the direction to their first point at a common small distance. Face cycles, connected components and each component's outer face follow.
+6. **Winding numbers.** Crossing an edge changes the winding of the operand it belongs to by its contribution, `W(left) − W(right) = w(e)`, with "left" defined by cross products, so it holds in y-down and y-up axes alike. One ray per connected component (against the other components' edges, which are monotonic in y) gives the winding of its outer face; a breadth-first search gives every other face. Faces are therefore always mutually consistent. Windings are stored sparsely, so a face inside a few of 1,000 operands costs a few entries. The code counts any disagreement it meets as an *inconsistency*, which tests require to be 0. As a safety net, an inconsistent arrangement is rebuilt with a coarser tolerance; the suites below never need it.
+7. **Selection.** Each operand's fill rule (each region of a vector network keeps its own) decides whether a face is inside it. Union: inside any operand. Subtract: inside the first and no other. Intersect: inside all. Exclude: inside an odd number. The boundary between selected and other faces is traced into closed contours with the inside on their left, so they fill correctly with either rule.
+8. **Output curves.** Consecutive pieces of one input curve are joined back into a single sub-curve of it, and collinear straight pieces are merged. The output is made of the input's own curves (no polylines), and the curve count stays close to the input's.
+
+Operands whose bounding boxes do not overlap form separate clusters, which are computed independently. `BooleanEvaluator` caches results per cluster, keyed by each operand's geometry key, so editing one child of a large boolean group recomputes only its cluster.
+
+**Validation** (`test/boolean.test.ts`, `test/boolean-reference.ts`) uses an independent reference. The reference flattens the inputs within 5e-6 of their extent and integrates scanline by scanline: crossings on each line are sorted and swept, which gives exact inside intervals in x for every operand. Each result is checked in five ways:
+- the area where result and reference disagree (their symmetric difference, not just the difference of their areas);
+- classification of random points away from boundaries;
+- closed contours;
+- no crossing between output curves;
+- zero inconsistencies.
+
+The suite runs Penpot's regression vectors and an adversarial set: shared and partially shared edges, identical shapes, the same circle as an ellipse and as a fully rounded rectangle, tangential touches inside and outside, T-junctions, pentagrams under both rules, cubic self-loops, double-wound contours, donuts and holes, zero-length segments, spikes, zero-area and empty operands, offsets of 1e-10 and 1e-7, coordinates around 1e5 and 1e-4, rings of 20 circles, staircases of 12 rectangles, 8 stars, and 200 mutually overlapping random shapes. It also runs 100 near-tangent configurations and 200 random seeds, each under all four operations. Results are in [`benchmarks.md`](benchmarks.md#booleans-module-5b).
 
 ## 2. Renderer (`packages/renderer`)
 
@@ -211,7 +250,9 @@ Every property is defined once as a zod schema in `src/schema/`, grouped like CS
 
 An unset property takes a default that follows CSS initial values, with one deliberate exception (`white-space: pre-wrap`, so typed text keeps its spaces and breaks). The command layer adds creation-time conveniences on top: names, a 100×100 size for shapes, `overflow: hidden` for new frames (designers expect frames to clip), and `position: relative` for children created inside flex and grid containers. `cssDeclarations(doc, id)` states the CSS of a node's layout and box properties and is unit-tested per case.
 
-Vector networks store vertices, cubic segments (tangents relative to their vertices) and regions (loops of segments, each region with its own fill rule and optional fills). The schema checks that segments reference existing vertices and that every loop closes.
+Vector networks store vertices (with optional corner radius, cap and handle mirroring), cubic segments (tangents relative to their vertices) and regions (loops of segments, each region with its own fill rule and optional fills). The schema checks that segments reference existing vertices and that every loop closes.
+
+A group whose `booleanOperation` is not `none` is a **boolean group**: it draws one shape computed from its children (union, subtract, intersect or exclude, in paint order), painted with the group's own fills and strokes. Its children stay ordinary nodes, so the result is non-destructive and follows every edit. `src/vector-geometry.ts` turns nodes into networks and fill shapes for this, for `flatten` and for `outlineStroke`. The command layer reads boxes from stored properties; the bridge reads laid-out boxes and text outlines from the text engine.
 
 Text content is a `Y.Text`: style runs are Yjs formatting attributes, so concurrent typing and styling merge. Object-valued styles are stored as canonical JSON strings because Yjs merges adjacent formatting by value identity. The draft layer models Yjs' formatting rules (an insert without a style continues the style before it), and a property test checks the model against Yjs.
 
@@ -228,7 +269,11 @@ Each node stores one `placement` value: `{ parent, key, clock, prev }`. Writing 
 
 ### 3.4 Commands
 
-`doc.apply(commands, actor)` is the only mutation path, shared by the UI, the MCP server (module 10) and Sprout (module 11). The commands are `createNode`, `updateProps` (`null` resets a property), `rename`, `setParent` (keeps canvas position through rotated or flipped parents by default), `reorder`, `delete`, `duplicate`, `group`, `ungroup` (groups and frames), `setPage`, `setText`, `insertText`, `deleteText`, `formatText`, `addAsset` and `setDocumentName`.
+`doc.apply(commands, actor)` is the only mutation path, shared by the UI, the MCP server (module 10) and Sprout (module 11). The commands are `createNode`, `updateProps` (`null` resets a property), `rename`, `setParent` (keeps canvas position through rotated or flipped parents by default), `reorder`, `delete`, `duplicate`, `group`, `ungroup` (groups and frames), `setPage`, `setText`, `insertText`, `deleteText`, `formatText`, `addAsset` and `setDocumentName`. Vector commands (`src/vector-commands.ts`):
+- `editVector` applies a batch of network operations (the geometry package's, validated, rejected with the failing operation's position);
+- `flatten` turns shapes, vectors, groups and boolean groups into one vector;
+- `outlineStroke` outlines centered, inside and outside strokes;
+- `group` with a `booleanOperation` makes a boolean group, which takes its paints from the bottom operand.
 
 - **Validation.** Each command is parsed with zod, then checked against the document: existence, parent and child types, cycles, property applicability per type, values, assets that exist and text ranges. Errors carry the command's index in the batch and paths such as `rectangle r1: fills.0.color.a: Invalid input`.
 - **Atomic batches.** Yjs cannot roll a transaction back, so commands run against a `Draft`: an overlay with its own placements, properties, text spans and incrementally maintained child lists. Only a fully valid batch is written, in one Yjs transaction whose origin is the actor. A rejected batch changes nothing.
@@ -261,10 +306,11 @@ main         transform, opacity, visibility, outline, bottom fill, top center st
 
 - **Laid out.** Node boxes come from the layout engine (section 4.6), not from the stored `x`/`y`/`width`/`height`. Flex and grid frames position and size their children; a change also recompiles the nodes whose computed box moved (`bridge.lastRelaidOut`).
 - **Incremental.** A property change recompiles only that node and the nodes it moved. Setters run only for values that changed, so a paint edit never touches geometry, and paint nodes are reused when the stack's shape is unchanged. Structural changes relink only the containers whose child lists changed (`SceneNode.replaceChildren`, O(children)).
-- **Shapes.** Rounded rectangles with smoothing, ellipse arcs and donuts, rounded polygons and stars that fill their box, lines, and vector networks (regions filled with their own rule; segment chains stroked with joins, broken only at junctions).
+- **Shapes.** Rounded rectangles with smoothing, ellipse arcs and donuts, rounded polygons and stars that fill their box, lines, and vector networks (vertex corner radii applied; regions filled with their own rule; segment chains stroked with joins, broken only at junctions).
+- **Boolean groups.** The result is drawn on the group's main node, placed at the result's bounds so that paints normalize to them; the operands' scene nodes sit under a hidden host. Any change to a descendant (property, text, layout move, structure) recompiles its boolean ancestors, innermost first. Per-cluster results and per-operand shapes are cached by geometry keys, so editing one of 1,000 children costs 30–50 ms (`docs/benchmarks.md`).
 - **Aligned strokes.** On rectangles and frames, an inside or outside stroke is a centered stroke on the inset or outset rectangle, with radii offset and sharp outside corners following the join. That is exact, needs no layer, and a property test compares it with the general construction. Everywhere else, inside is a double-width stroke clipped by the outline, and outside is clipped by its complement (even-odd with a surrounding rectangle).
 - **Text.** A text node draws one glyph run per font instance, size and paint (merged across lines, so typing changes geometry rather than scene structure), each fill of the node's paint stack as its own run, bottom to top, plus decoration rectangles. Its box and its glyphs come from the same `TextBlock` layout (section 5).
-- **Unsupported, not faked.** Angular, diamond, image and shader paints, blend modes, effects, text strokes, text whose fonts are still loading (`text-fonts-loading`), image bitmaps, per-side stroke weights, single-axis overflow and vector vertex radii and caps are listed per node in `bridge.unsupported`. Unsupported paints and strokes are not drawn; unsupported modifiers are ignored. The editor's layer panel flags them.
+- **Unsupported, not faked.** Angular, diamond, image and shader paints, blend modes, effects, text strokes, text whose fonts are still loading (`text-fonts-loading`), image bitmaps, per-side stroke weights, single-axis overflow and vector vertex caps are listed per node in `bridge.unsupported`. Unsupported paints and strokes are not drawn; unsupported modifiers are ignored. The editor's layer panel flags them.
 
 Measured on this machine (4 vCPU Xeon, Node 22 and Chromium on SwiftShader), with a 10,001-node document of 100 frames × 99 shapes, including layout (section 4):
 
@@ -292,7 +338,7 @@ history.yjs            optional: the full Yjs update behind a small header, to k
 - Readers:
   - check declared entry sizes and counts before inflating (zip bomb guard);
   - verify every asset against its hash;
-  - run the migrations hook (`format/migrations.ts`; version 1 has none yet; a file from a newer version is refused with a clear message);
+  - run the migrations hook (`format/migrations.ts`). Version 2 added boolean groups and vertex handle mirroring; its migration from version 1 is additive. A file from a newer version is refused with a clear message;
   - validate with the zod schemas, reporting every issue with its path.
 - `docs/format/figtree.schema.json` (JSON Schema 2020-12) is generated from the zod schemas, and a test fails when it is stale (`UPDATE_SCHEMA=1 npm test` rewrites it). Rules JSON Schema cannot express are enforced by zod and listed in the schema's description: unique ids, assets that exist, closed loops, ordered runs.
 
@@ -484,9 +530,8 @@ Copy serializes the selected subtrees (stored properties, text with runs, world 
 
 ## 7. How later modules plug in
 
-- **Vector editing (5b):** registers a pen tool and a vector edit mode (section 6.4).
 - **Text styles (module 7):** named style references resolved into the same text properties the typography panel edits.
-- **Vector networks and booleans:** these produce paths. The robust winding-number boolean approach uses the same flattening and winding primitives.
+- **Vector editing UI** (pen, pencil, vector edit mode, boolean and flatten actions): drives `PenTool` and the network operations in `@fig-tree/geometry`, and turns their results into `editVector` (or `updateProps`), `group` with a boolean operation, `flatten` and `outlineStroke` commands.
 - **Effects** (blur, shadows) and **shader fills:** new composite inputs that sample from layer textures.
 - **Code view and export:** walk the document, not the scene.
 - **Multiplayer:** a provider relays Yjs updates (the convergence tests already simulate one); cursors and selections go in Yjs awareness and render as an overlay scene, so they never invalidate document tiles.

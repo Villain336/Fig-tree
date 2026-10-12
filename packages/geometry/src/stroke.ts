@@ -106,7 +106,7 @@ class Stroker {
     }
   }
 
-  openContour(xs: number[], ys: number[]): void {
+  openContour(xs: number[], ys: number[], butt = false): void {
     const n = xs.length;
     const { dx, dy, len } = directions(xs, ys, false);
     const h = this.h;
@@ -118,19 +118,23 @@ class Stroker {
     }
     const ex = xs[n - 1]!, ey = ys[n - 1]!, edx = dx[n - 2]!, edy = dy[n - 2]!;
     out.push(ex - edy * h, ey + edx * h);
-    this.capInterior(ex, ey, edx, edy);
+    if (!butt) this.capInterior(ex, ey, edx, edy);
     out.push(ex + edy * h, ey - edx * h);
     for (let i = n - 2; i >= 1; i--) {
       this.joinLeft(xs[i]!, ys[i]!, -dx[i]!, -dy[i]!, -dx[i - 1]!, -dy[i - 1]!, len[i]!, len[i - 1]!);
     }
     out.push(xs[0]! + dy[0]! * h, ys[0]! - dx[0]! * h);
-    this.capInterior(xs[0]!, ys[0]!, -dx[0]!, -dy[0]!);
+    if (!butt) this.capInterior(xs[0]!, ys[0]!, -dx[0]!, -dy[0]!);
     out.markClosed();
   }
 
   closedContour(xs: number[], ys: number[]): void {
     const n = xs.length;
     const { dx, dy, len } = directions(xs, ys, true);
+    if (this.innerSideCollapses(dx, dy, len)) {
+      this.closedContourPieces(xs, ys);
+      return;
+    }
     const out = this.out;
     out.beginContour();
     for (let i = 0; i < n; i++) {
@@ -145,6 +149,53 @@ class Stroker {
       this.joinLeft(xs[i]!, ys[i]!, -dx[i]!, -dy[i]!, -dx[p]!, -dy[p]!, len[i]!, len[p]!);
     }
     out.markClosed();
+  }
+
+  /**
+   * Whether the stroke is wider than the contour on the inner side of some
+   * corner (the offset lines meet beyond an adjacent segment). Then the
+   * inner loop of the two-loop construction turns inside out and cancels
+   * the outer one under the nonzero rule, leaving holes in pixels the
+   * stroke covers.
+   */
+  private innerSideCollapses(dx: Float64Array, dy: Float64Array, len: Float64Array): boolean {
+    const n = dx.length;
+    // How far the inner offset of each corner reaches along its segments, per side.
+    const left = new Float64Array(n), right = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const p = (i + n - 1) % n;
+      const cross = dx[p]! * dy[i]! - dy[p]! * dx[i]!;
+      const denom = 1 + dx[p]! * dx[i]! + dy[p]! * dy[i]!;
+      if (Math.abs(cross) < 1e-12) continue;
+      const along = denom > 1e-9 ? (this.h * Math.abs(cross)) / denom : Infinity;
+      left[i] = cross > 0 ? along : 0;
+      right[i] = cross < 0 ? along : 0;
+    }
+    // A segment's offset on one side inverts when the corners at its two ends eat more than its length.
+    for (let i = 0; i < n; i++) {
+      const q = (i + 1) % n;
+      if (left[i]! + left[q]! > len[i]! || right[i]! + right[q]! > len[i]!) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A closed contour stroked as overlapping open pieces, one per vertex
+   * (from the middle of the incoming segment, through the vertex's join, to
+   * the middle of the outgoing one, with butt ends). Every piece winds the
+   * same way, so their union is right under the nonzero rule however wide
+   * the stroke, and neighbouring butt ends cancel exactly.
+   */
+  private closedContourPieces(xs: number[], ys: number[]): void {
+    const n = xs.length;
+    for (let i = 0; i < n; i++) {
+      const p = (i + n - 1) % n, q = (i + 1) % n;
+      this.openContour(
+        [(xs[p]! + xs[i]!) / 2, xs[i]!, (xs[i]! + xs[q]!) / 2],
+        [(ys[p]! + ys[i]!) / 2, ys[i]!, (ys[i]! + ys[q]!) / 2],
+        true,
+      );
+    }
   }
 
   /**

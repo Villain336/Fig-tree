@@ -21,6 +21,7 @@ const PAINT_KEYS = new Set([
   "name", "locked", "opacity", "blendMode", "isolation", "effects", "componentRef", "overrides", "fills", "strokes", "strokeAlign", "strokeCap",
   "strokeJoin", "strokeMiterLimit", "strokeDashes", "strokeDashOffset", "cornerRadius", "cornerSmoothing", "rotation", "flipX", "flipY",
   "arcStart", "arcSweep", "innerRadius", "pointCount", "vectorNetwork", "objectFit", "description", "propertyDefinitions", "propertyValues", "backgroundColor",
+  "booleanOperation",
 ]);
 
 /** Properties of a node whose change can alter its children's CSS (their sizing-mode mapping and insets). */

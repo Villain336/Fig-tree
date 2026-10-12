@@ -4,7 +4,7 @@ import { AssetId, NodeId, optionalShape } from "./primitives";
 import { TextContent } from "./text";
 
 /** Current `.figtree` format version. Bump it with a migration in `format/migrations.ts`. */
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
 
 export const ASSET_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "font/ttf", "font/otf", "font/woff", "font/woff2"] as const;
 
