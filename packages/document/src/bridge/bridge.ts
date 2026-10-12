@@ -1,10 +1,24 @@
-import { Path, inflateRect, roundedRectPath, type Mat2D } from "@fig-tree/geometry";
-import type { Color, GlyphRun, Paint as RenderPaint, Scene, SceneNode, Stroke } from "@fig-tree/renderer";
+import {
+  BooleanEvaluator,
+  Path,
+  contoursBounds,
+  contoursToPath,
+  inflateRect,
+  networkStrokePath,
+  regionPath,
+  roundNetworkCorners,
+  roundedRectPath,
+  transformCubic,
+  type Mat2D,
+  type VectorNetwork as GeometryNetwork,
+} from "@fig-tree/geometry";
+import { runOutlinePath, type Color, type GlyphRun, type Paint as RenderPaint, type Scene, type SceneNode, type Stroke } from "@fig-tree/renderer";
 import { SYNTHETIC_OBLIQUE_SKEW, syntheticBoldStrength, type FontRegistry } from "@fig-tree/text";
 import type { DocumentChange, FigDocument } from "../document";
 import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
 import { boxMatrix } from "../transform";
-import { geometryKey, outlinePath, regionPaths, strokeOutline } from "./geometry";
+import { booleanContours, isBooleanGroup, type GeometryOptions, type GeometrySource } from "../vector-geometry";
+import { geometryKey, outlinePath } from "./geometry";
 import { DocumentLayout, type ComputedBox } from "./layout";
 import { toRenderPaint } from "./paints";
 import { glyphSource } from "./text";
@@ -48,6 +62,30 @@ export class SceneBridge {
   readonly fonts: FontRegistry | null;
   private readonly unsubscribeFonts: () => void;
   private fontRefreshScheduled = false;
+  /** Incremental boolean evaluation, per boolean group. */
+  private readonly evaluators = new Map<string, BooleanEvaluator>();
+  private booleanGeneration = 0;
+  /** Nodes as the vector geometry module reads them: boxes from the layout, text outlines from the text engine. */
+  private readonly geometrySource: GeometrySource = {
+    typeOf: (id) => this.doc.typeOf(id),
+    get: <T>(id: string, key: string) => this.doc.get<T>(id, key),
+    childrenOf: (id) => this.doc.tree.childrenOf(id),
+  };
+  private readonly geometryOptions: GeometryOptions = {
+    box: (id) => {
+      const b = this.layout.box(id);
+      if (!b) return undefined;
+      return { x: b.x, y: b.y, width: b.width, height: b.height, rotation: this.doc.get(id, "rotation"), flipX: this.doc.get(id, "flipX"), flipY: this.doc.get(id, "flipY") };
+    },
+    text: (id) => this.textOutlinePath(id),
+    evaluator: (id) => {
+      let ev = this.evaluators.get(id);
+      if (!ev) this.evaluators.set(id, (ev = new BooleanEvaluator()));
+      return ev;
+    },
+    key: (id) => this.geometrySignature(id),
+    shapeCache: new Map(),
+  };
 
   constructor(
     readonly doc: FigDocument,
@@ -125,6 +163,54 @@ export class SceneBridge {
     const content = this.doc.text(id).content;
     for (let i = content.indexOf("\n"); i >= 0; i = content.indexOf("\n", i + 1)) starts.push(i + 1);
     return { block: t.block, layout: t.layout, starts, x: box.padding.left + box.border.left, y: box.padding.top + box.border.top + dy };
+  }
+
+  /**
+   * A text node's glyph outlines (and decoration rectangles) in its local
+   * space, exactly where the renderer draws them; null when the text is not
+   * laid out (no fonts).
+   */
+  textOutlinePath(id: string): Path | null {
+    const t = this.layout.text(id);
+    const box = this.layout.box(id);
+    if (!t || !box) return null;
+    const valign = this.doc.get<string>(id, "verticalAlign");
+    const height = box.height;
+    const dy = valign === "center" ? (height - t.layout.height) / 2 : valign === "bottom" ? height - t.layout.height : 0;
+    const out = new Path();
+    for (const p of t.layout.paragraphs) {
+      for (const line of p.layout.lines) {
+        if (line.hidden) continue;
+        for (const r of line.runs) {
+          const gl = r.glyphs;
+          const glyphs: number[] = [];
+          for (let i = 0; i + 2 < gl.length; i += 3) glyphs.push(gl[i]!, gl[i + 1]!, gl[i + 2]! + p.top + dy);
+          const run: GlyphRun = { source: glyphSource(r.font), size: r.size, glyphs: Float64Array.from(glyphs), skew: r.syntheticOblique ? SYNTHETIC_OBLIQUE_SKEW : 0 };
+          out.append(runOutlinePath(run));
+        }
+      }
+      for (const d of p.layout.decorations) {
+        const y = d.y + p.top + dy;
+        out.moveTo(d.x, y).lineTo(d.x + d.width, y).lineTo(d.x + d.width, y + d.thickness).lineTo(d.x, y + d.thickness).close();
+      }
+    }
+    return out;
+  }
+
+  /** A key for a node's geometry and that of its descendants (boolean operand caching). */
+  private geometrySignature(id: string): string {
+    const type = this.doc.typeOf(id);
+    if (!type) return "";
+    const b = this.layout.box(id);
+    const parts: unknown[] = [type, b ? [b.x, b.y, b.width, b.height] : null, this.doc.get(id, "visible")];
+    if (type === "group") {
+      parts.push(this.doc.get(id, "booleanOperation"), this.doc.tree.childrenOf(id).map((c) => this.geometrySignature(c)));
+    } else if (type === "text") {
+      parts.push(this.doc.storedProps(id), this.doc.text(id));
+    } else {
+      parts.push(geometryKey(this.doc, id, type, b?.width ?? 0, b?.height ?? 0), this.doc.get(id, "rotation"), this.doc.get(id, "flipX"), this.doc.get(id, "flipY"));
+    }
+    return JSON.stringify(parts);
   }
 
   get page(): string {
@@ -238,6 +324,19 @@ export class SceneBridge {
       relaid++;
     }
     this.lastRelaidOut = relaid;
+    // Boolean groups whose operands changed: recompute, innermost first.
+    const touched = new Set<string>([...change.props.keys(), ...change.text, ...moved]);
+    if (s) for (const set of [s.added, s.removed, s.reparented, s.parents]) for (const id of set) touched.add(id);
+    const dirty = new Set<string>();
+    for (const id of touched) {
+      for (let p: string | undefined = id; p !== undefined; p = tree.parentOf(p)) {
+        if (this.entries.has(p) && isBooleanGroup(this.geometrySource, p)) dirty.add(p);
+      }
+    }
+    if (dirty.size) {
+      const order = [...dirty].sort((a, b) => depthOf(tree, b) - depthOf(tree, a));
+      for (const id of order) this.compile(id);
+    }
     this.lastCompiled = this.totalCompiled - before;
     this.onSync?.(this.lastCompiled);
   };
@@ -263,6 +362,8 @@ export class SceneBridge {
     for (const n of e.all()) this.owners.delete(n);
     this.entries.delete(id);
     this._unsupported.delete(id);
+    this.evaluators.delete(id);
+    this.geometryOptions.shapeCache?.delete(id);
   }
 
   /** Puts the scene nodes of a container's document children in order under its host. */
@@ -302,13 +403,26 @@ export class SceneBridge {
     }
     const notes = new Set<string>();
     const get = <T>(k: string): T => doc.get<T>(id, k);
+    const boolean = type === "group" && get<string>("booleanOperation") !== "none";
+    if (type === "group") this.syncBooleanHost(id, e, boolean);
+    // A boolean group draws its result, placed at the result's bounds (paints are normalized to them).
+    let booleanOutline: Path | null = null;
+    let booleanBox = { x: 0, y: 0, width: 0, height: 0 };
+    if (boolean) {
+      const contours = booleanContours(this.geometrySource, id, this.geometryOptions);
+      const b = contoursBounds(contours);
+      if (b.minX <= b.maxX) booleanBox = { x: b.minX, y: b.minY, width: b.maxX - b.minX, height: b.maxY - b.minY };
+      const m: Mat2D = [1, 0, 0, 1, -booleanBox.x, -booleanBox.y];
+      booleanOutline = contoursToPath(contours.map((c) => c.map((q) => transformCubic(q, m))));
+    }
 
     // Transform, visibility, opacity. The box is the computed layout box.
     const box = type === "page" || type === "group" ? undefined : this.layout.box(id);
-    const width = type === "page" || type === "group" ? 0 : (box?.width ?? get<number>("width"));
-    const height = type === "page" || type === "group" ? 0 : (box?.height ?? get<number>("height"));
-    const transform: Mat2D =
-      type === "page" || type === "group"
+    const width = boolean ? booleanBox.width : type === "page" || type === "group" ? 0 : (box?.width ?? get<number>("width"));
+    const height = boolean ? booleanBox.height : type === "page" || type === "group" ? 0 : (box?.height ?? get<number>("height"));
+    const transform: Mat2D = boolean
+      ? [1, 0, 0, 1, booleanBox.x, booleanBox.y]
+      : type === "page" || type === "group"
         ? [1, 0, 0, 1, 0, 0]
         : boxMatrix({ x: box?.x ?? get("x"), y: box?.y ?? get("y"), width, height, rotation: get("rotation"), flipX: get("flipX"), flipY: get("flipY") });
     if (!sameMatrix(e.main.transform, transform)) e.main.transform = transform;
@@ -324,14 +438,15 @@ export class SceneBridge {
     if (type === "image") notes.add("image");
 
     // Geometry.
-    const gk = geometryKey(doc, id, type, width, height);
+    const gk = boolean ? `boolean:${++this.booleanGeneration}` : geometryKey(doc, id, type, width, height);
     if (gk !== e.geometryKey) {
       e.geometryKey = gk;
-      e.outline = outlinePath(doc, id, type, width, height);
+      e.outline = boolean ? booleanOutline : outlinePath(doc, id, type, width, height);
       if (type === "vector") {
-        const net = get<VectorNetwork>("vectorNetwork");
-        e.regions = regionPaths(net);
-        e.strokePath = strokeOutline(net);
+        // Vertex corner radii are applied to the network itself, for fills and strokes alike.
+        const net = roundNetworkCorners(get<VectorNetwork>("vectorNetwork") as GeometryNetwork, get<number>("cornerRadius"));
+        e.regions = net.regions.map((_, i) => regionPath(net, i));
+        e.strokePath = networkStrokePath(net);
       } else {
         e.regions = null;
         e.strokePath = e.outline;
@@ -340,14 +455,13 @@ export class SceneBridge {
     }
     if (type === "vector") {
       const net = get<VectorNetwork>("vectorNetwork");
-      if (get<number>("cornerRadius") > 0 || net.vertices.some((v) => (v.cornerRadius ?? 0) > 0)) notes.add("vector-corner-radius");
       if (net.vertices.some((v) => v.strokeCap !== undefined)) notes.add("vector-vertex-cap");
     }
 
     // Paints (a text node's fills paint its glyphs, not its box).
-    const fillsDoc = hasFills(type) && type !== "text" ? get<Paint[]>("fills") : [];
-    const strokesDoc = hasStrokes(type) ? get<Paint[]>("strokes") : [];
-    const strokeStyle = hasStrokes(type)
+    const fillsDoc = (hasFills(type) || boolean) && type !== "text" ? get<Paint[]>("fills") : [];
+    const strokesDoc = hasStrokes(type) || boolean ? get<Paint[]>("strokes") : [];
+    const strokeStyle = hasStrokes(type) || boolean
       ? [get("strokeWeight"), get("strokeAlign"), get("strokeCap"), get("strokeJoin"), get("strokeMiterLimit"), get("strokeDashes"), get("strokeDashOffset")]
       : [];
     const overflow = hasHostClip(type) ? [get<string>("overflowX"), get<string>("overflowY")] : ["visible", "visible"];
@@ -462,6 +576,38 @@ export class SceneBridge {
     if (this.doc.get<Paint[]>(id, "strokes").some((s) => s.visible !== false)) notes.add("text-stroke");
     for (const n of e.text) this.own(n, id);
     this.linkMain(e);
+  }
+
+  /**
+   * A boolean group keeps its children's scene nodes under a hidden host
+   * (they stay compiled, so switching back to a plain group is cheap), and
+   * only its result is drawn; a plain group hosts them on its main node.
+   */
+  private syncBooleanHost(id: string, e: Entry, boolean: boolean): void {
+    if (boolean && e.host === e.main) {
+      const host = this.scene.createNode({ name: `${id}:operands` });
+      host.visible = false;
+      e.host = host;
+      this.own(host, id);
+      e.main.replaceChildren([]);
+      this.relink(id);
+      this.linkMain(e);
+    } else if (!boolean && e.host !== e.main) {
+      const old = e.host;
+      for (const n of [...e.fills, ...e.strokes]) this.disown(n);
+      e.fills = [];
+      e.strokes = [];
+      e.strokeShape = "";
+      if (old) {
+        old.removeFromParent();
+        this.owners.delete(old);
+      }
+      e.host = e.main;
+      e.geometryKey = "";
+      e.paintKey = "";
+      e.main.replaceChildren([]);
+      this.relink(id);
+    }
   }
 
   /** Main's children: further fills, the host, text, then strokes. */
@@ -678,6 +824,12 @@ class Entry {
     for (const s of this.strokes) out.push(s, ...s.children);
     return out;
   }
+}
+
+function depthOf(tree: { parentOf(id: string): string | undefined }, id: string): number {
+  let d = 0;
+  for (let p = tree.parentOf(id); p !== undefined; p = tree.parentOf(p)) d++;
+  return d;
 }
 
 function hasFills(type: NodeType): boolean {

@@ -9,7 +9,9 @@ import {
   CommandError,
   FigDocument,
   FigtreeFile,
+  FORMAT_VERSION,
   FormatError,
+  MIGRATIONS,
   NODE_TYPES,
   ROOT_ID,
   decodeHistory,
@@ -140,7 +142,7 @@ describe(".figtree JSON", () => {
   it("reports every problem in invalid files", () => {
     const bad = {
       format: "figtree",
-      version: 1,
+      version: FORMAT_VERSION,
       name: "x",
       pages: [{ id: "p", type: "page", children: [{ id: "r", type: "rectangle", opacity: 7, fills: [{ type: "solid" }] }] }],
       assets: {},
@@ -173,9 +175,16 @@ describe("migrations", () => {
   const rename = { from: 0, to: 1, description: "title → name, add assets", migrate: (d: Record<string, unknown>) => ({ format: d.format, version: 1, name: d.title, pages: d.pages, assets: {} }) };
 
   it("upgrades old files through the hook", () => {
-    const doc = fromFigtreeJson(v0, { migrations: [rename] });
+    const doc = fromFigtreeJson(v0, { migrations: [rename, ...MIGRATIONS] });
     expect(doc.name).toBe("Old");
-    expect(migrate(v0, [rename])).toMatchObject({ version: 1, name: "Old" });
+    expect(migrate(v0, [rename, ...MIGRATIONS])).toMatchObject({ version: FORMAT_VERSION, name: "Old" });
+  });
+
+  it("reads version 1 files (before boolean groups) unchanged", () => {
+    const v1 = { format: "figtree", version: 1, name: "One", pages: [{ id: "p", type: "page", children: [{ id: "g", type: "group", children: [{ id: "r", type: "rectangle" }] }] }], assets: {} };
+    const doc = fromFigtreeJson(v1);
+    expect(doc.get("g", "booleanOperation")).toBe("none");
+    expect(toFigtreeJson(doc).version).toBe(2);
   });
 
   it("refuses files it cannot read", () => {

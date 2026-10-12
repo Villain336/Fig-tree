@@ -27,14 +27,14 @@ export function geometryKey(doc: FigDocument, id: string, type: NodeType, w: num
     case "line":
       return JSON.stringify([type, w]);
     case "vector":
-      return JSON.stringify([type, g("vectorNetwork")]);
+      return JSON.stringify([type, g("vectorNetwork"), g("cornerRadius")]);
     default:
       return type;
   }
 }
 
 /** The outline of a node in its local space at its laid-out size (null for nodes without one: pages, groups, text). */
-export function outlinePath(doc: FigDocument, id: string, type: NodeType, w: number, h: number): Path | null {
+export function outlinePath(doc: Pick<FigDocument, "get">, id: string, type: NodeType, w: number, h: number): Path | null {
   const n = (k: string): number => doc.get<number>(id, k);
   switch (type) {
     case "frame":

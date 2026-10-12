@@ -16,6 +16,8 @@ export const Vertex = z.strictObject({
   cornerRadius: NonNegative.optional(),
   /** Cap drawn when a stroke ends at this vertex. Defaults to the node's `strokeCap`. */
   strokeCap: StrokeCap.optional(),
+  /** How the two handles at this vertex move together in vector editing (absent: independent). */
+  handleMirroring: z.enum(["none", "angle", "angle-length"]).optional(),
 });
 
 /**

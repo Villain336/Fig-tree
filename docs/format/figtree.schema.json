@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:fig-tree:format:document:1",
+  "$id": "urn:fig-tree:format:document:2",
   "title": "Fig Tree document (document.json)",
-  "description": "The document.json entry of a .figtree archive, format version 1. Additional rules checked by Fig Tree but not expressible here: node ids are unique; every asset a node references is listed in `assets`; vector network segments reference existing vertices and region loops close; text runs are sorted, non-overlapping and inside the content.",
+  "description": "The document.json entry of a .figtree archive, format version 2. Additional rules checked by Fig Tree but not expressible here: node ids are unique; every asset a node references is listed in `assets`; vector network segments reference existing vertices and region loops close; text runs are sorted, non-overlapping and inside the content.",
   "type": "object",
   "properties": {
     "format": {
@@ -11,7 +11,7 @@
     },
     "version": {
       "type": "number",
-      "const": 1
+      "const": 2
     },
     "name": {
       "type": "string",
@@ -1891,6 +1891,65 @@
           ],
           "additionalProperties": false
         },
+        "fills": {
+          "$ref": "#/$defs/PaintStack"
+        },
+        "strokes": {
+          "$ref": "#/$defs/PaintStack"
+        },
+        "strokeWeight": {
+          "type": "number",
+          "minimum": 0
+        },
+        "strokeAlign": {
+          "type": "string",
+          "enum": [
+            "inside",
+            "center",
+            "outside"
+          ]
+        },
+        "strokeCap": {
+          "type": "string",
+          "enum": [
+            "butt",
+            "round",
+            "square"
+          ]
+        },
+        "strokeJoin": {
+          "type": "string",
+          "enum": [
+            "miter",
+            "round",
+            "bevel"
+          ]
+        },
+        "strokeMiterLimit": {
+          "type": "number",
+          "minimum": 1
+        },
+        "strokeDashes": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "strokeDashOffset": {
+          "type": "number"
+        },
+        "booleanOperation": {
+          "type": "string",
+          "enum": [
+            "none",
+            "union",
+            "subtract",
+            "intersect",
+            "exclude"
+          ]
+        },
         "children": {
           "type": "array",
           "items": {
@@ -3524,6 +3583,14 @@
                   "butt",
                   "round",
                   "square"
+                ]
+              },
+              "handleMirroring": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "angle",
+                  "angle-length"
                 ]
               }
             },

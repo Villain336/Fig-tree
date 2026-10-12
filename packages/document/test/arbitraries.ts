@@ -101,7 +101,7 @@ export const textStyle = {
 export const vectorNetwork = fc
   .tuple(fc.array(point, { minLength: 3, maxLength: 7 }), fc.boolean(), fc.constantFrom("nonzero", "evenodd"), fc.boolean())
   .map(([pts, curved, fillRule, spoke]) => {
-    const vertices: Record<string, unknown>[] = pts.map((p) => ({ x: p.x, y: p.y }));
+    const vertices: Record<string, unknown>[] = pts.map((p, i) => ({ x: p.x, y: p.y, ...(curved && i === 1 ? { handleMirroring: "angle" } : {}) }));
     const segments: Record<string, unknown>[] = pts.map((_, i) => ({
       start: i,
       end: (i + 1) % pts.length,
@@ -193,6 +193,7 @@ const PROP_ARBS: Record<string, fc.Arbitrary<unknown>> = {
   innerRadius: unit,
   pointCount: fc.integer({ min: 3, max: 120 }),
   vectorNetwork,
+  booleanOperation: fc.constantFrom("none", "union", "subtract", "intersect", "exclude"),
   asset: fc.constantFrom(...FUZZ_ASSETS),
   objectFit: fc.constantFrom("cover", "contain", "fill", "none", "scale-down"),
   description: fc.string({ maxLength: 30 }),

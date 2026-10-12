@@ -110,7 +110,20 @@ export const PROPS = {
     backgroundColor: Color,
   },
   frame: frameProps,
-  group: { ...layerProps, ...positionProps, ...itemProps },
+  group: {
+    ...layerProps,
+    ...positionProps,
+    ...itemProps,
+    ...paintProps,
+    /**
+     * A boolean group (anything but "none") draws one shape computed from its
+     * children: their union, the first minus the rest, their intersection, or
+     * the areas covered an odd number of times. The children are not drawn
+     * themselves; the group's own fills and strokes paint the result. Plain
+     * groups ignore their paint properties.
+     */
+    booleanOperation: z.enum(["none", "union", "subtract", "intersect", "exclude"]),
+  },
   rectangle: { ...layerProps, ...placedProps, ...boxPaintProps, ...cornerProps },
   ellipse: {
     ...layerProps,
@@ -328,6 +341,7 @@ const COMMON_DEFAULTS: Record<string, unknown> = {
   innerRadius: 0,
   pointCount: 3,
   vectorNetwork: { vertices: [], segments: [], regions: [] },
+  booleanOperation: "none",
   objectFit: "cover",
   description: "",
   propertyDefinitions: {},
@@ -337,6 +351,7 @@ const COMMON_DEFAULTS: Record<string, unknown> = {
 
 const TYPE_DEFAULTS: Partial<Record<NodeType, Record<string, unknown>>> = {
   line: { strokeAlign: "center" },
+  group: { strokeAlign: "center" },
   vector: { strokeAlign: "center" },
   text: { widthMode: "hug", heightMode: "hug" },
   star: { pointCount: 5, innerRadius: 0.382 },
