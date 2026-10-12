@@ -1,3 +1,4 @@
+import { flattenPath, type Polylines } from "@fig-tree/geometry";
 import type { FontInstance } from "../font/face";
 import { instanceFor } from "../font/registry";
 import { MANDATORY_BREAK, NO_BREAK } from "../unicode/linebreak";
@@ -685,27 +686,29 @@ function buildLine(
   if (ellipsisInfo) tail(ellipsisInfo.font, ellipsisInfo.box.size, -1, ellipsisInfo.gids, ellipsisInfo.advances, ellipsisInfo.width, true);
   chars.sort((a, b) => a.index - b.index);
 
-  // Decorations per span segment on the line.
+  // Decorations per span segment on the line, snapped to whole pixels as Chromium paints
+  // them: underlines their own thickness below the baseline, skipping ink.
   for (const r of glyphRuns) {
-    if (r.span < 0) continue;
+    if (r.span < 0 || hidden) continue;
     const st = sp.input.spans[r.span]!.style;
     const d = st.textDecorationLine;
     if (!d.underline && !d.overline && !d.lineThrough) continue;
     const box = sp.spanBoxes[r.span]!;
     const m = box.font?.metrics;
     const scale = box.font ? effectiveFontSize(st.fontSize) / box.font.unitsPerEm : 0;
-    const autoThickness = m ? Math.max(1, m.underlineThickness * scale) : st.fontSize / 16;
-    const thickness = typeof st.textDecorationThickness === "number" ? st.textDecorationThickness : autoThickness;
+    const fontThickness = m && m.underlineThickness > 0 ? m.underlineThickness * scale : st.fontSize / 10;
+    const thickness = Math.max(1, Math.round(typeof st.textDecorationThickness === "number" ? st.textDecorationThickness : fontThickness));
     const width = r.right - r.left;
     if (d.underline) {
-      const offset = typeof st.textUnderlineOffset === "number" ? st.textUnderlineOffset : m ? -m.underlinePosition * scale : st.fontSize / 10;
-      decorations.push({ kind: "underline", span: r.span, x: r.left, y: r.baseline + offset, width, thickness });
+      const gap = thickness + (typeof st.textUnderlineOffset === "number" ? Math.round(st.textUnderlineOffset) : 0);
+      const y = Math.round(r.baseline) + gap;
+      for (const [x0, x1] of skipInk(r, y, thickness)) decorations.push({ kind: "underline", span: r.span, x: x0, y, width: x1 - x0, thickness });
     }
-    if (d.overline) decorations.push({ kind: "overline", span: r.span, x: r.left, y: r.baseline - box.ascent, width, thickness });
+    if (d.overline) decorations.push({ kind: "overline", span: r.span, x: r.left, y: Math.round(r.baseline - box.ascent) - thickness, width, thickness });
     if (d.lineThrough) {
       const pos = m ? m.strikeoutPosition * scale : st.fontSize * 0.3;
-      const size = m ? Math.max(1, m.strikeoutSize * scale) : thickness;
-      decorations.push({ kind: "line-through", span: r.span, x: r.left, y: r.baseline - pos - size / 2, width, thickness: size });
+      const size = Math.max(1, Math.round(m && m.strikeoutSize > 0 ? m.strikeoutSize * scale : thickness));
+      decorations.push({ kind: "line-through", span: r.span, x: r.left, y: Math.round(r.baseline - pos - size / 2), width, thickness: size });
     }
   }
 
@@ -758,6 +761,79 @@ function lineShaping(sp: ShapedParagraph, s: number, end: number): { item: Item[
     if (cutEnd) apply(last, Math.max(sp.items[last]!.start, s), end);
   }
   return { item, advance, glyphAdvance, clusterStart };
+}
+
+/**
+ * `text-decoration-skip-ink: auto`: the parts of an underline band
+ * [y, y + thickness] (relative to the run's line) clear of glyph ink. Each
+ * glyph that crosses the band interrupts the underline from the leftmost to
+ * the rightmost ink it has in the band, widened by the thickness on both
+ * sides, as browsers draw underlines below descenders.
+ */
+function skipInk(r: GlyphRun, y: number, thickness: number): [number, number][] {
+  const scale = r.size / r.font.unitsPerEm;
+  const ink: [number, number][] = [];
+  const g = r.glyphs;
+  for (let i = 0; i + 2 < g.length; i += 3) {
+    const gid = g[i]!;
+    const e = r.font.extents(gid);
+    if (!e) continue;
+    const gx = g[i + 1]!;
+    const gy = g[i + 2]!;
+    // Font units, y down: only glyphs whose box reaches the band.
+    if (gy + e.bottom * scale <= y || gy + e.top * scale >= y + thickness) continue;
+    const poly = flattenPath(r.font.path(gid), [scale, 0, 0, scale, gx, gy], 0.1);
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let k = 0; k <= 4; k++) {
+      for (const [a, b] of scanline(poly, y + (thickness * k) / 4)) {
+        lo = Math.min(lo, a);
+        hi = Math.max(hi, b);
+      }
+    }
+    if (lo < hi) ink.push([lo - thickness, hi + thickness]);
+  }
+  if (ink.length === 0) return [[r.left, r.right]];
+  ink.sort((p, q) => p[0] - q[0]);
+  const out: [number, number][] = [];
+  let x = r.left;
+  for (const [a, b] of ink) {
+    if (a > x) out.push([x, Math.min(a, r.right)]);
+    x = Math.max(x, b);
+    if (x >= r.right) break;
+  }
+  if (x < r.right) out.push([x, r.right]);
+  return out.filter(([a, b]) => b - a > 0.5);
+}
+
+/** Filled intervals (nonzero winding) of a flattened outline along the horizontal line at `y`. */
+function scanline(poly: Polylines, y: number): [number, number][] {
+  const xs: [number, number][] = [];
+  const pts = poly.points;
+  const starts = poly.contourStarts;
+  for (let c = 0; c < starts.length; c++) {
+    const from = starts[c]!;
+    const to = c + 1 < starts.length ? starts[c + 1]! : pts.length / 2;
+    for (let i = from; i < to; i++) {
+      const j = i + 1 < to ? i + 1 : from;
+      const x0 = pts[i * 2]!;
+      const y0 = pts[i * 2 + 1]!;
+      const x1 = pts[j * 2]!;
+      const y1 = pts[j * 2 + 1]!;
+      if ((y0 <= y && y1 > y) || (y1 <= y && y0 > y)) xs.push([x0 + ((y - y0) / (y1 - y0)) * (x1 - x0), y1 > y0 ? 1 : -1]);
+    }
+  }
+  xs.sort((a, b) => a[0] - b[0]);
+  const out: [number, number][] = [];
+  let winding = 0;
+  let start = 0;
+  for (const [x, w] of xs) {
+    const before = winding;
+    winding += w;
+    if (before === 0 && winding !== 0) start = x;
+    else if (before !== 0 && winding === 0) out.push([start, x]);
+  }
+  return out;
 }
 
 function shapeEllipsis(sp: ShapedParagraph): { font: FontInstance; gids: number[]; advances: number[]; width: number; box: BoxMetrics } | null {

@@ -28,4 +28,6 @@ export const basicCases: TextCase[] = [
   { name: "basic/long-word-overflows", area: "basic", root: textBox("font: 16px Inter; width: 120px", "Supercalifragilisticexpialidocious word") },
   { name: "basic/numbers-punctuation", area: "basic", root: textBox("font: 16px Inter; width: 220px", "Prices: $12.50, €9.99 (approx.); totals 1,234,567.89 — done! Is it? Yes: 100% sure.") },
   { name: "basic/woff2-font", area: "basic", root: textBox("font: 16px 'Inter Woff2'; width: 240px", LOREM) },
+  { name: "basic/decorations", area: "basic", root: textBox("font: 16px Inter; width: 260px", ["text-decoration: underline", "Underlined words"], " then ", ["text-decoration: line-through", "struck through"], " and ", ["text-decoration: overline", "overlined"], " with ", ["text-decoration: underline; font-size: 24px", "bigger"], " text.") },
+  { name: "basic/decorations-noto", area: "basic", root: textBox("font: 18px 'Noto Sans'; width: 300px; text-decoration: underline", LOREM) },
 ];

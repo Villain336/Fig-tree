@@ -1,6 +1,6 @@
 # Architecture
 
-This document covers what Modules 1 to 3 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), and the CSS layout engine (Module 3). It also covers how the next modules (text and later) plug in.
+This document covers what Modules 1 to 4 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), the CSS layout engine (Module 3), and the text engine (Module 4). It also covers how later modules plug in.
 
 ```
 apps/editor ──────────────┐  Next.js: editor (/), /bench, /render-test
@@ -11,7 +11,9 @@ apps/editor ──────────────┐  Next.js: editor (/), 
   │                  │  .figtree  (document.json + assets + ...)  │  DocumentLayout ─ cssDeclarations ─► styles
   │                  ▼                                            ▼   │
   │           packages/layout   LayoutNode tree ─► computeLayout ─► boxes (block, flex, grid, positioned)
-  │                                                               │
+  │                  ▲ measure callback                           │
+  │           packages/text   fonts ─► shaping (HarfBuzz) ─► lines ─► glyph runs ───────────┐
+  │                                                               │                       │
   └────────►  packages/renderer   Scene ─► DrawList ─► FramePlan ─► Backend (WebGPU | WebGL2)
                      │                          ▲
                      │        rbush index ──────┘ culling and hit-testing
@@ -23,7 +25,8 @@ Dependencies point downward only:
 - `geometry` is pure math and runs anywhere, including Node, a worker or a future WASM port.
 - `renderer` depends on `geometry` and `rbush`.
 - `layout` depends on nothing: it is pure TypeScript with no DOM.
-- `document` depends on `geometry`, `layout` and `renderer` (for the bridge only), `yjs`, `zod` and `fflate`. Nothing in it touches the DOM: it runs in Node for tests and in the editor.
+- `text` depends on `geometry` (glyph outlines are `Path`s), `layout` (it implements the measure callback), `harfbuzzjs`, `bidi-js` and the `brotli` and `fflate` decoders. No DOM: it runs in Node for tests and in the editor.
+- `document` depends on `geometry`, `layout`, `text` and `renderer` (for the bridge only), `yjs`, `zod` and `fflate`. Nothing in it touches the DOM: it runs in Node for tests and in the editor.
 - The app depends on all of them.
 
 All packages are TypeScript-strict internal workspace packages that export their sources. Next.js transpiles them, and Vitest and `tsc` read them directly.
@@ -256,7 +259,8 @@ main         transform, opacity, visibility, outline, bottom fill, top center st
 - **Incremental.** A property change recompiles only that node and the nodes it moved. Setters run only for values that changed, so a paint edit never touches geometry, and paint nodes are reused when the stack's shape is unchanged. Structural changes relink only the containers whose child lists changed (`SceneNode.replaceChildren`, O(children)).
 - **Shapes.** Rounded rectangles with smoothing, ellipse arcs and donuts, rounded polygons and stars that fill their box, lines, and vector networks (regions filled with their own rule; segment chains stroked with joins, broken only at junctions).
 - **Aligned strokes.** On rectangles and frames, an inside or outside stroke is a centered stroke on the inset or outset rectangle, with radii offset and sharp outside corners following the join. That is exact, needs no layer, and a property test compares it with the general construction. Everywhere else, inside is a double-width stroke clipped by the outline, and outside is clipped by its complement (even-odd with a surrounding rectangle).
-- **Unsupported, not faked.** Angular, diamond, image and shader paints, blend modes, effects, text, image bitmaps, per-side stroke weights, single-axis overflow and vector vertex radii and caps are listed per node in `bridge.unsupported`. Unsupported paints and strokes are not drawn; unsupported modifiers are ignored. The editor's layer panel flags them.
+- **Text.** A text node draws one glyph run per font instance, size and paint (merged across lines, so typing changes geometry rather than scene structure), each fill of the node's paint stack as its own run, bottom to top, plus decoration rectangles. Its box and its glyphs come from the same `TextBlock` layout (section 5).
+- **Unsupported, not faked.** Angular, diamond, image and shader paints, blend modes, effects, text strokes, text whose fonts are still loading (`text-fonts-loading`), image bitmaps, per-side stroke weights, single-axis overflow and vector vertex radii and caps are listed per node in `bridge.unsupported`. Unsupported paints and strokes are not drawn; unsupported modifiers are ignored. The editor's layer panel flags them.
 
 Measured on this machine (4 vCPU Xeon, Node 22 and Chromium on SwiftShader), with a 10,001-node document of 100 frames × 99 shapes, including layout (section 4):
 
@@ -359,30 +363,74 @@ Tests check that incremental results equal a fresh layout under random edits and
 `DocumentLayout` mirrors one page into a `LayoutNode` tree. Each node's style is parsed from `cssDeclarations(doc, id)`, the same CSS that code export emits, so the mapping of fixed, hug and fill sizing, constraints, padding, strokes in layout, and flex and grid properties lives in one place. Other details:
 - **Groups** have no box. Their children join the group's parent, as with `display: contents`, and keep its coordinate space.
 - **Top-level nodes** are absolutely positioned on the page at their `x`/`y`.
-- **Text** measures as its stored width and height until module 4 shapes it. **Images** use their asset's natural size and ratio.
+- **Text** is a measured leaf whose measurer is a `TextBlock` (section 5): auto width maps to `width: max-content`, auto height to `height: auto`, fixed to a fixed size, so text hugs, wraps and drives its frame's auto layout exactly as the exported CSS does in a browser. Without a font registry text measures as its stored box. **Images** use their asset's natural size and ratio.
 - **`position: fixed`** lays out as `absolute`, and **`sticky`** as `relative` without offsets: scrolling is a prototype concern.
 - **Absolute insets** come from the stored `x`/`y` and the parent's stored size. Constraints therefore take effect when *layout* resizes the parent (a fill or hug frame). Resizing a frame in the document keeps its children's `x`, and a resize tool will update them per constraints, as Figma does.
 
 On a `DocumentChange`, `update()` restyles only nodes whose layout-relevant properties changed. Paint, effects and rotation are skipped, and so are restyles whose CSS is unchanged. Children of a node whose display, direction, size or borders changed are restyled too. Structural changes relink the affected containers. The page is then relaid out and `update()` returns the nodes whose box changed, which the bridge recompiles. Layout is derived: computed boxes are never written back into the document. The editor's inspector shows the selected node's computed box.
 
-## 5. How the next modules plug in
+## 5. Text engine (`packages/text`)
 
-### Text (harfbuzzjs and a glyph atlas)
+The text engine turns CSS-styled text into lines of positioned glyphs, written from the public specs (OpenType, CSS Fonts 4, CSS Text 3/4, CSS Inline 3, UAX #9, #14, #24 and #29) and matched against Chromium's geometry. Shaping is HarfBuzz itself (harfbuzzjs, WebAssembly); everything around it is ours.
 
-Shaping produces glyph runs through harfbuzzjs. The renderer will gain one new entry kind, a **glyph-run fill**:
-- At small sizes, glyphs come from a coverage atlas built by the same analytic rasterizer (each glyph's outline is binned once into an atlas tile).
-- At large zoom, glyphs fall back to outline paths through the existing fill path.
+```
+font files (TTF/OTF/WOFF/WOFF2) ─► Typeface ─► FontInstance (axes) ─┐
+FontRegistry: @font-face-like faces, CSS Fonts 4 matching, fallback ─┤
+                                                                     ▼
+text + spans ─► prepare (text-transform, white-space) ─► bidi (UAX #9) ─► itemize (span, level, script, font)
+            ─► HarfBuzz shaping ─► advances + spacing ─► break opportunities (UAX #14 + CSS)
+            ─► lines (greedy / balance / pretty, ellipsis, clamp) ─► line boxes, alignment, bidi reordering
+            ─► glyph runs, grapheme boxes, decorations ─► TextBlock (measure callback, hit-testing)
+```
 
-The composite stage already has the per-entry paint and layer machinery that text decorations and text fills need.
+### 5.1 Fonts
 
-### Later modules
+- **Formats.** TrueType and CFF OpenType, WOFF 1 (zlib via fflate) and WOFF2 (Brotli via the `brotli` decoder, with our own `glyf`/`loca` and `hmtx` transform reconstruction). `sfnt.ts` reads the tables the engine needs (`head`, `hhea`, `OS/2`, `name`, `fvar`, `STAT`); HarfBuzz reads the rest.
+- **Instances.** A `Typeface` holds one font file; `instance(coords)` gives a cached `FontInstance` at variation coordinates. `font-weight`, `font-stretch`, `font-style` (`ital`, `slnt`) and `font-optical-sizing` map to the `wght`, `wdth`, `ital`, `slnt` and `opsz` axes, then `font-variation-settings` applies, as CSS Fonts 4 §7 orders them. Outlines are cached `Path`s in font units.
+- **Registry and matching.** `FontRegistry` holds `@font-face`-like faces (family, weight and stretch ranges, style, `unicode-range`) with lazy sources. Matching follows CSS Fonts 4 §5.2: stretch, then style, then weight, per family in the `font-family` list, then per character: each code point takes the first family whose matched face has it, then the script fallback table (ported from Penpot, `src/ported/penpot/`, MPL-2.0), then last-resort families. A character no font has draws the first available font's missing-glyph box, like browsers. Bold and oblique are synthesized only when the matched face lacks them (outline emboldening and a 0.25 shear in the renderer). Faces load on first use; the registry reports loads and additions, and text lays out again then. Metrics are never faked while a font loads: the text waits.
+- **Sources.** The editor serves the bundled OFL fonts (`fixtures/fonts`) and registers them; `GoogleFontsLoader` reads a family's `METADATA.pb` from github.com/google/fonts and registers its faces (OFL, Apache 2.0 and UFL families only, size-limited, untrusted data); fonts uploaded into a document are content-addressed `.figtree` assets with a descriptor read from the font's own tables (`uploadFont`, `registerDocumentFonts`).
 
+### 5.2 Paragraph shaping (`ShapedParagraph`)
+
+Everything that does not depend on the available width:
+1. **Prepare.** `text-transform` (with source-index mapping, so `ß` → `SS` keeps carets right), then `white-space` processing (collapsing, segment breaks, tabs, preserved spaces, forced breaks).
+2. **Bidi.** UAX #9 levels from bidi-js (paragraph direction from `direction`, or the first strong character for `auto`).
+3. **Itemize.** An item is a run of one span (inline box), bidi level, script and font. Scripts follow UAX #24 runs, with paired brackets kept in their opening bracket's script; fonts are matched per grapheme cluster; default-ignorable characters never split runs.
+4. **Shape.** Each item is shaped by HarfBuzz with a few characters of context on both sides (so Arabic joins across a style change), with the CSS features (`font-kerning`, `font-variant-*`, `font-feature-settings`, and ligatures off when letter spacing is set). Advances are in font units scaled by the font size floored to 1/64 px, as Chromium sizes fonts.
+5. **Spacing and breaks.** Letter spacing after every grapheme, word spacing on word separators; line break opportunities from our UAX #14 implementation with CSS Text tailoring (`word-break`, `line-break`, `overflow-wrap`, soft hyphens, `hyphens: manual`) and Chromium's ASCII punctuation rules.
+
+### 5.3 Lines (`layoutLines`)
+
+- **Breaking.** Greedy first fit with emergency breaks (`overflow-wrap: anywhere/break-word`, `word-break: break-all`), soft hyphens that show a hyphen, `text-wrap: balance` (binary search over widths for up to 4 lines) and `pretty` (avoids a short last line). Trailing spaces hang or are removed per `white-space`.
+- **Line edges.** Where a line starts or ends inside a word at a point HarfBuzz marks unsafe to break, that part is shaped again on its own, as browsers do.
+- **Line boxes.** CSS Inline 3: the strut of the root inline box plus every span on the line, each with its own `line-height` and half-leading (fallback fonts count under `line-height: normal`), ascent and descent rounded like Chromium's, number line heights truncated and lengths rounded to 1/64 px.
+- **Placement.** `text-align` (incl. `justify` over word separators and CJK, `text-align-last`), `text-indent`, `text-overflow: ellipsis` and `-webkit-line-clamp` (hidden text keeps its geometry), lists (outside markers), paragraph spacing. Bidi reordering (L1, L2) per line, then glyphs are placed in visual order; each style run on a line takes a width rounded up to 1/64 px. Decorations (underline, overline, line-through) come from the fonts' `post`/`OS/2` metrics.
+
+### 5.4 Blocks, measuring and hit-testing (`TextBlock`)
+
+A `TextBlock` is a text node's paragraphs. It implements the layout engine's measure callback: min-content and max-content widths (rounded up to 1/64 px), height for a width, and first and last baselines, with a small cache of layouts by width. Shaping is cached until the font registry changes. `hitTest` maps a point to a caret position (paragraph, source index; RTL-aware) and `caretRect` a position to a caret rectangle; the bridge exposes both per text node (`textCaretAt`, `textCaretRect`).
+
+### 5.5 Rendering glyphs (`packages/renderer/src/glyphs`)
+
+A scene node can carry a **glyph run**: a glyph source (outlines and bounds in font units), a size, glyph ids with positions, and optional skew and emboldening. Its path is deferred, so culling uses bounds without building outlines.
+- **Atlas.** The frame planner draws small, axis-aligned runs (device size up to 96 px) from a glyph atlas: one 2048² R8 texture managed as shelves of square cells in size classes (8 to 128 px), with least-recently-used eviction that never evicts a glyph the current frame uses. A glyph is rasterized once per (glyph, size bucket, subpixel phase): sizes are bucketed (1/8 px up to 24 px, 1/4 px to 48 px, 1/2 px above) and x positions to 4 subpixel phases; baselines snap to whole pixels. The rasterizer is the CPU twin of the GPU coverage math: exact signed area per pixel (validated against polygon clipping within 0.5/255), so text coverage is linear and consistent with every other shape.
+- **Backends.** WebGPU draws glyph entries in the composite stage from a glyph-data storage buffer (tile lists, then glyph references) and the atlas texture, with the entry's paint (solid or gradient) multiplied by coverage. WebGL2 draws consecutive glyph entries as one instanced draw (a quad per glyph, the entry index per instance) with the same paint functions as fills.
+- **Large or transformed text** (zoomed past 96 px, rotated, skewed or non-uniformly scaled) draws as outline paths through the ordinary fill path.
+- Panning at a fixed zoom rasterizes nothing new once glyphs are in the atlas (asserted in the editor tests and the benchmark).
+
+### 5.6 Matching Chromium
+
+`docs/conformance.md` describes the method (grapheme rects, line breaks and baselines from Chromium with the same font files) and the results: every grapheme of the 164 text cases within 1/64 px, identical breaks everywhere, and a per-case pixel comparison of our rendering with Chromium's.
+
+## 6. How later modules plug in
+
+- **Text editing:** carets, selection and IME go through `textCaretAt`/`textCaretRect` and the `insertText`, `deleteText` and `formatText` commands; text styles (module 7) will be named style references resolved into the same text properties.
 - **Vector networks and booleans:** these produce paths. The robust winding-number boolean approach uses the same flattening and winding primitives.
 - **Effects** (blur, shadows) and **shader fills:** new composite inputs that sample from layer textures.
 - **Code view and export:** walk the document, not the scene.
 - **Multiplayer:** a provider relays Yjs updates (the convergence tests already simulate one); cursors and selections go in Yjs awareness and render as an overlay scene, so they never invalidate document tiles.
 - **MCP and the Sprout agent:** call the same command API as the UI, and use proposals so a person reviews the diff before it lands.
 
-## 6. Known limitations
+## 7. Known limitations
 
-See [`parity.md`](parity.md) → "Layout limitations", "Renderer limitations" and "Document model limitations" for the honest lists.
+See [`parity.md`](parity.md) → "Text limitations", "Layout limitations", "Renderer limitations" and "Document model limitations" for the honest lists.
