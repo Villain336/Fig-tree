@@ -1,15 +1,17 @@
 # Architecture
 
-This document covers what Modules 1 and 2 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), and the CRDT document model with its command API, file format and renderer bridge (Module 2). It also covers how the next modules (layout, text) plug in.
+This document covers what Modules 1 to 3 built: the geometry kernel, the GPU renderer and its benchmark (Module 1), the CRDT document model with its command API, file format and renderer bridge (Module 2), and the CSS layout engine (Module 3). It also covers how the next modules (text and later) plug in.
 
 ```
 apps/editor ──────────────┐  Next.js: editor (/), /bench, /render-test
   │ commands              ▼
   │                packages/document   FigDocument (Yjs) ──DocumentChange──► SceneBridge
-  │                  │  commands ─► Draft ─► one Y transaction    │
-  │                  │  propose() ─► fork ─► diff ─► accept/reject │
-  │                  │  .figtree  (document.json + assets + history.yjs)
-  │                  ▼                                             ▼
+  │                  │  commands ─► Draft ─► one Y transaction    │   │
+  │                  │  propose() ─► fork ─► diff ─► accept/reject │   ▼
+  │                  │  .figtree  (document.json + assets + ...)  │  DocumentLayout ─ cssDeclarations ─► styles
+  │                  ▼                                            ▼   │
+  │           packages/layout   LayoutNode tree ─► computeLayout ─► boxes (block, flex, grid, positioned)
+  │                                                               │
   └────────►  packages/renderer   Scene ─► DrawList ─► FramePlan ─► Backend (WebGPU | WebGL2)
                      │                          ▲
                      │        rbush index ──────┘ culling and hit-testing
@@ -20,8 +22,9 @@ apps/editor ──────────────┐  Next.js: editor (/), 
 Dependencies point downward only:
 - `geometry` is pure math and runs anywhere, including Node, a worker or a future WASM port.
 - `renderer` depends on `geometry` and `rbush`.
-- `document` depends on `geometry`, `renderer` (for the bridge only), `yjs`, `zod` and `fflate`. Nothing in it touches the DOM: it runs in Node for tests and in the editor.
-- The app depends on all three.
+- `layout` depends on nothing: it is pure TypeScript with no DOM.
+- `document` depends on `geometry`, `layout` and `renderer` (for the bridge only), `yjs`, `zod` and `fflate`. Nothing in it touches the DOM: it runs in Node for tests and in the editor.
+- The app depends on all of them.
 
 All packages are TypeScript-strict internal workspace packages that export their sources. Next.js transpiles them, and Vitest and `tsc` read them directly.
 
@@ -187,11 +190,11 @@ Every property is defined once as a zod schema in `src/schema/`, grouped like CS
 
 | Group | Properties | CSS meaning |
 |---|---|---|
-| Geometry | `x`, `y`, `width`, `height`, `rotation`, `flipX`, `flipY` | `left`/`top` of the unrotated border box relative to the parent's border box; `transform: rotate() scale(±1)` about the center. Until the layout engine exists, these hold the last laid-out box and drive rendering. |
+| Geometry | `x`, `y`, `width`, `height`, `rotation`, `flipX`, `flipY` | `left`/`top` of the unrotated border box relative to the parent's border box; `transform: rotate() scale(±1)` about the center. For absolutely positioned nodes they become insets (per `constraints`); for nodes in flex and grid flow, the layout engine computes the box and `x`/`y` are ignored. Fixed sizes are `width`/`height`. |
 | Sizing | `widthMode`/`heightMode` (`fixed`, `hug`, `fill`), `min/maxWidth`, `min/maxHeight`, `aspectRatio` | `fixed` → `width: Npx` (`flex-shrink: 0` on a flex main axis); `hug` → `fit-content`; `fill` → `flex: 1 1 0px` on a flex main axis, `align-self: stretch` on a cross axis, `justify/align-self: stretch` in grid, `100%` otherwise. |
 | Position | `position` (`absolute`, `relative`, `fixed`, `sticky`), `constraints` | `absolute` nodes get insets from their constraints: `start`, `end`, `start-end` (both insets, size follows), `center` (`calc(50% ± offset)`), `scale` (percentages). |
 | Box | `boxSizing`, `padding`, `strokesInLayout` | `strokesInLayout` turns stroke weights into `border-*-width`; otherwise strokes are paint only, like `outline`. |
-| Container | `display` (`block`, `flex`, `grid`), flex direction/wrap/justify/align, gaps, grid templates (track sizes, `repeat()`, `minmax()`, `fit-content()`, named areas), auto tracks and flow | Stored now, computed by the layout engine (module 3). `block` means children are positioned absolutely, like a classic canvas frame. |
+| Container | `display` (`block`, `flex`, `grid`), flex direction/wrap/justify/align, gaps, grid templates (track sizes, `repeat()`, `minmax()`, `fit-content()`, named areas), auto tracks and flow | Computed by the layout engine (section 4). `block` means children are positioned absolutely, like a classic canvas frame. |
 | Item | `flexGrow`, `flexShrink`, `flexBasis`, `alignSelf`, `justifySelf`, `order`, `gridColumn`, `gridRow`, `margin` | As in CSS. |
 | Clip and corners | `overflowX`/`overflowY`, `cornerRadius` (uniform or per corner), `cornerSmoothing` | Anything but `visible` clips children. Radii clamp like `border-radius`. |
 | Compositing | `opacity`, `blendMode` (`mix-blend-mode`), `isolation`, `visible`, `locked` | `isolation: auto` with blend mode `normal` is "pass through". |
@@ -249,21 +252,23 @@ main         transform, opacity, visibility, outline, bottom fill, top center st
 └ strokes    further strokes, and aligned strokes
 ```
 
-- **Incremental.** A property change recompiles only that node. Setters run only for values that changed, so a paint edit never touches geometry, and paint nodes are reused when the stack's shape is unchanged. Structural changes relink only the containers whose child lists changed (`SceneNode.replaceChildren`, O(children)).
+- **Laid out.** Node boxes come from the layout engine (section 4.6), not from the stored `x`/`y`/`width`/`height`. Flex and grid frames position and size their children; a change also recompiles the nodes whose computed box moved (`bridge.lastRelaidOut`).
+- **Incremental.** A property change recompiles only that node and the nodes it moved. Setters run only for values that changed, so a paint edit never touches geometry, and paint nodes are reused when the stack's shape is unchanged. Structural changes relink only the containers whose child lists changed (`SceneNode.replaceChildren`, O(children)).
 - **Shapes.** Rounded rectangles with smoothing, ellipse arcs and donuts, rounded polygons and stars that fill their box, lines, and vector networks (regions filled with their own rule; segment chains stroked with joins, broken only at junctions).
 - **Aligned strokes.** On rectangles and frames, an inside or outside stroke is a centered stroke on the inset or outset rectangle, with radii offset and sharp outside corners following the join. That is exact, needs no layer, and a property test compares it with the general construction. Everywhere else, inside is a double-width stroke clipped by the outline, and outside is clipped by its complement (even-odd with a surrounding rectangle).
 - **Unsupported, not faked.** Angular, diamond, image and shader paints, blend modes, effects, text, image bitmaps, per-side stroke weights, single-axis overflow and vector vertex radii and caps are listed per node in `bridge.unsupported`. Unsupported paints and strokes are not drawn; unsupported modifiers are ignored. The editor's layer panel flags them.
 
-Measured on this machine (4 vCPU Xeon, Node 22 and Chromium on SwiftShader), with a 10,001-node document of 100 frames × 99 shapes:
+Measured on this machine (4 vCPU Xeon, Node 22 and Chromium on SwiftShader), with a 10,001-node document of 100 frames × 99 shapes, including layout (section 4):
 
 | | Median | Max |
 |---|---|---|
-| Apply one property update, Node: command, Yjs transaction, change event, bridge recompile, draw-list update | 0.13–0.30 ms | 2.7 ms |
-| Apply one property update, Chromium: the same without the draw list (it updates in the next frame) | 0.3–0.9 ms | 7.0 ms |
-| Next frame CPU, zoomed in (one frame on screen), WebGPU / WebGL2 | 1.0 / 1.3–1.9 ms | |
-| Next frame CPU, overview with all 10k nodes visible, WebGPU | 34–44 ms | |
+| Apply one property update (fill / `x` / `width`), Node: command, Yjs transaction, change event, layout, bridge recompile, draw-list update | 0.20–0.23 / 0.43–0.47 / 0.47–0.48 ms | 5.6 ms |
+| Apply one property update, Chromium: the same without the draw list (it updates in the next frame) | 0.7–1.2 ms | 6.3 ms |
+| Apply a layout edit in a 10k-node document of flex and grid frames (child width, frame gap, frame padding), Chromium | 2.1–3.0 ms | 9.3 ms |
+| Next frame CPU, zoomed in (one frame on screen), WebGPU / WebGL2 | 0.9–1.1 / 1.3–1.5 ms | |
+| Next frame CPU, overview with all 10k nodes visible, WebGPU | 33–37 ms | |
 
-At the overview, WebGL2 frames take 1.0–1.2 s. That is SwiftShader rasterizing the full screen, which blocks the GL command stream; `/bench` documents the same cost. Initial load: about 0.7 s to create the 10k nodes with commands, 0.4 s to build the scene, and 0.15 s for the first draw-list compile. See `docs/benchmarks.md`.
+At the overview, WebGL2 frames take 1.1 s. That is SwiftShader rasterizing the full screen, which blocks the GL command stream; `/bench` documents the same cost. Initial load in Node: about 0.65 s to create the 10k nodes with commands and 1.0 s to build the layout and the scene (0.4 s without layout), then 0.14 s for the first draw-list compile. See `docs/benchmarks.md`.
 
 ### 3.8 The `.figtree` format
 
@@ -295,16 +300,72 @@ history.yjs            optional: the full Yjs update behind a small header, to k
 | Proposals | Diff contents, accept equals the fork, accept is one undo step, reject leaves bytes unchanged, stale merges and rebase, random batches cross-checked against full diffs. |
 | Format | Fuzzed documents round-trip byte-identically and validate with ajv against the published schema; archives are deterministic; history, migrations, asset tampering and size limits. |
 | Bridge | Scene structure per feature, unsupported notes, single-node recompiles, relinks, remote updates and undo, incremental scene equals a fresh projection under random edits, aligned-stroke equivalence, and 10k-node timings. |
-| Editor (Playwright) | Per-backend goldens of the sample, exact colors at solid points and along a gradient, cross-backend agreement, pixels following paint, geometry and structural edits made through the command API, the layer panel and canvas hit-testing. |
+| Layout in documents | Flex and grid frames with fixed, hug and fill children; constraints under layout resizes; groups; agreement with the engine run on `cssDeclarations`; reflow after gap, padding and alignment edits recompiling only moved nodes; paint edits that skip layout; structural edits; 10k-node auto-layout timings. 128 documents rendered from their CSS in Chromium match both the engine and `DocumentLayout` (`docs/conformance.md`). |
+| Editor (Playwright) | Per-backend goldens of the sample, exact colors at solid points and along a gradient, cross-backend agreement, pixels following paint, geometry and structural edits made through the command API, the layer panel and canvas hit-testing. The sample's flex and grid frames: their pixels, and gap, padding and alignment edits that reflow them; the inspector's computed box. |
 
-## 4. How the next modules plug in
+## 4. Layout engine (`packages/layout`)
 
-### Layout (CSS flexbox and grid)
+The engine implements CSS layout from the W3C specifications: CSS Box Model 3, CSS Sizing 3 (and the aspect-ratio parts of Sizing 4), Flexible Box Layout 1, Grid Layout 1, Box Alignment 3 and Positioned Layout 3. It is clean-room: no code from browser engines, Yoga or Taffy was read or used, and Penpot's Figma-style flex and grid code was not ported (`docs/reference/penpot.md` §1.4, §1.5). Only the horizontal-tb writing mode with `direction: ltr` is modelled, so the inline axis is x and the block axis is y.
 
-The layout engine is a pure function `(node styles, intrinsic sizes) → boxes` that sits between the document and the scene. It reads the stored CSS properties (`cssDeclarations` is the contract) and writes the resulting boxes, either back into `x`/`y`/`width`/`height` through commands or straight into the bridge. Its output sets the transforms and sizes of `SceneNode`s, and auto-sized frames feed path rebuilds through `roundedRectPath`.
-- It runs incrementally: dirty subtrees only.
-- It is tested against a Chromium conformance suite (render the same HTML in Chromium, compare boxes).
-- The renderer needs nothing new, because layout only produces transforms and geometry.
+### 4.1 Model
+
+| Module | What it is |
+|---|---|
+| `style.ts` | The computed `Style`: every geometry-affecting property, with values already parsed. Length-percentages are numbers (px) or `{ pct, px }` (a `calc()` sum). `makeStyle` fills in initial values (`display` defaults to `block`). |
+| `css.ts` | `parseStyle` / `parseDeclarations`: CSS declarations, as a string or a property map, into a `Style`. It handles shorthands (`margin`, `padding`, `inset`, `border`, `flex`, `flex-flow`, `gap`, `place-*`, `grid-row/column/area`, `grid-template` rows/columns), `calc()` with `px` and `%`, and the grid track syntax: line names, `repeat()`, `minmax()`, `fit-content()` and areas. Properties that do not affect geometry are ignored; bad values of layout properties throw `CssError` with the property name. |
+| `node.ts` | `LayoutNode`: style, children, an optional `Measurer` (text) or `ReplacedSize` (images), and the computed `box`. Setters mark the node and its ancestors dirty. |
+| `measure.ts` | The measure callback: min-content and max-content widths, height-for-width, and first and last baselines. `WordsMeasurer` is the deterministic test measurer (words of fixed sizes, broken into lines greedily; it mirrors Chromium exactly). `FixedMeasurer` is one fixed size. |
+| `compute.ts` | `computeLayout(root, width, height)`: the entry point and the dispatcher. It also computes intrinsic sizes and contributions. |
+| `block.ts`, `flex.ts`, `grid/*.ts`, `absolute.ts`, `leaf.ts` | The formatting contexts. |
+
+### 4.2 Protocol: width in, height out
+
+A parent always decides a child's border-box **width** before laying it out: stretched, flexed, fitted to content or taken from `width`. `layout(node, space, perform)` takes a `Space`:
+- the border-box width;
+- an optional imposed border-box height (stretched, flexed or grid-area sizes), otherwise the box resolves its own `height`/`min-height`/`max-height`;
+- the containing block for percentages;
+- two flags: `contentHeight` (ignore the height properties and return the content height, as flex bases and automatic minimum sizes need) and `heightIndefinite` (an imposed height that children may not resolve percentages against).
+
+It returns the border-box size and the first and last baselines. With `perform`, the node also positions its children and writes every box; without it, it only measures. Intrinsic inline sizes (`intrinsic(node)`: min-content and max-content of the content box) and outer contributions are computed separately and cached.
+
+Each formatting context gets a `ContentInput`: the content-box width, the imposed or clamped content height, the percentage basis for children, and the height at which wrapping column flex lines break.
+
+### 4.3 Formatting contexts
+
+- **Block** (`block.ts`): every block container establishes an independent formatting context, as `display: flow-root` does. Children stack vertically, adjacent sibling margins collapse, auto margins center, and replaced boxes use their natural size. There is no inline formatting context: text is a measured leaf.
+- **Flexbox** (`flex.ts`) follows §9 step by step. It computes flex base sizes (rules A–E, including aspect ratios and `content`), hypothetical main sizes clamped by the automatic minimum size (§4.5), lines, and then resolves flexible lengths with the freeze loop (`resolveFlexibleLengths`, exported for unit tests). After that come hypothetical cross sizes, line cross sizes with baseline-sharing groups, `align-content`, stretching, main-axis alignment with auto margins and `justify-content` (including `safe` and the distribution fallbacks), cross-axis alignment, the container's baselines (§8.5) and the static positions of absolutely positioned children (§4.1).
+- **Grid** (`grid/`):
+  - `tracks.ts` expands track lists: `repeat()` with `auto-fill`/`auto-fit` counted from the definite (or max, or min) size, and line names merged at repetition boundaries, plus the implicit `<area>-start`/`-end` names of template areas.
+  - `placement.ts` resolves line numbers, negative lines, named lines, spans and the conflict rules (§8.3), then runs the auto-placement algorithm (§8.5) with the sparse or dense cursor in both flows.
+  - `sizing.ts` is the track sizing algorithm (§11.3–§11.8) as a pure function of sizing functions and lazily computed item contributions. It initializes tracks; resolves intrinsic sizes for single-span items, then spanning items by increasing span through "distribute extra space" (up to limits, then beyond them, with planned and item-incurred increases and infinitely growable tracks), then items crossing flexible tracks; maximizes tracks; finds the size of an `fr` in definite and indefinite space (respecting min/max sizes); and stretches `auto` tracks.
+  - `grid.ts` drives it: columns first, then rows measured in their column areas after `justify-content`. Percentage rows of an indefinite height are re-resolved against the resulting height (§7.2.1). It also handles the automatic minimum size of grid items (§6.6), baseline shims, content and self alignment, and absolutely positioned children, whose containing block is their grid area when the grid is positioned.
+- **Positioned** (`absolute.ts`): absolute and fixed boxes are laid out after their containing block. That block is the padding box of the nearest positioned ancestor, a grid area, or the viewport for `fixed`. Insets follow CSS 2 (§10.3.7, §10.6.4) and Positioned Layout 3 self-alignment in the inset-modified containing block. Static positions come from the parent's formatting context as an area plus an alignment. Relative offsets are applied when a parent places a child.
+
+### 4.4 Matching Chromium
+
+The engine is checked against Chromium box by box. See [`conformance.md`](conformance.md) for the method, the per-area results (all 1,656 layout cases and 128 documents match within 1 px) and the places where Chromium's behaviour differs from a literal reading of the specs, which we follow.
+
+### 4.5 Incremental relayout
+
+- **Caches.** Each node caches layout results per constraint space (up to 8 entries, keyed on width, imposed height, flags and containing block), its intrinsic sizes, and the space of its last placing layout. A placing layout whose space matches the last one returns at once: the subtree's boxes are still valid.
+- **Dirty propagation.** A style, measure or tree change clears the caches of the node and its ancestors only. Relaying out from the root then recomputes the dirty path. Siblings that receive the same constraints hit their caches, and their positions are simply rewritten by the parent.
+- **Out-of-flow bookkeeping.** Each node counts the absolutely and fixed positioned nodes in its subtree, maintained in O(depth) on changes, so the containing-block passes skip subtrees without any. An absolutely positioned box whose inputs (containing block, static position, parent offset) are unchanged, and which is not dirty, is left alone.
+- **Reporting.** `computeLayout` can report the nodes whose box was written, and the document layer diffs only those.
+
+Tests check that incremental results equal a fresh layout under random edits and structural changes, and that changing one child only lays out its ancestors and the siblings whose constraints changed (`test/incremental.test.ts`). Numbers are in [`benchmarks.md`](benchmarks.md).
+
+### 4.6 Documents (`packages/document/src/bridge/layout.ts`)
+
+`DocumentLayout` mirrors one page into a `LayoutNode` tree. Each node's style is parsed from `cssDeclarations(doc, id)`, the same CSS that code export emits, so the mapping of fixed, hug and fill sizing, constraints, padding, strokes in layout, and flex and grid properties lives in one place. Other details:
+- **Groups** have no box. Their children join the group's parent, as with `display: contents`, and keep its coordinate space.
+- **Top-level nodes** are absolutely positioned on the page at their `x`/`y`.
+- **Text** measures as its stored width and height until module 4 shapes it. **Images** use their asset's natural size and ratio.
+- **`position: fixed`** lays out as `absolute`, and **`sticky`** as `relative` without offsets: scrolling is a prototype concern.
+- **Absolute insets** come from the stored `x`/`y` and the parent's stored size. Constraints therefore take effect when *layout* resizes the parent (a fill or hug frame). Resizing a frame in the document keeps its children's `x`, and a resize tool will update them per constraints, as Figma does.
+
+On a `DocumentChange`, `update()` restyles only nodes whose layout-relevant properties changed. Paint, effects and rotation are skipped, and so are restyles whose CSS is unchanged. Children of a node whose display, direction, size or borders changed are restyled too. Structural changes relink the affected containers. The page is then relaid out and `update()` returns the nodes whose box changed, which the bridge recompiles. Layout is derived: computed boxes are never written back into the document. The editor's inspector shows the selected node's computed box.
+
+## 5. How the next modules plug in
 
 ### Text (harfbuzzjs and a glyph atlas)
 
@@ -322,6 +383,6 @@ The composite stage already has the per-entry paint and layer machinery that tex
 - **Multiplayer:** a provider relays Yjs updates (the convergence tests already simulate one); cursors and selections go in Yjs awareness and render as an overlay scene, so they never invalidate document tiles.
 - **MCP and the Sprout agent:** call the same command API as the UI, and use proposals so a person reviews the diff before it lands.
 
-## 5. Known limitations
+## 6. Known limitations
 
-See [`parity.md`](parity.md) → "Renderer limitations" and "Document model limitations" for the honest lists.
+See [`parity.md`](parity.md) → "Layout limitations", "Renderer limitations" and "Document model limitations" for the honest lists.

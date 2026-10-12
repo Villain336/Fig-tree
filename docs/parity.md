@@ -7,7 +7,7 @@ This table lists the core features Figma documents publicly, plus the features t
 - **partial**: the engine side exists and is tested, but the user-facing tool does not exist yet.
 - **planned**: not started.
 
-Module 1 built the geometry kernel and the renderer. Module 2 built the document model: a Yjs CRDT of CSS-semantic nodes, the command API, per-user undo, reviewable proposals, the `.figtree` format and the bridge that renders a document. Most tools a designer touches are still planned. That is deliberate: this file only marks as done what actually works and is tested.
+Module 1 built the geometry kernel and the renderer. Module 2 built the document model: a Yjs CRDT of CSS-semantic nodes, the command API, per-user undo, reviewable proposals, the `.figtree` format and the bridge that renders a document. Module 3 built our own CSS layout engine (box model, flexbox, grid, positioned layout), checked against Chromium, and wired it into the bridge. Most tools a designer touches are still planned. That is deliberate: this file only marks as done what actually works and is tested.
 
 ## Canvas and rendering
 
@@ -59,9 +59,34 @@ Module 1 built the geometry kernel and the renderer. Module 2 built the document
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Auto layout | partial | We do not imitate auto layout: we implement real **CSS flexbox and grid**. All container and item properties (directions, wrapping, alignment, gaps, grid tracks with `repeat()`, `minmax()` and areas, fixed/hug/fill sizing) are stored, validated and mapped to CSS declarations, with tests. Computing boxes is the layout engine (module 3), checked against a Chromium conformance suite. |
-| Constraints | partial | Stored per axis (start, end, start-end, center, scale) and mapped to CSS insets (`calc(50% ± offset)` for center, percentages for scale), with tests. Resizing behaviour arrives with the layout engine. |
-| Layout grids | planned | |
+| Auto layout | done | We do not imitate auto layout: frames lay out with real **CSS flexbox**, computed by our own engine from the CSS each node states (`cssDeclarations`, the same CSS code export emits). The editor renders auto-layout frames, and edits made through the command API reflow them incrementally. This is covered by unit tests, Playwright pixel tests on both backends, and 651 flexbox cases plus 128 documents matching Chromium box for box (`docs/conformance.md`). There is no editing UI yet (next row). |
+| Auto layout editing UI | planned | The inspector shows the computed box and CSS; there are no controls to change direction, gap or alignment, and no drag handles. |
+| Grid layout | done | Real **CSS grid**, beyond Figma's grid auto layout: `fr`, `minmax()`, `fit-content()`, `min-content`/`max-content` tracks, `repeat()` with `auto-fill`/`auto-fit`, named lines and template areas, implicit tracks, sparse and dense auto-placement, spanning items, content and self alignment. 921 grid cases match Chromium. No editing UI yet. |
+| Constraints | partial | Absolutely positioned children keep their constraints (start, end, start-end, center, scale) when layout resizes their parent, for example a fill or hug frame (tested). There is no resize tool yet, so resizing a frame in the document does not move its children. |
+| Layout grids (column guides) | planned | |
+
+### Figma auto layout, feature by feature
+
+| Figma | CSS in Fig Tree | Status |
+|---|---|---|
+| Horizontal / vertical direction | `flex-direction: row` / `column` (also `row-reverse`, `column-reverse`) | done |
+| Spacing between items | `column-gap` / `row-gap` | done |
+| "Auto" spacing | `justify-content: space-between` (also `space-around`, `space-evenly`) | done |
+| Padding, per side | `padding` | done |
+| Alignment (9-point grid) | `justify-content` + `align-items` (also `baseline`, `stretch`, `safe`, per-item `align-self`) | done; baseline alignment of text waits for text shaping (module 4) |
+| Hug contents | `width/height: fit-content` | done |
+| Fill container | `flex: 1 1 0px` on the main axis, `align-self: stretch` on the cross axis, `100%` elsewhere | done |
+| Fixed size | `width/height: Npx` (with `flex-shrink: 0` on the main axis) | done |
+| Min / max width and height | `min-*` / `max-*` | done |
+| Wrap | `flex-wrap: wrap` (also `wrap-reverse`, `align-content`) | done |
+| Absolute position inside auto layout | `position: absolute` with insets from constraints | done |
+| Strokes included in layout | `border-width` from stroke weights (`strokesInLayout`) | done |
+| Aspect ratio lock | `aspect-ratio` | done |
+| Grid auto layout | CSS grid (row above) | done, and beyond Figma |
+| Text in auto layout | measured leaves | partial: text uses its stored box until module 4 shapes it |
+| Item order | `order` (by default the layer order is the flow order) | done |
+
+Where we exceed Figma: real CSS grid, `fr`/`minmax()`/`fit-content()` tracks and areas, reverse directions, `wrap-reverse` and `align-content`, baseline and `safe` alignment, per-item flex factors and bases, auto margins, and layout that is exactly the exported CSS (checked against Chromium).
 
 ## Components
 
@@ -99,7 +124,7 @@ Module 1 built the geometry kernel and the renderer. Module 2 built the document
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Inspect panel (CSS, measurements) | partial | The editor's inspector shows the selected node's CSS for layout, box, overflow, radii and compositing, from `cssDeclarations` (tested). Paints, effects and typography are not mapped to CSS yet. There are no measurements. |
+| Inspect panel (CSS, measurements) | partial | The editor's inspector shows the selected node's computed layout box (position, size, padding, border) and its CSS for layout, box, overflow, radii and compositing, from `cssDeclarations` (tested). Paints, effects and typography are not mapped to CSS yet. There are no on-canvas measurements. |
 | Dev mode annotations and ready-for-dev status | planned | |
 | Code Connect-style component mapping | planned | |
 
@@ -122,7 +147,7 @@ Module 1 built the geometry kernel and the renderer. Module 2 built the document
 
 | Feature | Status | Fig Tree angle |
 |---|---|---|
-| Code-native canvas (HTML/CSS semantics) | partial | Every node property is CSS-semantic and validated (box model, sizing, positioning, flex and grid, overflow, radii, compositing, typography), with a tested mapping to CSS declarations for layout and box. Computing layout and text is modules 3 and 4. |
+| Code-native canvas (HTML/CSS semantics) | partial | Every node property is CSS-semantic and validated (box model, sizing, positioning, flex and grid, overflow, radii, compositing, typography), with a tested mapping to CSS declarations. Layout is computed from exactly that CSS by our own engine, and 128 documents rendered from their CSS in Chromium match the editor's layout box for box. Text is module 4. |
 | Shader fills and effects | planned | The WebGPU compute composite stage evaluates paints per pixel, so custom WGSL paints slot in there. |
 | MCP server | planned | Will expose the command API and proposals: typed, validated commands with useful errors, atomic batches and per-agent undo, all tested. |
 
@@ -140,12 +165,24 @@ Module 1 built the geometry kernel and the renderer. Module 2 built the document
 
 ## Document model limitations (honest list)
 
-1. **No layout yet.** Flex and grid children render at their stored `x`/`y`/`width`/`height`. Groups have no box of their own; their children live in the group's parent space.
+1. **Groups have no box.** Their children live in the group's parent space and join its layout as with `display: contents`; inside flex and grid frames, a group's children stay absolutely positioned.
 2. **Not drawn yet, and listed per node instead:** text, image bitmaps, angular, diamond, image and shader paints, blend modes (layer and paint), effects, per-side stroke weights, single-axis overflow (both axes clip), and vector vertex radii and caps.
 3. **Delete wins.** A node created inside a container that someone deleted concurrently is dropped. A node moved there goes back to its previous parent. Undoing your own creation of a container also hides what others put in it meanwhile, until redone.
 4. **Undo can resurrect cycles.** Undo restores old placement values without re-validating them. If the restored placement conflicts with a concurrent move, tree repair resolves it deterministically, which can move the other user's node back.
 5. **Structural edits rebuild the tree.** Creating, moving or deleting nodes rebuilds the effective tree in O(n) (milliseconds at 10k nodes). Property edits do not.
 6. **Order keys grow** by about one digit per 30 appends to the same parent, and logarithmically for batches.
+
+## Layout limitations (honest list)
+
+1. **Horizontal, left-to-right only.** Writing modes and `direction: rtl` are not modelled.
+2. **Block layout is simplified.** Every block container establishes an independent formatting context (`display: flow-root`): sibling margins collapse, but there is no parent–child margin collapsing, no collapsing through empty boxes, no floats and no inline formatting context. Text is a measured leaf. Documents only use block frames as canvases of absolutely positioned children, so this does not affect them.
+3. **Text measures as its stored box** until module 4 shapes it. The measure callback (min-content, max-content, height for width, baselines) is in place and tested with a deterministic measurer.
+4. **Grid gaps:** no subgrid (the stretch goal was not reached), no masonry, no baseline alignment in the column axis (`justify-self: baseline`), and no second column-sizing pass for items whose min-content width depends on row sizes (§11.1 step 3; it matters for orthogonal flows and aspect ratios).
+5. **Units and values:** `px`, `%` and `calc()` of them only (no `em`, `rem` or viewport units). Not supported: `display: contents` and `inline-*` (inline variants lay out as block-level boxes), `position: sticky` (documents treat it as `relative`), anchor positioning, the areas form of the `grid-template` shorthand. `border-width` without a border style is taken as solid.
+6. **Scrollbars take no space**: scroll containers lay out like `overflow: hidden`.
+7. **`position: fixed`** uses the viewport; documents lay it out like `absolute`.
+8. **Chromium is the only reference.** Matching it sometimes means following Chromium over a literal reading of the spec (listed in `docs/conformance.md`). Firefox and WebKit are not checked.
+9. **Cost of opening large documents.** Layout adds about 0.6 s to building a 10,000-node document's bridge, half of it styles parsed from `cssDeclarations` (`docs/benchmarks.md`). Edits stay at a few milliseconds.
 
 ## Renderer limitations (honest list)
 

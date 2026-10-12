@@ -37,3 +37,5 @@ Development-only tools (Vitest, Playwright, fast-check, ajv, pngjs, Tailwind CSS
 
 Module 2 (the document model) ports no Penpot code. It used Penpot's document invariants and component override model (`docs/reference/penpot.md` §1.3 and §1.9) only as a reference, to check that our schema leaves room for touched-group overrides.
 
+Module 3 (the layout engine, `packages/layout`) is a clean-room implementation of the W3C specifications (CSS Box Model 3, CSS Sizing 3 and 4, Flexible Box Layout 1, Grid Layout 1, Box Alignment 3, Positioned Layout 3). No code from browser engines, Yoga, Taffy or Penpot was read or used. Penpot's flex and grid layout is Figma-style rather than CSS (`docs/reference/penpot.md` §1.4, §1.5) and was not ported. Where Chromium's behaviour differs from a literal reading of a spec, the behaviour was learned by rendering test cases in Chromium and comparing boxes (`docs/conformance.md`), not from its source. Module 3 adds no npm dependencies.
+

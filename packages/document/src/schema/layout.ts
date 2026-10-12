@@ -4,8 +4,9 @@ import { Num, NonNegative, Unit, sides } from "./primitives";
 /**
  * Box model, positioning and layout properties. They are stored with CSS
  * semantics; `css.ts` maps them to declarations and the layout engine
- * (module 3) computes boxes from them. Until then `x`, `y`, `width` and
- * `height` hold the node's last laid-out box and are what the renderer uses.
+ * (`@fig-tree/layout`, through `bridge/layout.ts`) computes boxes from that
+ * CSS. `x`/`y` place absolutely positioned nodes (as insets, per their
+ * constraints) and are ignored for nodes in flex and grid flow.
  */
 
 // ── Geometry ─────────────────────────────────────────────────────────────
