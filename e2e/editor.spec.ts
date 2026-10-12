@@ -11,6 +11,8 @@ async function openEditor(page: Page, backend: BackendName): Promise<void> {
   await page.goto(`/?renderer=${backend}`);
   await page.waitForFunction(() => window.__figtree !== undefined, null, { timeout: 90_000 });
   expect(await page.evaluate(() => window.__figtree!.backend)).toBe(backend);
+  // Text is laid out again as its fonts arrive (fetched from /fonts on first use).
+  await page.evaluate(() => window.__figtree!.fontsReady());
 }
 
 async function frame(page: Page): Promise<Image> {
@@ -22,6 +24,30 @@ async function frame(page: Page): Promise<Image> {
 async function worldPixel(page: Page, img: Image, x: number, y: number): Promise<number[]> {
   const c = await page.evaluate(([wx, wy]) => window.__figtree!.toCanvas(wx!, wy!), [x, y]);
   return pixel(img, Math.floor(c.x), Math.floor(c.y)).slice(0, 3);
+}
+
+/**
+ * Pixels in a world rectangle that differ from `bg` by more than 64 in some
+ * channel ("ink"), and the horizontal extent of the inked columns in world units.
+ */
+async function ink(page: Page, img: Image, x0: number, y0: number, x1: number, y1: number, bg: readonly number[] = [255, 255, 255]): Promise<{ count: number; minX: number; maxX: number }> {
+  const a = await page.evaluate(([x, y]) => window.__figtree!.toCanvas(x!, y!), [x0, y0]);
+  const b = await page.evaluate(([x, y]) => window.__figtree!.toCanvas(x!, y!), [x1, y1]);
+  const scale = (b.x - a.x) / (x1 - x0);
+  let count = 0;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (let y = Math.ceil(a.y); y < Math.floor(b.y); y++) {
+    for (let x = Math.ceil(a.x); x < Math.floor(b.x); x++) {
+      const p = pixel(img, x, y);
+      if (Math.max(Math.abs(p[0] - bg[0]!), Math.abs(p[1] - bg[1]!), Math.abs(p[2] - bg[2]!)) > 64) {
+        count++;
+        minX = Math.min(minX, x0 + (x - a.x) / scale);
+        maxX = Math.max(maxX, x0 + (x + 1 - a.x) / scale);
+      }
+    }
+  }
+  return { count, minX, maxX };
 }
 
 function expectColor(got: number[], want: readonly number[], label: string, tolerance = 2): void {
@@ -72,7 +98,7 @@ for (const backend of backends) {
         expectColor(await worldPixel(page, img, 40 + lx, 40 + ly), header(lx, ly), `header gradient at ${lx},${ly}`, 4);
       }
       expectGolden(`editor.${backend}`, img);
-      await expect(page.getByTestId("status")).toContainText(`${backend} · 46 nodes`);
+      await expect(page.getByTestId("status")).toContainText(`${backend} · 60 nodes`);
     });
 
     test("updates the pixels when a property is edited through the command API", async ({ page }) => {
@@ -139,6 +165,161 @@ for (const backend of backends) {
       expectColor(await worldPixel(page, img, 352, 634), [24, 24, 27], "button after align-items: flex-start");
       expect((await box("tb-button"))!.y).toBe(12);
     });
+
+    test("renders typography with the text engine", async ({ page }) => {
+      await openEditor(page, backend);
+      const box = async (id: string) => (await page.evaluate((i) => window.__figtree!.box(i), id))!;
+      // 1:1 on the typography frame (world x 920..1300, y 40..513).
+      await page.evaluate(() => window.__figtree!.setView(1, -900, -20));
+      const img = await frame(page);
+      const frameBox = await box("type");
+      const at = async (id: string) => {
+        const b = await box(id);
+        return { ...b, x: frameBox.x + b.x, y: frameBox.y + b.y };
+      };
+
+      // Heading: Inter Bold 32 px, hugging its text; ink stays inside the box.
+      const heading = await at("type-heading");
+      expect(heading.height).toBe(39);
+      const h = await ink(page, img, heading.x - 4, heading.y, heading.x + heading.width + 8, heading.y + heading.height);
+      expect(h.count).toBeGreaterThan(400);
+      expect(h.minX).toBeGreaterThanOrEqual(heading.x);
+      expect(h.minX).toBeLessThan(heading.x + 4);
+      expect(h.maxX).toBeLessThanOrEqual(heading.x + heading.width + 1);
+      expect(h.maxX).toBeGreaterThan(heading.x + heading.width - 4);
+
+      // Body: wraps to four 22.5 px lines inside the column's content width.
+      const body = await at("type-body");
+      expect(body.width).toBe(332);
+      expect(body.height).toBe(91);
+      for (let line = 0; line < 4; line++) expect((await ink(page, img, body.x, body.y + line * 22.5 + 4, body.x + body.width, body.y + line * 22.5 + 18)).count, `body line ${line + 1}`).toBeGreaterThan(100);
+
+      // Buttons hug their labels (padding 8 / 16) and sit 8 px apart.
+      const row: { x: number; width: number }[] = [];
+      for (const id of ["save", "cancel", "publish"]) {
+        const button = await box(`btn-${id}`);
+        const label = await box(`label-${id}`);
+        expect(button.width).toBeCloseTo(label.width + 32, 5);
+        expect(button.height).toBeCloseTo(label.height + 16, 5);
+        expect([label.x, label.y]).toEqual([16, 8]);
+        row.push(button);
+      }
+      expect(row[1]!.x).toBeCloseTo(row[0]!.width + 8, 5);
+      expect(row[2]!.x).toBeCloseTo(row[1]!.x + row[1]!.width + 8, 5);
+      // White label glyphs on the black button.
+      const buttons = await at("type-buttons");
+      const label = await box("label-save");
+      expect((await ink(page, img, buttons.x + 16, buttons.y + 8, buttons.x + 16 + label.width, buttons.y + 8 + label.height, [24, 24, 27])).count).toBeGreaterThan(40);
+
+      // Arabic (from the script fallback font) is right-to-left: its first line starts at the right edge.
+      const arabic = await at("type-arabic");
+      expect(arabic.height).toBe(84); // two 42 px lines (Noto Sans Arabic's normal line height at 20 px)
+      const first = await ink(page, img, arabic.x, arabic.y, arabic.x + arabic.width, arabic.y + 42);
+      expect(first.maxX).toBeGreaterThan(arabic.x + arabic.width - 3);
+      expect(first.minX).toBeGreaterThan(arabic.x + 20);
+      const second = await ink(page, img, arabic.x, arabic.y + 42, arabic.x + arabic.width, arabic.y + 84);
+      expect(second.maxX).toBeGreaterThan(arabic.x + arabic.width - 3);
+      expect(second.minX).toBeGreaterThan(arabic.x + arabic.width / 2);
+
+      // Devanagari shapes into conjuncts and draws.
+      const deva = await at("type-devanagari");
+      expect((await ink(page, img, deva.x, deva.y, deva.x + deva.width, deva.y + deva.height)).count).toBeGreaterThan(150);
+
+      // One variable font at weights 100 to 900: heavier words carry more ink per pixel of width.
+      const weights = await at("type-weights");
+      const thin = await ink(page, img, weights.x, weights.y, weights.x + 40, weights.y + weights.height);
+      const black = await ink(page, img, weights.x + weights.width - 60, weights.y, weights.x + weights.width, weights.y + weights.height);
+      expect(black.count).toBeGreaterThan(thin.count * 3);
+
+      // Violet text: its fill paints the glyphs.
+      const variable = await at("type-variable");
+      const c = await page.evaluate(([x, y]) => window.__figtree!.toCanvas(x!, y!), [variable.x, variable.y]);
+      let violet = 0;
+      for (let y = Math.ceil(c.y); y < c.y + variable.height; y++) {
+        for (let x = Math.ceil(c.x); x < c.x + variable.width; x++) {
+          const p = pixel(img, x, y);
+          if (Math.abs(p[0] - 124) <= 8 && Math.abs(p[1] - 58) <= 8 && Math.abs(p[2] - 237) <= 8) violet++;
+        }
+      }
+      expect(violet).toBeGreaterThan(150);
+      expectGolden(`editor-typography.${backend}`, img);
+    });
+
+    test("reflows layout and pixels when text is edited through the command API", async ({ page }) => {
+      await openEditor(page, backend);
+      const box = async (id: string) => (await page.evaluate((i) => window.__figtree!.box(i), id))!;
+      await page.evaluate(() => window.__figtree!.setView(1, -900, -20));
+      const frameBox = await box("type");
+      const save0 = await box("btn-save");
+      const cancel0 = await box("btn-cancel");
+      const buttons = await box("type-buttons");
+      const rowY = frameBox.y + buttons.y;
+
+      // Typing into the first button's label widens it and pushes the next ones along.
+      let r = await page.evaluate(() => window.__figtree!.apply([{ type: "insertText", id: "label-save", index: 4, text: " changes" }]));
+      expect(r).toEqual({ affected: ["label-save"] });
+      const save1 = await box("btn-save");
+      const cancel1 = await box("btn-cancel");
+      expect(save1.width).toBeGreaterThan(save0.width + 40);
+      expect(cancel1.x).toBeCloseTo(save1.width + 8, 5);
+      expect((await box("type-buttons"))!.width).toBeCloseTo(buttons.width + (save1.width - save0.width), 5);
+      // The label, its button, the buttons it moved and the row: nothing else recompiled.
+      expect(await page.evaluate(() => window.__figtree!.bridge.lastCompiled)).toBe(5);
+      let img = await frame(page);
+      // Where "Cancel" used to start, the black save button now shows its label.
+      const x0 = frameBox.x + buttons.x + cancel0.x;
+      expect((await ink(page, img, x0, rowY + 8, x0 + 20, rowY + 25, [24, 24, 27])).count).toBeGreaterThan(10);
+      expectColor(await worldPixel(page, img, frameBox.x + buttons.x + save1.width - 6, rowY + 16), [24, 24, 27], "widened save button");
+
+      // A heavier weight of the variable font widens the line and darkens it.
+      const v0 = await box("type-variable");
+      const vy = frameBox.y + v0.y;
+      const ink0 = await ink(page, img, frameBox.x + v0.x, vy, frameBox.x + v0.x + 300, vy + v0.height);
+      r = await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "type-variable", props: { fontWeight: 900 } }]));
+      expect("affected" in r).toBe(true);
+      const v1 = await box("type-variable");
+      expect(v1.width).toBeGreaterThan(v0.width + 15);
+      img = await frame(page);
+      const ink1 = await ink(page, img, frameBox.x + v0.x, vy, frameBox.x + v0.x + 300, vy + v1.height);
+      expect(ink1.count).toBeGreaterThan(ink0.count * 1.5);
+      expect(ink1.maxX).toBeGreaterThan(ink0.maxX + 15);
+
+      // A family that has not loaded yet: the text lays out again (and redraws) when it arrives.
+      const w0 = (await box("type-weights")).width;
+      await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "type-weights", props: { fontFamily: "Noto Sans" } }]));
+      await page.evaluate(() => window.__figtree!.fontsReady());
+      expect((await box("type-weights")).width).not.toBeCloseTo(w0, 1);
+      img = await frame(page);
+      const weights = await box("type-weights");
+      expect((await ink(page, img, frameBox.x + weights.x, frameBox.y + weights.y, frameBox.x + weights.x + weights.width, frameBox.y + weights.y + weights.height)).count).toBeGreaterThan(300);
+    });
+
+    test("pans text without rasterizing glyphs again", async ({ page }) => {
+      await openEditor(page, backend);
+      await page.evaluate(() => window.__figtree!.setView(1, -900, -20));
+      await page.evaluate(() => window.__figtree!.renderFrame());
+      const rasterized: number[] = [];
+      for (let i = 1; i <= 10; i++) {
+        // Whole-pixel steps keep every glyph's subpixel phase, so the atlas serves them all.
+        rasterized.push(await page.evaluate((dx) => {
+          window.__figtree!.setView(1, -900 + dx, -20 + dx);
+          return window.__figtree!.renderFrame().glyphsRasterized;
+        }, i * 7));
+      }
+      expect(rasterized).toEqual(Array(10).fill(0));
+      // Zooming changes glyph sizes: those are rasterized once (the first still frame
+      // after a zoom also fills the tiles around the view), then served from the atlas.
+      const view = (scale: number, x: number, y: number) =>
+        page.evaluate(([s, tx, ty]) => {
+          window.__figtree!.setView(s!, tx!, ty!);
+          return window.__figtree!.renderFrame().glyphsRasterized;
+        }, [scale, x, y]);
+      expect(await view(1.5, -1350, -30)).toBeGreaterThan(50);
+      await view(1.5, -1350, -30);
+      const zoomed: number[] = [];
+      for (let i = 1; i <= 10; i++) zoomed.push(await view(1.5, -1350 - i * 3, -30 - i * 3));
+      expect(zoomed).toEqual(Array(10).fill(0));
+    });
   });
 }
 
@@ -156,9 +337,9 @@ test("backends agree on the sample document", async ({ page }) => {
 test("lists layers and inspects a selected node's CSS", async ({ page }) => {
   await openEditor(page, "webgl2");
   const layers = page.getByTestId("layers");
-  await expect(layers.locator("button[data-node]")).toHaveCount(45);
-  // The text node is stored but not rendered yet, and says so.
-  await expect(layers.locator('button[data-node="title"] [aria-label="has unsupported features"]')).toHaveCount(1);
+  await expect(layers.locator("button[data-node]")).toHaveCount(59);
+  // Everything in the sample renders, text included.
+  await expect(layers.locator('[aria-label="has unsupported features"]')).toHaveCount(0);
   await layers.locator('button[data-node="shapes"]').click();
   await expect(page.getByTestId("css")).toContainText("left: 480px;");
   await expect(page.getByTestId("css")).toContainText("overflow: hidden;");
@@ -175,4 +356,9 @@ test("lists layers and inspects a selected node's CSS", async ({ page }) => {
   await layers.locator('button[data-node="gallery"]').click();
   await expect(page.getByTestId("box")).toContainText("padding12 12 12 12");
   await expect(page.getByTestId("css")).toContainText("grid-template-columns: repeat(3, 1fr);");
+  // A text node's typography is CSS, and its box is the text engine's measurement.
+  await layers.locator('button[data-node="type-heading"]').click();
+  await expect(page.getByTestId("css")).toContainText("font-weight: 700;");
+  await expect(page.getByTestId("css")).toContainText("width: max-content;");
+  await expect(page.getByTestId("box")).toContainText("h39");
 });

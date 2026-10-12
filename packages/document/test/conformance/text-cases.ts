@@ -80,7 +80,8 @@ export function toTextCase(name: string, doc: FigDocument): DocumentTextCase {
     delete decls.transform;
     if (doc.typeOf(id) === "text") {
       textIds.push(id);
-      return { style: css(decls), paragraphs: paragraphs(doc, id) };
+      // Direction `auto` is HTML `dir="auto"` (see textBlockInput).
+      return { style: css(decls), paragraphs: paragraphs(doc, id), ...(doc.get<string>(id, "direction") === "auto" ? { dir: "auto" as const } : {}) };
     }
     const children = doc.tree.childrenOf(id).map(node);
     return children.length ? { style: css(decls), children } : { style: css(decls) };
@@ -178,6 +179,8 @@ const HAND: [string, (page: string) => Command[]][] = [
   ],
   ["ordered-list", (p) => [text("t", p, "First step\nSecond step\nThird step that wraps around the end of the line", { x: 10, y: 10, width: 220, widthMode: "fixed", listStyle: "ordered" })]],
   ["rtl", (p) => [text("t", p, ARABIC, { x: 10, y: 10, width: 220, widthMode: "fixed", fontFamily: "Noto Sans Arabic", direction: "rtl" })]],
+  ["rtl-auto-direction", (p) => [text("t", p, ARABIC, { x: 10, y: 10, width: 220, widthMode: "fixed", fontFamily: "Noto Sans Arabic" })]],
+  ["auto-direction-latin-first", (p) => [textRuns("t", p, [["Fig Tree "], [ARABIC, { fontFamily: "Noto Sans Arabic" }]], { x: 10, y: 10, width: 220, widthMode: "fixed" })]],
   ["rtl-auto", (p) => [text("t", p, ARABIC, { x: 10, y: 10, width: 220, widthMode: "fixed", fontFamily: "Noto Sans Arabic", textAlign: "start" })]],
   ["variable-weight", (p) => [text("t", p, "Weight 650 via the wght axis", { x: 10, y: 10, fontWeight: 650, fontSize: 22 }), text("u", p, "Weight 250", { x: 10, y: 50, fontVariations: { wght: 250 }, fontSize: 22 })]],
   ["letter-spacing", (p) => [text("t", p, BODY, { x: 10, y: 10, width: 260, widthMode: "fixed", letterSpacing: { unit: "em", value: 0.05 } })]],

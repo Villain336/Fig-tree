@@ -3,8 +3,10 @@ import { FigDocument, seededRandom, type Command, type Paint } from "@fig-tree/d
 /**
  * The document the editor opens at `/`: frames with radii and clipping,
  * solid and gradient paint stacks, aligned strokes, nested groups, every
- * shape type and a text node (stored, not rendered until the text module),
- * plus auto-layout (flexbox) and grid frames laid out by the layout engine.
+ * shape type, auto-layout (flexbox) and grid frames laid out by the layout
+ * engine, and text shaped and laid out by the text engine (headings, a
+ * wrapping paragraph with style runs, buttons hugging their labels,
+ * right-to-left Arabic, Devanagari and variable font weights).
  * Ids are fixed so tests can address nodes; e2e/editor.spec.ts knows the
  * coordinates.
  */
@@ -25,7 +27,7 @@ const radial = (...colors: ReturnType<typeof rgb>[]): Paint => ({
   stops: colors.map((color, i) => ({ position: i / (colors.length - 1), color })),
 });
 
-export const SAMPLE_BOUNDS = { x: 0, y: 0, width: 880, height: 920 };
+export const SAMPLE_BOUNDS = { x: 0, y: 0, width: 1340, height: 920 };
 
 export function sampleCommands(page: string): Command[] {
   return [
@@ -226,6 +228,72 @@ export function sampleCommands(page: string): Command[] {
         parent: "gallery",
       }),
     ),
+
+    // Typography: a vertical auto-layout frame of text laid out and drawn by the text engine.
+    {
+      type: "createNode",
+      node: {
+        id: "type",
+        type: "frame",
+        props: {
+          name: "Typography",
+          x: 920,
+          y: 40,
+          width: 380,
+          height: 100,
+          heightMode: "hug",
+          cornerRadius: 24,
+          fills: [solid(255, 255, 255)],
+          display: "flex",
+          flexDirection: "column",
+          rowGap: 16,
+          padding: { top: 24, right: 24, bottom: 24, left: 24 },
+        },
+      },
+      parent: page,
+    },
+    { type: "createNode", node: { id: "type-heading", type: "text", props: { name: "Heading", fontSize: 32, fontWeight: 700, letterSpacing: { unit: "em", value: -0.02 }, fills: [solid(24, 24, 27)] }, text: { content: "Typography", runs: [] } }, parent: "type" },
+    {
+      type: "createNode",
+      node: {
+        id: "type-body",
+        type: "text",
+        props: { name: "Body", widthMode: "fill", fontSize: 15, lineHeight: { unit: "percent", value: 150 }, fills: [solid(82, 82, 91)] },
+        text: { content: "Text is shaped with HarfBuzz and broken into lines the way browsers do it: kerning, ligatures such as ffi and fl, style runs in bold and italic, and line boxes that match CSS.", runs: [{ start: 128, end: 132, style: { fontWeight: 700 } }, { start: 137, end: 143, style: { fontFamily: "Noto Sans", fontStyle: "italic" } }] },
+      },
+      parent: "type",
+    },
+    // A row of buttons whose width hugs their labels.
+    { type: "createNode", node: { id: "type-buttons", type: "frame", props: { name: "Buttons", width: 10, height: 10, widthMode: "hug", heightMode: "hug", display: "flex", columnGap: 8 } }, parent: "type" },
+    ...(
+      [
+        ["save", "Save", [24, 24, 27], [255, 255, 255]],
+        ["cancel", "Cancel", [228, 228, 231], [24, 24, 27]],
+        ["publish", "Publish draft", [37, 99, 235], [255, 255, 255]],
+      ] as const
+    ).flatMap(([id, label, bg, ink]): Command[] => [
+      {
+        type: "createNode",
+        node: { id: `btn-${id}`, type: "frame", props: { name: label, width: 10, height: 10, widthMode: "hug", heightMode: "hug", cornerRadius: 999, fills: [solid(bg[0], bg[1], bg[2])], display: "flex", padding: { top: 8, right: 16, bottom: 8, left: 16 } } },
+        parent: "type-buttons",
+      },
+      { type: "createNode", node: { id: `label-${id}`, type: "text", props: { name: "Label", fontSize: 14, fontWeight: 500, fills: [solid(ink[0], ink[1], ink[2])] }, text: { content: label, runs: [] } }, parent: `btn-${id}` },
+    ]),
+    // Right-to-left Arabic (from the script fallback font), aligned to the start (right) edge.
+    { type: "createNode", node: { id: "type-arabic", type: "text", props: { name: "Arabic", widthMode: "fill", fontSize: 20, fills: [solid(24, 24, 27)] }, text: { content: "مرحبا بالعالم، هذا نص من اليمين إلى اليسار", runs: [] } }, parent: "type" },
+    { type: "createNode", node: { id: "type-devanagari", type: "text", props: { name: "Devanagari", fontSize: 18, fills: [solid(24, 24, 27)] }, text: { content: "नमस्ते दुनिया", runs: [] } }, parent: "type" },
+    // One variable font at five weights, and a line whose weight the tests change.
+    {
+      type: "createNode",
+      node: {
+        id: "type-weights",
+        type: "text",
+        props: { name: "Weights", fontSize: 20, fills: [solid(24, 24, 27)] },
+        text: { content: "Thin Light Regular Bold Black", runs: [{ start: 0, end: 4, style: { fontWeight: 100 } }, { start: 5, end: 10, style: { fontWeight: 300 } }, { start: 19, end: 23, style: { fontWeight: 700 } }, { start: 24, end: 29, style: { fontWeight: 900 } }] },
+      },
+      parent: "type",
+    },
+    { type: "createNode", node: { id: "type-variable", type: "text", props: { name: "Variable weight", fontSize: 28, fontWeight: 300, fills: [solid(124, 58, 237)] }, text: { content: "Variable weight", runs: [] } }, parent: "type" },
   ];
 }
 

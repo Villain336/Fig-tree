@@ -25,10 +25,11 @@ interface EditorHarness {
   apply(commands: unknown[]): { affected: readonly string[] } | { error: string };
   renderPixels(): Promise<RenderTestResult>;
   toCanvas(x: number, y: number): { x: number; y: number };
-  renderFrame(): { cpuMs: number };
+  renderFrame(): { cpuMs: number; glyphsRasterized: number };
   finish(): Promise<void>;
   setView(scale: number, x: number, y: number): void;
   box(id: string): { x: number; y: number; width: number; height: number } | null;
+  fontsReady(): Promise<void>;
 }
 
 interface Window {

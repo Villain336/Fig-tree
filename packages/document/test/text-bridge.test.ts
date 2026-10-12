@@ -104,6 +104,19 @@ describe("text in the bridge", () => {
     expect(y).toBe(56);
   });
 
+  it("takes an auto direction from the first strong character of the text (HTML dir=auto)", () => {
+    const arabic = { fontFamily: "Noto Sans Arabic", width: 300, widthMode: "fixed" };
+    const d = doc((p) => [text("ar", p, "مرحبا", arabic), text("mixed", p, "OK مرحبا", { ...arabic, fontFamily: "Inter" }), text("forced", p, "مرحبا", { ...arabic, direction: "ltr" })]);
+    const bridge = new SceneBridge(d, new Scene(), { fonts });
+    const start = (id: string): number => bridge.layout.text(id)!.layout.paragraphs[0]!.layout.lines[0]!.left;
+    // Right-to-left text starts at the right edge (text-align: start); forcing ltr starts it at the left.
+    expect(start("ar")).toBeGreaterThan(200);
+    expect(start("mixed")).toBe(0);
+    expect(start("forced")).toBe(0);
+    expect(cssDeclarations(d, "ar").direction).toBeUndefined();
+    expect(cssDeclarations(d, "forced").direction).toBe("ltr");
+  });
+
   it("states its typography as CSS", () => {
     const d = doc((p) => [text("t", p, "x", { fontWeight: 650, lineHeight: { unit: "percent", value: 140 }, letterSpacing: { unit: "em", value: 0.02 }, textAlign: "center", maxLines: 2, textTransform: "uppercase" })]);
     expect(cssDeclarations(d, "t")).toMatchObject({

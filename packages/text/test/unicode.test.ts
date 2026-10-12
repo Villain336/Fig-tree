@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import bidiFactory from "bidi-js";
 import { describe, expect, it } from "vitest";
-import { graphemeBoundaries, lineBreaks, MANDATORY_BREAK, NO_BREAK } from "../src/index";
+import { firstStrongDirection, graphemeBoundaries, lineBreaks, MANDATORY_BREAK, NO_BREAK } from "../src/index";
 import { lineBreakClass, script } from "../src/unicode/props";
 
 /**
@@ -145,5 +145,16 @@ describe("UAX #9 bidi levels (bidi-js)", () => {
       if (!ok) failures.push(line);
     }
     expect(failures).toEqual([]);
+  });
+});
+
+describe("first strong direction (HTML dir=auto)", () => {
+  it("takes the first L, R or AL character, skipping isolates", () => {
+    expect(firstStrongDirection("Hello")).toBe("ltr");
+    expect(firstStrongDirection("123 مرحبا Hello")).toBe("rtl");
+    expect(firstStrongDirection("«שלום» world")).toBe("rtl");
+    expect(firstStrongDirection("\u2067مرحبا\u2069 Hello")).toBe("ltr");
+    expect(firstStrongDirection("123 ... !")).toBeNull();
+    expect(firstStrongDirection("")).toBeNull();
   });
 });

@@ -22,4 +22,5 @@ export { featuresFor, shapeItem, type ShapedGlyphs } from "./layout/shape";
 export { TextBlock, ceil64, type TextBlockInput, type TextBlockLayout, type PlacedParagraph, type CaretPosition, type CaretRect } from "./block";
 export { lineBreaks, NO_BREAK, ALLOW_BREAK, MANDATORY_BREAK, type LineBreakOptions } from "./unicode/linebreak";
 export { graphemeBoundaries, graphemeStarts } from "./unicode/grapheme";
+export { firstStrongDirection } from "./unicode/direction";
 export * as unicode from "./unicode/props";

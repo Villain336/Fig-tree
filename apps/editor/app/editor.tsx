@@ -22,6 +22,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { editorFonts } from "./fonts";
 import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildLayoutDocument, buildSampleDocument } from "./sample-document";
 
 const ICONS: Record<NodeType, LucideIcon> = {
@@ -76,6 +77,8 @@ export interface EditorHarness {
   setView(scale: number, x: number, y: number): void;
   /** A node's computed layout box (relative to its parent), or null. */
   box(id: string): { x: number; y: number; width: number; height: number } | null;
+  /** Resolves when every font the document asked for has loaded and its text was laid out again. */
+  fontsReady(): Promise<void>;
 }
 
 /** Layer rows shown in the dev panel; large documents are truncated. */
@@ -141,7 +144,8 @@ export function Editor() {
     const doc = which === "grid10k" ? buildGridDocument() : which === "layout10k" ? buildLayoutDocument() : buildSampleDocument();
     const bounds = which === "grid10k" || which === "layout10k" ? GRID_BOUNDS : SAMPLE_BOUNDS;
     const scene = new Scene();
-    const bridge = new SceneBridge(doc, scene);
+    // Created once HarfBuzz is ready (text is laid out as the bridge builds the scene).
+    let bridge!: SceneBridge;
     const user = doc.actor("local-user");
     let renderer: Renderer | null = null;
     let view: Mat2D = [1, 0, 0, 1, 0, 0];
@@ -190,7 +194,6 @@ export function Editor() {
       schedulePanels();
       schedule();
     });
-    docRef.current = { doc, bridge, fit };
 
     const onWheel = (e: WheelEvent): void => {
       e.preventDefault();
@@ -227,6 +230,15 @@ export function Editor() {
     };
 
     (async () => {
+      const fonts = await editorFonts();
+      if (disposed) return;
+      bridge = new SceneBridge(doc, scene, { fonts });
+      // Fonts arriving lay text out again without a document change.
+      bridge.onSync = () => {
+        schedulePanels();
+        schedule();
+      };
+      docRef.current = { doc, bridge, fit };
       renderer = await Renderer.create(canvas, { backend: backendFromSearch(window.location.search), background: bridge.background });
       if (disposed) {
         renderer.destroy();
@@ -274,6 +286,14 @@ export function Editor() {
           const b = bridge.box(id);
           return b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null;
         },
+        async fontsReady() {
+          // Loads finishing lay text out again (on a microtask), which may ask for more fonts.
+          for (;;) {
+            await fonts.whenIdle();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            if (!fonts.entries().some((e) => e.state === "loading")) return;
+          }
+        },
       };
     })().catch((err: unknown) => setError(String(err)));
 
@@ -290,7 +310,7 @@ export function Editor() {
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
       window.removeEventListener("resize", resize);
-      bridge.dispose();
+      bridge?.dispose();
       renderer?.destroy();
       delete window.__figtree;
     };

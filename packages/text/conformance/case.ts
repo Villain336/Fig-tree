@@ -1,5 +1,5 @@
 import { LayoutNode, computeLayout, parseStyle } from "@fig-tree/layout";
-import { TextBlock, parseParagraphStyle, parseTextStyle, type FontRegistry, type ParagraphInput, type ParagraphStyle, type TextStyle } from "../src/index";
+import { TextBlock, firstStrongDirection, parseParagraphStyle, parseTextStyle, type FontRegistry, type ParagraphInput, type ParagraphStyle, type TextStyle } from "../src/index";
 import { DEFAULT_PARAGRAPH_STYLE, DEFAULT_TEXT_STYLE } from "../src/style";
 import { fontDigest, fontFaceCss } from "./fonts";
 
@@ -33,6 +33,8 @@ export interface TextNode {
   readonly paragraphs?: readonly Paragraph[];
   /** HTML `lang` of the node. */
   readonly lang?: string;
+  /** HTML `dir` of the node (`auto`: the direction of the first strong character of its text). */
+  readonly dir?: "ltr" | "rtl" | "auto";
 }
 
 export type TextArea =
@@ -113,6 +115,7 @@ export function caseHtml(c: TextCase): string {
   const render = (n: TextNode): string => {
     const attrs = [`data-id="${id++}"`, `style="${escapeAttr(blockStyle(n))}"`];
     if (n.lang) attrs.push(`lang="${n.lang}"`);
+    if (n.dir) attrs.push(`dir="${n.dir}"`);
     if (n.paragraphs) {
       attrs.push(`data-text="${textId++}"`);
       const inner = n.paragraphs
@@ -245,8 +248,12 @@ export function buildEngineTree(c: TextCase, fonts: FontRegistry): EngineTree {
     nodes.push(node);
     const textStyle0 = parseTextStyle(css, inherited);
     const textStyle = n.lang ? { ...textStyle0, language: n.lang } : textStyle0;
-    const para = parseParagraphStyle(css, inheritedPara);
+    let para = parseParagraphStyle(css, inheritedPara);
     const paragraphs = paragraphsOf(n);
+    if (n.dir) {
+      const all = paragraphs.map((p) => p.runs.map((r) => (typeof r === "string" ? r : r[1])).join("")).join("\n");
+      para = { ...para, direction: n.dir === "auto" ? (firstStrongDirection(all) ?? "ltr") : n.dir };
+    }
     if (paragraphs.length > 0) {
       const inputs: ParagraphInput[] = paragraphs.map((p) => {
         let text = "";

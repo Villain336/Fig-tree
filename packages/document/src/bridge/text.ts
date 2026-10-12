@@ -2,6 +2,7 @@ import type { GlyphSource } from "@fig-tree/renderer";
 import {
   DEFAULT_TEXT_STYLE,
   TextBlock,
+  firstStrongDirection,
   parseParagraphStyle,
   parseTextStyle,
   type FontInstance,
@@ -24,13 +25,16 @@ const LINE_SEPARATOR = String.fromCharCode(0x2028);
  * declarations `textStyleDeclarations` states for it. Paragraphs are split
  * at "\n" (each one a `<p>`, with `paragraphSpacing` between them); U+2028
  * LINE SEPARATOR is a forced line break inside a paragraph. List paragraphs
- * are `<li>`s: inset by 1.5em per level, with an outside marker.
+ * are `<li>`s: inset by 1.5em per level, with an outside marker. Direction
+ * `auto` is HTML `dir="auto"` on the text's element: every paragraph takes
+ * the direction of the first strong character of the whole text.
  */
 export function textBlockInput(doc: FigDocument, id: string, css: Readonly<Record<string, string>>, content: TextContent = doc.text(id)): TextBlockInput {
   const nodeFills = doc.get<Paint[]>(id, "fills");
   const root: EngineStyle = { ...parseTextStyle(css, DEFAULT_TEXT_STYLE), paint: nodeFills };
-  const para = parseParagraphStyle(css);
   const text = content.content;
+  let para = parseParagraphStyle(css);
+  if (doc.get<string>(id, "direction") === "auto") para = { ...para, direction: firstStrongDirection(text) ?? "ltr" };
   const runs = content.runs;
   const paragraphs: ParagraphInput[] = [];
   const counters: number[] = [];
@@ -94,6 +98,7 @@ export function textKey(doc: FigDocument, id: string, css: Readonly<Record<strin
     css,
     fills: doc.get<Paint[]>(id, "fills"),
     list: [doc.get<string>(id, "listStyle"), doc.get<number>(id, "listLevel")],
+    direction: doc.get<string>(id, "direction"),
     spacing: doc.get<number>(id, "paragraphSpacing"),
     maxLines: doc.stored(id, "maxLines") ?? null,
   });

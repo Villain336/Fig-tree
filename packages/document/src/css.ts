@@ -188,6 +188,7 @@ export function cssDeclarations(doc: FigDocument, id: string): Record<string, st
     css["white-space"] = get<string>("whiteSpace");
     const wrap = get<string>("textWrap");
     if (wrap !== "auto") css["text-wrap-style"] = wrap;
+    // `auto` has no CSS value: it is HTML `dir="auto"` on the element.
     const dir = get<string>("direction");
     if (dir !== "auto") css.direction = dir;
     if (stored("maxLines")) {
