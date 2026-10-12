@@ -48,17 +48,17 @@ describe("text performance", () => {
       const sp = new ShapedParagraph({ text, spans, style: para, root: style }, fonts);
       shapeMs.push(performance.now() - t);
       t = performance.now();
-      const layout = layoutLines(sp, 600, 0);
+      const layout = layoutLines(sp, 600);
       layoutMs.push(performance.now() - t);
       lines = layout.lines.length;
       t = performance.now();
-      layoutLines(sp, 480, 0);
+      layoutLines(sp, 480);
       relayoutMs.push(performance.now() - t);
     }
     const balanced = parseParagraphStyle("text-wrap: pretty");
     const sp = new ShapedParagraph({ text, spans: [{ start: 0, end: text.length, style }], style: balanced, root: style }, fonts);
     let t = performance.now();
-    layoutLines(sp, 600, 0);
+    layoutLines(sp, 600);
     const prettyMs = performance.now() - t;
     const block = new TextBlock(fonts, { paragraphs: [{ text, spans: [{ start: 0, end: text.length, style }], style: para, root: style }] });
     t = performance.now();
