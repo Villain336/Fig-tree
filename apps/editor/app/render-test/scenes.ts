@@ -1,5 +1,5 @@
 import { Path, ellipsePath, multiply, rotation, roundedRectPath, translation } from "@fig-tree/geometry";
-import { Scene, hexColor, rgba, solid, type GradientStop } from "@fig-tree/renderer";
+import { Scene, hexColor, rgba, solid, type GlyphSource, type GradientStop } from "@fig-tree/renderer";
 
 /**
  * Reference scenes for the pixel-quality suite (e2e/render.spec.ts). Each is
@@ -23,7 +23,36 @@ function rect(x0: number, y0: number, x1: number, y1: number): Path {
   return new Path().moveTo(x0, y0).lineTo(x1, y0).lineTo(x1, y1).lineTo(x0, y1).close();
 }
 
+/** A glyph source whose glyph g is a square of g/10 em sitting on the baseline (for exact coverage checks). */
+const squareGlyphs: GlyphSource = {
+  key: "test-squares",
+  unitsPerEm: 1000,
+  path: (gid) => rect(0, -gid * 100, gid * 100, 0),
+  bounds: (gid) => ({ minX: 0, minY: -gid * 100, maxX: gid * 100, maxY: 0 }),
+};
+
+/** x positions of the squares in the glyph scenes; e2e/render.spec.ts checks each one. */
+export const GLYPH_XS = [10, 30.25, 50.5, 70.75, 90.3, 110.6];
+
 export const testScenes: Record<string, TestScene> = {
+  // Text drawn from the glyph atlas: 8 px squares at quarter-pixel x positions on a baseline at y = 30.4
+  // (snapped to 30), a gradient-filled run, and a run clipped by a frame.
+  glyphs: {
+    width: 160,
+    height: 96,
+    build(scene) {
+      const glyphs = Float64Array.from(GLYPH_XS.flatMap((x) => [5, x, 30.4]));
+      scene.root.appendChild(scene.createNode({ glyphs: { source: squareGlyphs, size: 16, glyphs }, fill: black }));
+      const gradient = scene.createNode({
+        glyphs: { source: squareGlyphs, size: 16, glyphs: Float64Array.from([5, 10, 60, 5, 18, 60, 5, 26, 60]) },
+        fill: { type: "linear-gradient", start: { x: 10, y: 0 }, end: { x: 34, y: 0 }, stops: [{ offset: 0, color: hexColor("#ff0000") }, { offset: 1, color: hexColor("#0000ff") }] },
+      });
+      scene.root.appendChild(gradient);
+      const clip = scene.createNode({ path: rect(60, 50, 76, 90), clipsContent: true });
+      clip.appendChild(scene.createNode({ glyphs: { source: squareGlyphs, size: 32, glyphs: Float64Array.from([10, 50, 90]) }, fill: black }));
+      scene.root.appendChild(clip);
+    },
+  },
   "rect-fractional": {
     width: 128,
     height: 96,

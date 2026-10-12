@@ -58,16 +58,10 @@ void main() {
 }
 `;
 
-export const coverFragmentShader = /* glsl */ `#version 300 es
-precision highp float;
-precision highp int;
-flat in int v_id;
-uniform vec2 u_viewport;
+/** Paint evaluation shared by the cover and glyph passes: the premultiplied paint color of entry `v_id` at the fragment. */
+const paintFunctions = /* glsl */ `
 uniform highp sampler2D u_paints;
 uniform highp sampler2D u_stops;
-uniform highp sampler2D u_layer;
-out vec4 o_color;
-${fetchEntry}
 vec4 paintTexel(int paint, int k) {
   int i = paint * 4 + k;
   return texelFetch(u_paints, ivec2(i % 1024, i / 1024), 0);
@@ -76,22 +70,14 @@ vec4 stopTexel(int stop, int k) {
   int i = stop * 2 + k;
   return texelFetch(u_stops, ivec2(i % 1024, i / 1024), 0);
 }
-void main() {
-  vec4 t = entryTexel(v_id, 1);
+vec4 paintColor(int id) {
+  vec4 t = entryTexel(id, 1);
   float opacity = t.z;
-  if (entryTexel(v_id, 3).x > 0.5) {
-    // Composite a finished layer onto its parent.
-    o_color = texelFetch(u_layer, ivec2(gl_FragCoord.xy), 0) * opacity;
-    return;
-  }
   int paint = int(t.w);
   vec4 header = paintTexel(paint, 0);
   int kind = int(header.x);
-  if (kind == 0) {
-    o_color = paintTexel(paint, 1) * opacity;
-    return;
-  }
-  vec4 m = entryTexel(v_id, 0);
+  if (kind == 0) return paintTexel(paint, 1) * opacity;
+  vec4 m = entryTexel(id, 0);
   vec2 pos = vec2(gl_FragCoord.x, u_viewport.y - gl_FragCoord.y);
   vec2 q = pos - t.xy;
   float det = m.x * m.w - m.y * m.z;
@@ -112,6 +98,61 @@ void main() {
   float o1 = stopTexel(base + j, 0).x;
   float s = o1 > o0 ? clamp((u - o0) / (o1 - o0), 0.0, 1.0) : (u >= o1 ? 1.0 : 0.0);
   vec4 c = mix(stopTexel(base + i, 1), stopTexel(base + j, 1), s);
-  o_color = vec4(c.rgb * c.a, c.a) * opacity;
+  return vec4(c.rgb * c.a, c.a) * opacity;
+}
+`;
+
+export const coverFragmentShader = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+flat in int v_id;
+uniform vec2 u_viewport;
+uniform highp sampler2D u_layer;
+out vec4 o_color;
+${fetchEntry}
+${paintFunctions}
+void main() {
+  if (entryTexel(v_id, 3).x > 0.5) {
+    // Composite a finished layer onto its parent.
+    o_color = texelFetch(u_layer, ivec2(gl_FragCoord.xy), 0) * entryTexel(v_id, 1).z;
+    return;
+  }
+  o_color = paintColor(v_id);
+}
+`;
+
+/** Glyph pass: one instanced quad per glyph bitmap, at whole device pixels. */
+export const glyphVertexShader = /* glsl */ `#version 300 es
+precision highp float;
+layout(location = 1) in vec4 a_rect;
+layout(location = 2) in vec2 a_atlas;
+uniform int u_entry;
+uniform vec2 u_viewport;
+flat out int v_id;
+out vec2 v_atlas;
+void main() {
+  int corner = gl_VertexID % 6;
+  vec2 uv = vec2(corner == 1 || corner == 2 || corner == 4 ? 1.0 : 0.0, corner == 2 || corner == 4 || corner == 5 ? 1.0 : 0.0);
+  vec2 p = a_rect.xy + uv * a_rect.zw;
+  v_id = u_entry;
+  v_atlas = a_atlas + uv * a_rect.zw;
+  gl_Position = vec4(p.x / u_viewport.x * 2.0 - 1.0, 1.0 - p.y / u_viewport.y * 2.0, 0.0, 1.0);
+}
+`;
+
+export const glyphFragmentShader = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+flat in int v_id;
+in vec2 v_atlas;
+uniform vec2 u_viewport;
+uniform highp sampler2D u_atlas;
+out vec4 o_color;
+${fetchEntry}
+${paintFunctions}
+void main() {
+  float coverage = texelFetch(u_atlas, ivec2(v_atlas), 0).r;
+  if (coverage <= 0.0) discard;
+  o_color = paintColor(v_id) * coverage;
 }
 `;

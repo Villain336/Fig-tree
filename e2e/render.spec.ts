@@ -1,3 +1,4 @@
+import { GLYPH_XS } from "../apps/editor/app/render-test/scenes";
 import { expect, test } from "@playwright/test";
 import { encodePaint, sampleStops } from "../packages/renderer/src/paint";
 import { hexColor, rgba, type GradientStop } from "../packages/renderer/src/types";
@@ -199,6 +200,31 @@ for (const backend of backends) {
         const got = pixel(img, x, y);
         for (const [k, want] of [[0, 255], [1, 237], [2, 212]] as const) expect(Math.abs(got[k]! - want), `fill at ${x},${y}`).toBeLessThanOrEqual(2);
       }
+    });
+
+    test("draws glyphs from the atlas with exact coverage at quarter-pixel positions", async ({ page }) => {
+      const img = await renderScene(page, "glyphs", backend);
+      // Each 8 px square is rasterized once per quarter-pixel phase: its x snaps to the nearest quarter pixel,
+      // its baseline to a whole pixel (30), so coverage is exact for the snapped square.
+      for (const x of GLYPH_XS) {
+        const qx = Math.floor(x) + Math.round((x - Math.floor(x)) * 4) / 4;
+        for (let px = Math.floor(qx) - 1; px <= Math.ceil(qx + 8); px++) {
+          const expected = Math.max(0, Math.min(px + 1, qx + 8) - Math.max(px, qx));
+          for (const py of [22, 26, 29]) expect(Math.abs(coverageAt(img, px, py) - expected), `square at ${x}, pixel ${px},${py}`).toBeLessThanOrEqual(1.5 / 255);
+          expect(coverageAt(img, px, 21), `above the square at ${x}`).toBeLessThanOrEqual(1 / 255);
+          expect(coverageAt(img, px, 30), `below the baseline at ${x}`).toBeLessThanOrEqual(1 / 255);
+        }
+      }
+      // A gradient fill runs across the text run: red at the left square, blue at the right one.
+      const left = pixel(img, 13, 56);
+      const right = pixel(img, 31, 56);
+      expect(left[0]).toBeGreaterThan(200);
+      expect(right[2]).toBeGreaterThan(200);
+      // The 16 px square inside the clip frame [60, 76] x [50, 90] is cut at x = 76... and drawn only inside it.
+      expect(coverageAt(img, 62, 80)).toBeGreaterThan(0.99);
+      expect(coverageAt(img, 74, 80)).toBeGreaterThan(0.99);
+      expect(coverageAt(img, 77, 80)).toBeLessThan(0.01);
+      expectGolden(`glyphs.${backend}`, img);
     });
 
     test("renders the mixed reference scene", async ({ page }) => {

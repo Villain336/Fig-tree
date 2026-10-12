@@ -1,4 +1,5 @@
-import { IDENTITY, type FillRule, type Mat2D, type Path } from "@fig-tree/geometry";
+import { IDENTITY, Path, type FillRule, type Mat2D } from "@fig-tree/geometry";
+import { runBounds, runOutlinePath, type GlyphRun } from "./glyphs/atlas";
 import type { Paint, Stroke } from "./types";
 
 export interface NodeProps {
@@ -15,6 +16,8 @@ export interface NodeProps {
   /** Clip children to this node's path (its fill area). */
   readonly clipsContent?: boolean;
   readonly visible?: boolean;
+  /** Text: a glyph run, filled with `fill` (its outlines are also the node's path). */
+  readonly glyphs?: GlyphRun | null;
 }
 
 /**
@@ -35,6 +38,7 @@ export class SceneNode {
   private _opacity: number;
   private _clipsContent: boolean;
   private _visible: boolean;
+  private _glyphs: GlyphRun | null = null;
   /** @internal Bumped when the path or stroke style changes. */
   geometryVersion = 0;
   /** @internal Bumped when fill or stroke paint changes. */
@@ -52,6 +56,24 @@ export class SceneNode {
     this._opacity = clamp01(props.opacity ?? 1);
     this._clipsContent = props.clipsContent ?? false;
     this._visible = props.visible ?? true;
+    if (props.glyphs) {
+      this._glyphs = props.glyphs;
+      this._path = glyphPath(props.glyphs);
+    }
+  }
+
+  /**
+   * A glyph run drawn with this node's fill. Small axis-aligned text draws
+   * from the glyph atlas; rotated or large text draws the run's outlines,
+   * which also back hit-testing. Setting it replaces the node's path.
+   */
+  get glyphs(): GlyphRun | null {
+    return this._glyphs;
+  }
+
+  set glyphs(run: GlyphRun | null) {
+    this._glyphs = run;
+    this.path = run ? glyphPath(run) : null;
   }
 
   get parent(): SceneNode | null {
@@ -208,6 +230,11 @@ export class SceneNode {
   removeFromParent(): void {
     this._parent?.removeChild(this);
   }
+}
+
+/** A run's outline path, built only when something needs the outlines (bounds are known up front). */
+function glyphPath(run: GlyphRun): Path {
+  return Path.deferred(runBounds(run), () => runOutlinePath(run));
 }
 
 function clamp01(v: number): number {

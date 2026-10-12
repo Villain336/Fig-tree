@@ -30,6 +30,7 @@ const KIND_END: u32 = 2u;
 const FLAG_EVENODD: u32 = 4u;
 const FLAG_CLIP: u32 = 8u;
 const FLAG_OPAQUE: u32 = 16u;
+const FLAG_GLYPHS: u32 = 32u;
 
 struct Config {
   viewport: vec2<u32>,
@@ -41,7 +42,8 @@ struct Config {
   pieceCapacity: u32,
   maskCapacity: u32,
   firstPass: u32,
-  _pad: u32,
+  // Index of this pass's first entry tile in the frame-wide glyph tile lists.
+  glyphBase: u32,
   background: vec4<f32>,
 }
 
@@ -286,6 +288,8 @@ struct Counters {
 @group(0) @binding(3) var<storage, read_write> edgeTiles: array<vec2<u32>>;
 @group(0) @binding(4) var<storage, read_write> bitmaps: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> counters: Counters;
+// Glyph data: per entry tile of glyph entries (first ref word, ref count), then the refs.
+@group(0) @binding(6) var<storage, read> glyphData: array<u32>;
 
 fn findEntry(i: u32) -> u32 {
   var lo = 0u;
@@ -308,7 +312,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let bw = e.bbox.z - e.bbox.x;
   let kind = e.flags & 3u;
   let evenodd = (e.flags & FLAG_EVENODD) != 0u;
-  let hasGeometry = kind == KIND_FILL || (e.flags & FLAG_CLIP) != 0u;
+  let glyphs = (e.flags & FLAG_GLYPHS) != 0u;
+  let hasGeometry = (kind == KIND_FILL && !glyphs) || (e.flags & FLAG_CLIP) != 0u;
   let ty = e.bbox.y + row;
   let word = (ei >> 5u) & 7u;
   let chunk = ei >> 8u;
@@ -320,7 +325,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     acc += tiles[ti].delta;
     tiles[ti].backdrop = backdrop;
     var mark = kind != KIND_FILL;
-    if (hasGeometry && tiles[ti].head != 0u) {
+    if (glyphs) {
+      mark = glyphData[(config.glyphBase + ti) * 2u + 1u] > 0u;
+    } else if (hasGeometry && tiles[ti].head != 0u) {
       let slot = atomicAdd(&counters.edgeTiles, 1u);
       if (slot < config.maskCapacity) {
         edgeTiles[slot] = vec2<u32>(ti, select(0u, 1u, evenodd));
@@ -424,7 +431,7 @@ struct Config {
   pieceCapacity: u32,
   maskCapacity: u32,
   firstPass: u32,
-  _pad: u32,
+  glyphBase: u32,
   background: vec4<f32>,
 }
 struct Counters {
@@ -565,6 +572,29 @@ const PAINT_LINEAR: u32 = 1u;
 @group(0) @binding(7) var<storage, read> stops: array<vec4<f32>>;
 @group(0) @binding(8) var previous: texture_2d<f32>;
 @group(0) @binding(9) var outTex: texture_storage_2d<rgba8unorm, write>;
+// Glyph data: per entry tile (first ref word, ref count), then refs of four words:
+// device x and y of the bitmap's corner (i32), atlas x | y << 16, width | height << 16.
+@group(0) @binding(10) var<storage, read> glyphData: array<u32>;
+@group(0) @binding(11) var atlas: texture_2d<f32>;
+
+// Coverage of a glyph entry at a pixel: the sum of the atlas bitmaps covering it, clamped.
+fn glyphCoverage(ti: u32, pix: vec2<u32>) -> f32 {
+  let t = (config.glyphBase + ti) * 2u;
+  let first = glyphData[t];
+  let count = glyphData[t + 1u];
+  var c = 0.0;
+  for (var k = 0u; k < count; k++) {
+    let r = first + k * 4u;
+    let local = vec2<i32>(pix) - vec2<i32>(bitcast<i32>(glyphData[r]), bitcast<i32>(glyphData[r + 1u]));
+    let packedAtlas = glyphData[r + 2u];
+    let packedSize = glyphData[r + 3u];
+    let size = vec2<i32>(i32(packedSize & 0xffffu), i32(packedSize >> 16u));
+    if (all(local >= vec2<i32>(0)) && all(local < size)) {
+      c += textureLoad(atlas, vec2<i32>(i32(packedAtlas & 0xffffu), i32(packedAtlas >> 16u)) + local, 0).r;
+    }
+  }
+  return min(c, 1.0);
+}
 
 fn coverage(ti: u32, evenodd: bool, pixel: u32) -> f32 {
   let t = tiles[ti];
@@ -628,7 +658,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     let ti = e.tileOffset + (wid.y - e.bbox.y) * bw + (wid.x - e.bbox.x);
     let evenodd = (e.flags & FLAG_EVENODD) != 0u;
     if (kind == KIND_FILL) {
-      let cov = coverage(ti, evenodd, pixel);
+      var cov: f32;
+      if ((e.flags & FLAG_GLYPHS) != 0u) { cov = glyphCoverage(ti, pix); } else { cov = coverage(ti, evenodd, pixel); }
       if (cov > 0.0) {
         let src = paintColor(e, pos) * (cov * e.opacity);
         color = src + color * (1.0 - src.a);

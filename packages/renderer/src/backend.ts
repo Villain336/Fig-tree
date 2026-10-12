@@ -13,8 +13,10 @@ export interface FrameStats {
   readonly entries: number;
   /** Line segments rasterized this frame. */
   readonly segments: number;
-  /** Bytes of geometry and paint uploaded this frame (0 when only the view changed). */
+  /** Bytes of geometry, paint and glyph bitmaps uploaded this frame (0 when only the view changed). */
   readonly uploadedBytes: number;
+  /** Glyph bitmaps rasterized into the atlas this frame (0 on frames that reuse the atlas). */
+  readonly glyphsRasterized: number;
   /** CPU time spent planning and encoding the frame. */
   readonly cpuMs: number;
 }

@@ -2,6 +2,7 @@ import { invert, multiply, scaling, transformPoint, translation, type Mat2D, typ
 import type { Backend, FrameStats, PixelData } from "./backend";
 import { DrawList } from "./compile";
 import { PaintCache, planFrame, type FramePlan } from "./frame";
+import { GlyphAtlas } from "./glyphs/atlas";
 import { hitTest } from "./hit-test";
 import { ATLAS_SLOTS, TILE_SIZE, TileCache } from "./tile-cache";
 import { Scene, type SceneNode } from "./scene";
@@ -42,6 +43,8 @@ export class Renderer {
   private scene = new Scene();
   private list = new DrawList();
   private readonly paints = new PaintCache();
+  /** Coverage bitmaps of small, axis-aligned glyphs, shared by every frame. */
+  readonly glyphAtlas = new GlyphAtlas();
   private width = 0;
   private height = 0;
   private pixelRatio = 1;
@@ -102,6 +105,7 @@ export class Renderer {
     const start = performance.now();
     this.lastViewport = viewport;
     this.list.sync(this.scene);
+    this.glyphAtlas.beginFrame();
     const raw = multiply(scaling(this.pixelRatio), viewport.transform);
     // Whole-device-pixel translation keeps cached tiles aligned and makes
     // direct and tiled frames identical.
@@ -118,14 +122,14 @@ export class Renderer {
     // once scale and scene hold still, panning only rasterizes new tiles.
     const tilesAcross = (Math.ceil(this.width / TILE_SIZE) + 1) * (Math.ceil(this.height / TILE_SIZE) + 1);
     if (!this.tiles || !sameScale || !sameScene || tilesAcross * 2 > this.tiles.capacity) {
-      const plan = planFrame(this.list, this.paints, view, this.width, this.height);
+      const plan = planFrame(this.list, this.paints, view, this.width, this.height, this.glyphAtlas);
       const uploadedBytes = this.backend.render(plan, this.background);
       return this.stats("direct", [plan], uploadedBytes, 0, start);
     }
     const frame = this.tiles.schedule(view[4], view[5], this.width, this.height, viewMoving);
     const linear: Mat2D = [view[0], view[1], view[2], view[3], 0, 0];
     const jobs = frame.regions.map((r) => ({
-      plan: planFrame(this.list, this.paints, multiply(translation(-r.x, -r.y), linear), r.width, r.height),
+      plan: planFrame(this.list, this.paints, multiply(translation(-r.x, -r.y), linear), r.width, r.height, this.glyphAtlas),
       copies: r.copies,
     }));
     const uploadedBytes = jobs.length > 0 ? this.backend.renderTiles(jobs, this.background) : 0;
@@ -141,7 +145,16 @@ export class Renderer {
       entries += plan.entries.length;
       for (const e of plan.entries) segments += e.geometry?.segmentCount ?? 0;
     }
-    return { backend: this.backend.kind, mode, entries, segments, uploadedBytes, tilesRendered, cpuMs: performance.now() - start };
+    return {
+      backend: this.backend.kind,
+      mode,
+      entries,
+      segments,
+      uploadedBytes,
+      tilesRendered,
+      glyphsRasterized: this.glyphAtlas.rasterizedThisFrame,
+      cpuMs: performance.now() - start,
+    };
   }
 
   /**

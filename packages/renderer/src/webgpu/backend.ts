@@ -4,6 +4,7 @@ import type { Backend, PixelData, TileJob } from "../backend";
 import { ItemKind, type DrawList } from "../compile";
 import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
+import type { GlyphAtlas } from "../glyphs/atlas";
 import { PaintKind, premultiply } from "../paint";
 import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
@@ -24,6 +25,7 @@ const MAX_LINEAR_WORKGROUPS = 65535;
 const FLAG_EVENODD = 4;
 const FLAG_CLIP = 8;
 const FLAG_OPAQUE = 16;
+const FLAG_GLYPHS = 32;
 
 interface GeometryUpload {
   uploadId: number;
@@ -80,6 +82,9 @@ interface PassPlan {
   readonly segmentTotal: number;
   readonly rowTotal: number;
   readonly tileTotal: number;
+  /** Glyph lists per entry tile: (ref start, ref count) pairs, refs relative to `glyphRefs` (null when the pass has no text). */
+  readonly glyphTiles: Uint32Array | null;
+  readonly glyphRefs: Int32Array | null;
 }
 
 /**
@@ -119,6 +124,10 @@ export class WebGPUBackend implements Backend {
   private readonly bitmaps: GrowableBuffer;
   private readonly lists: GrowableBuffer;
   private readonly ranges: GrowableBuffer;
+  /** Glyph tile lists and refs of the frame (one buffer, to stay within 8 storage buffers per stage). */
+  private readonly glyphData: GrowableBuffer;
+  private glyphAtlas: GPUTexture | null = null;
+  private glyphAtlasGeneration = -1;
   private readonly readback: GPUBuffer;
   private readbackBusy = false;
   private readbackDone: Promise<void> = Promise.resolve();
@@ -169,6 +178,7 @@ export class WebGPUBackend implements Backend {
     this.bitmaps = new GrowableBuffer(device, "bitmaps", S | D, 1 << 16);
     this.lists = new GrowableBuffer(device, "tile lists", S, 1 << 16);
     this.ranges = new GrowableBuffer(device, "tile ranges", S | D, 1 << 16);
+    this.glyphData = new GrowableBuffer(device, "glyph data", S | D, 1 << 12);
     this.readback = device.createBuffer({ label: "counters readback", size: SLOT_ALIGN * 64, usage: GPUBufferUsage.MAP_READ | D });
   }
 
@@ -267,7 +277,7 @@ export class WebGPUBackend implements Backend {
       this.sweep(list);
       this.cacheGeneration = list.generation;
     }
-    let uploaded = 0;
+    let uploaded = this.uploadGlyphs(plans[0]?.atlas ?? null);
     for (const plan of plans) {
       for (const e of plan.entries) {
         if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
@@ -294,6 +304,37 @@ export class WebGPUBackend implements Backend {
     this.entries.ensure(totalBytes, false);
     device.queue.writeBuffer(this.entries.buffer, 0, data);
 
+    // Glyph tile lists of every pass, concatenated; each pass reads from its base.
+    let glyphTileCount = 0;
+    let glyphRefCount = 0;
+    const glyphBases = new Map<PassPlan, number>();
+    for (const j of jobs) for (const p of j.passes) {
+      if (!p.glyphTiles) continue;
+      glyphBases.set(p, glyphTileCount);
+      glyphTileCount += p.tileTotal;
+      glyphRefCount += p.glyphRefs!.length / 4;
+    }
+    if (glyphTileCount > 0) {
+      // Words: [entry tiles: (first ref word, count)] then [refs: x, y, atlas xy, size].
+      const words = new Uint32Array(glyphTileCount * 2 + glyphRefCount * 4);
+      const signed = new Int32Array(words.buffer);
+      let refWord = glyphTileCount * 2;
+      for (const j of jobs) for (const p of j.passes) {
+        const base = glyphBases.get(p);
+        if (base === undefined) continue;
+        const t = p.glyphTiles!;
+        for (let i = 0; i < p.tileTotal; i++) {
+          words[(base + i) * 2] = refWord + t[i * 2]! * 4;
+          words[(base + i) * 2 + 1] = t[i * 2 + 1]!;
+        }
+        signed.set(p.glyphRefs!, refWord);
+        refWord += p.glyphRefs!.length;
+      }
+      this.glyphData.ensure(words.byteLength, false);
+      device.queue.writeBuffer(this.glyphData.buffer, 0, words);
+    }
+    this.ensureGlyphAtlas();
+
     const allPasses = jobs.flatMap((j) => j.passes.map((p) => ({ p, j })));
     const maxTiles = Math.max(1, ...allPasses.map(({ p }) => p.tileTotal));
     const maxBitmap = Math.max(1, ...allPasses.map(({ p, j }) => j.tilesX * j.tilesY * p.chunkCount * 32));
@@ -319,7 +360,7 @@ export class WebGPUBackend implements Backend {
         const u = new Uint32Array(config);
         const f = new Float32Array(config);
         u.set([job.plan.width, job.plan.height, job.tilesX, job.tilesY, pass.end - pass.start, pass.chunkCount, pass.segmentTotal,
-          pass.rowTotal, this.pieceCapacity, this.maskCapacity, i === 0 ? 1 : 0, 0]);
+          pass.rowTotal, this.pieceCapacity, this.maskCapacity, i === 0 ? 1 : 0, glyphBases.get(pass) ?? 0]);
         f.set(bg, 12);
         device.queue.writeBuffer(this.config.buffer, slot * SLOT_ALIGN, config);
         this.encodePass(enc, pass, slot, i, job.tilesX, job.tilesY);
@@ -369,6 +410,7 @@ export class WebGPUBackend implements Backend {
     for (const t of this.targets) t.destroy();
     this.atlas?.destroy();
     this.present?.destroy();
+    this.glyphAtlas?.destroy();
     this.device.destroy();
   }
 
@@ -380,6 +422,38 @@ export class WebGPUBackend implements Backend {
       usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
     });
     return this.atlas;
+  }
+
+  /** The glyph atlas texture (R8 coverage), created on first use. */
+  private ensureGlyphAtlas(atlas?: GlyphAtlas): GPUTexture {
+    if (!this.glyphAtlas || (atlas && (this.glyphAtlas.width !== atlas.width || this.glyphAtlas.height !== atlas.height))) {
+      this.glyphAtlas?.destroy();
+      this.glyphAtlas = this.device.createTexture({
+        label: "glyph atlas",
+        size: { width: atlas?.width ?? 1, height: atlas?.height ?? 1 },
+        format: "r8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+    }
+    return this.glyphAtlas;
+  }
+
+  /** Uploads the glyph bitmaps rasterized since the last frame; returns the bytes uploaded. */
+  private uploadGlyphs(atlas: GlyphAtlas | null): number {
+    if (!atlas) return 0;
+    if (atlas.generation !== this.glyphAtlasGeneration) {
+      this.glyphAtlasGeneration = atlas.generation;
+      this.glyphAtlas?.destroy();
+      this.glyphAtlas = null;
+    }
+    const texture = this.ensureGlyphAtlas(atlas);
+    let bytes = 0;
+    for (const u of atlas.takeUploads()) {
+      if (u.width === 0 || u.height === 0) continue;
+      this.device.queue.writeTexture({ texture, origin: { x: u.x, y: u.y } }, u.data as Uint8Array<ArrayBuffer>, { bytesPerRow: u.width }, { width: u.width, height: u.height });
+      bytes += u.data.byteLength;
+    }
+    return bytes;
   }
 
   /** Ping-pong targets only grow, so tile regions of varying size never reallocate them. */
@@ -500,6 +574,9 @@ export class WebGPUBackend implements Backend {
       let tileTotal = 0;
       let segmentTotal = 0;
       let rowTotal = 0;
+      // Glyph refs per entry tile, built as (tile, ref) pairs then grouped.
+      const glyphPairs: number[] = [];
+      const refs: number[] = [];
       for (let i = r.start; i < r.end; i++) {
         const e = entries[i]!;
         const k = (offsets[p]! / 4) + (i - r.start) * ENTRY_WORDS;
@@ -514,7 +591,19 @@ export class WebGPUBackend implements Backend {
         if (e.kind === ItemKind.BeginLayer && e.geometry) flags |= FLAG_CLIP;
         if (e.kind === ItemKind.BeginLayer) depth++;
         else if (e.kind === ItemKind.EndLayer) depth--;
-        else if (depth === 0 && e.item.alpha === 1 && e.paint && e.paint.paint.kind === PaintKind.Solid && e.paint.paint.color[3] === 1) {
+        else if (e.glyphs) {
+          flags |= FLAG_GLYPHS;
+          const bw = tx1 - tx0;
+          for (const g of e.glyphs) {
+            const ref = refs.length / 4;
+            refs.push(g.x, g.y, g.glyph.x | (g.glyph.y << 16), g.glyph.width | (g.glyph.height << 16));
+            const gx0 = clampInt(Math.floor(g.x / TILE), tx0, tx1 - 1);
+            const gy0 = clampInt(Math.floor(g.y / TILE), ty0, ty1 - 1);
+            const gx1 = clampInt(Math.ceil((g.x + g.glyph.width) / TILE), gx0 + 1, tx1);
+            const gy1 = clampInt(Math.ceil((g.y + g.glyph.height) / TILE), gy0 + 1, ty1);
+            for (let ty = gy0; ty < gy1; ty++) for (let tx = gx0; tx < gx1; tx++) glyphPairs.push(tileTotal + (ty - ty0) * bw + (tx - tx0), ref);
+          }
+        } else if (depth === 0 && e.item.alpha === 1 && e.paint && e.paint.paint.kind === PaintKind.Solid && e.paint.paint.color[3] === 1) {
           flags |= FLAG_OPAQUE;
         }
         u[k + 6] = flags;
@@ -529,6 +618,25 @@ export class WebGPUBackend implements Backend {
         segmentTotal += segCount;
         rowTotal += ty1 - ty0;
       }
+      let glyphTiles: Uint32Array | null = null;
+      let glyphRefs: Int32Array | null = null;
+      if (refs.length > 0) {
+        // Group the (tile, ref) pairs by tile: counts, prefix sums, then the ref lists in tile order.
+        glyphTiles = new Uint32Array(tileTotal * 2);
+        for (let i = 0; i < glyphPairs.length; i += 2) glyphTiles[glyphPairs[i]! * 2 + 1]!++;
+        let at = 0;
+        for (let t = 0; t < tileTotal; t++) {
+          glyphTiles[t * 2] = at;
+          at += glyphTiles[t * 2 + 1]!;
+        }
+        const fill = new Uint32Array(tileTotal);
+        glyphRefs = new Int32Array(at * 4);
+        for (let i = 0; i < glyphPairs.length; i += 2) {
+          const t = glyphPairs[i]!;
+          const slot = glyphTiles[t * 2]! + fill[t]!++;
+          glyphRefs.set(refs.slice(glyphPairs[i + 1]! * 4, glyphPairs[i + 1]! * 4 + 4), slot * 4);
+        }
+      }
       return {
         start: r.start,
         end: r.end,
@@ -537,6 +645,8 @@ export class WebGPUBackend implements Backend {
         segmentTotal,
         rowTotal,
         tileTotal,
+        glyphTiles,
+        glyphRefs,
       };
     });
     return { data, passes };
@@ -578,7 +688,7 @@ export class WebGPUBackend implements Backend {
       }
       stage("tiles", (cp) => {
         cp.setPipeline(this.pipelines.tiles);
-        cp.setBindGroup(0, group(this.pipelines.tiles, [config, entriesBinding, tiles, { buffer: this.edgeTiles.buffer }, bitmaps, counters]));
+        cp.setBindGroup(0, group(this.pipelines.tiles, [config, entriesBinding, tiles, { buffer: this.edgeTiles.buffer }, bitmaps, counters, { buffer: this.glyphData.buffer }]));
         dispatchLinear(cp, Math.ceil(pass.rowTotal / 256));
         cp.setPipeline(this.pipelines.lists);
         cp.setBindGroup(0, group(this.pipelines.lists, [config, entriesBinding, tiles, bitmaps, { buffer: this.lists.buffer }, ranges, counters]));
@@ -601,6 +711,7 @@ export class WebGPUBackend implements Backend {
       cp.setBindGroup(0, group(this.pipelines.composite, [
         config, entriesBinding, tiles, { buffer: this.masks.buffer }, { buffer: this.lists.buffer }, ranges, { buffer: this.paints.buffer },
         { buffer: this.stops.buffer }, this.targets[(index + 1) % 2]!.createView(), this.targets[index % 2]!.createView(),
+        { buffer: this.glyphData.buffer }, this.ensureGlyphAtlas().createView(),
       ]));
       cp.dispatchWorkgroups(tilesX, tilesY);
     });

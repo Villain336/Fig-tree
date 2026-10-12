@@ -7,9 +7,12 @@ import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
 import { premultiply } from "../paint";
 import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
+import type { GlyphAtlas } from "../glyphs/atlas";
 import {
   coverFragmentShader,
   coverVertexShader,
+  glyphFragmentShader,
+  glyphVertexShader,
   stencilFragmentShader,
   stencilVertexShader,
 } from "./shaders";
@@ -93,6 +96,15 @@ export class WebGL2Backend implements Backend {
   readonly gpuTimings = null;
   private readonly stencilProgram: Program;
   private readonly coverProgram: Program;
+  private readonly glyphProgram: Program;
+  private readonly glyphVao: WebGLVertexArrayObject;
+  private glyphBuffer: WebGLBuffer;
+  private glyphBufferBytes = 0;
+  /** Per entry index: first glyph instance and count in the frame's glyph buffer. */
+  private glyphRanges = new Map<number, [number, number]>();
+  private glyphAtlas: WebGLTexture | null = null;
+  private glyphAtlasSize: [number, number] = [0, 0];
+  private glyphAtlasGeneration = -1;
   private readonly multiDraw: MultiDraw | null;
   private readonly samples: number;
   private vertexBuffer: WebGLBuffer;
@@ -124,6 +136,9 @@ export class WebGL2Backend implements Backend {
     this.samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) as number);
     this.stencilProgram = link(gl, stencilVertexShader(this.multiDraw !== null), stencilFragmentShader, ["u_entryBase", "u_viewport", "u_entries"]);
     this.coverProgram = link(gl, coverVertexShader, coverFragmentShader, ["u_entryBase", "u_viewport", "u_entries", "u_paints", "u_stops", "u_layer"]);
+    this.glyphProgram = link(gl, glyphVertexShader, glyphFragmentShader, ["u_entry", "u_viewport", "u_entries", "u_paints", "u_stops", "u_atlas"]);
+    this.glyphBuffer = gl.createBuffer()!;
+    this.glyphVao = gl.createVertexArray()!;
     this.vertexBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.vertexAlloc.capacity * 8, gl.STATIC_DRAW);
@@ -214,7 +229,8 @@ export class WebGL2Backend implements Backend {
       this.cacheGeneration = plan.list.generation;
     }
     gl.activeTexture(gl.TEXTURE0);
-    let uploaded = 0;
+    let uploaded = this.uploadGlyphs(plan.atlas);
+    this.prepareGlyphInstances(plan.entries);
     for (const e of plan.entries) {
       if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
       if (e.paint) uploaded += this.uploadPaint(e.paint);
@@ -250,6 +266,11 @@ export class WebGL2Backend implements Backend {
     };
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i]!;
+      if (e.kind === ItemKind.Fill && e.glyphs) {
+        flush(i);
+        this.drawGlyphs(i);
+        continue;
+      }
       if (e.kind === ItemKind.Fill) {
         const cells = cellsOf(rects[i]!);
         const rule = e.item.fillRule;
@@ -328,6 +349,88 @@ export class WebGL2Backend implements Backend {
     }
     this.stencil(start, firsts, counts, entries[start]!.item.fillRule === "evenodd");
     this.cover(start, end - start);
+  }
+
+  /** Uploads new glyph bitmaps into the R8 atlas texture; returns the bytes uploaded. */
+  private uploadGlyphs(atlas: GlyphAtlas | null): number {
+    if (!atlas) return 0;
+    const gl = this.gl;
+    if (!this.glyphAtlas || atlas.generation !== this.glyphAtlasGeneration || this.glyphAtlasSize[0] !== atlas.width || this.glyphAtlasSize[1] !== atlas.height) {
+      if (this.glyphAtlas) gl.deleteTexture(this.glyphAtlas);
+      this.glyphAtlas = gl.createTexture()!;
+      gl.activeTexture(gl.TEXTURE0 + GLYPH_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.glyphAtlas);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, atlas.width, atlas.height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      this.glyphAtlasSize = [atlas.width, atlas.height];
+      this.glyphAtlasGeneration = atlas.generation;
+    }
+    const uploads = atlas.takeUploads();
+    if (uploads.length === 0) return 0;
+    gl.activeTexture(gl.TEXTURE0 + GLYPH_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, this.glyphAtlas);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    let bytes = 0;
+    for (const u of uploads) {
+      if (u.width === 0 || u.height === 0) continue;
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, u.x, u.y, u.width, u.height, gl.RED, gl.UNSIGNED_BYTE, u.data);
+      bytes += u.data.byteLength;
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.activeTexture(gl.TEXTURE0);
+    return bytes;
+  }
+
+  /** Packs every glyph entry's placements into the per-frame instance buffer. */
+  private prepareGlyphInstances(entries: readonly FrameEntry[]): void {
+    this.glyphRanges.clear();
+    let count = 0;
+    for (const e of entries) if (e.glyphs) count += e.glyphs.length;
+    if (count === 0) return;
+    const data = new Float32Array(count * 6);
+    let k = 0;
+    entries.forEach((e, i) => {
+      if (!e.glyphs) return;
+      this.glyphRanges.set(i, [k, e.glyphs.length]);
+      for (const g of e.glyphs) {
+        data.set([g.x, g.y, g.glyph.width, g.glyph.height, g.glyph.x, g.glyph.y], k * 6);
+        k++;
+      }
+    });
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
+    if (data.byteLength > this.glyphBufferBytes) {
+      this.glyphBufferBytes = Math.max(data.byteLength, this.glyphBufferBytes * 2);
+      gl.bufferData(gl.ARRAY_BUFFER, this.glyphBufferBytes, gl.DYNAMIC_DRAW);
+    }
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
+  }
+
+  /** Draws one glyph entry: a quad per glyph, coverage from the atlas, paint from the entry. */
+  private drawGlyphs(entry: number): void {
+    const range = this.glyphRanges.get(entry);
+    if (!range || !this.glyphAtlas) return;
+    const gl = this.gl;
+    const p = this.glyphProgram;
+    gl.useProgram(p.program);
+    gl.uniform1i(p.uniforms["u_entry"]!, entry);
+    gl.uniform2f(p.uniforms["u_viewport"]!, this.width, this.height);
+    gl.bindVertexArray(this.glyphVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
+    const base = range[0] * 24;
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, base);
+    gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, base + 16);
+    gl.vertexAttribDivisor(2, 1);
+    gl.colorMask(true, true, true, true);
+    gl.enable(gl.BLEND);
+    gl.disable(gl.STENCIL_TEST);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, range[1]);
+    gl.enable(gl.STENCIL_TEST);
+    gl.bindVertexArray(null);
   }
 
   private stencil(entryBase: number, firsts: Int32Array, counts: Int32Array, evenodd: boolean): void {
@@ -431,6 +534,13 @@ export class WebGL2Backend implements Backend {
     gl.uniform1i(this.coverProgram.uniforms["u_paints"]!, 1);
     gl.uniform1i(this.coverProgram.uniforms["u_stops"]!, 2);
     gl.uniform1i(this.coverProgram.uniforms["u_layer"]!, LAYER_UNIT);
+    bind(GLYPH_UNIT, this.glyphAtlas);
+    gl.useProgram(this.glyphProgram.program);
+    gl.uniform1i(this.glyphProgram.uniforms["u_entries"]!, 0);
+    gl.uniform1i(this.glyphProgram.uniforms["u_paints"]!, 1);
+    gl.uniform1i(this.glyphProgram.uniforms["u_stops"]!, 2);
+    gl.uniform1i(this.glyphProgram.uniforms["u_atlas"]!, GLYPH_UNIT);
+    gl.activeTexture(gl.TEXTURE0);
   }
 
   private uploadEntries(entries: readonly FrameEntry[], rects: readonly Rect[]): void {
@@ -600,6 +710,8 @@ function scissorRect(e: FrameEntry, height: number): [number, number, number, nu
  * entry, paint and gradient-stop textures the cover pass reads.
  */
 const LAYER_UNIT = 3;
+/** Texture unit of the glyph atlas (R8 coverage). */
+const GLYPH_UNIT = 4;
 
 /** Allocates RGBA8 storage for a new texture on the layer unit, keeping the active unit. */
 function allocateTexture(gl: WebGL2RenderingContext, width: number, height: number): WebGLTexture {
