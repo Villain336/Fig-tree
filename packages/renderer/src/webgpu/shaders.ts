@@ -21,6 +21,8 @@
  * TypeScript and is property-tested against exact polygon clipping.
  */
 
+import { blendWgsl, imageWgsl, noiseWgsl, shaderLibWgsl } from "../shaders/wgsl";
+
 const common = /* wgsl */ `
 const TILE: f32 = 16.0;
 const NO_EDGE: f32 = 1e9;
@@ -31,6 +33,18 @@ const FLAG_EVENODD: u32 = 4u;
 const FLAG_CLIP: u32 = 8u;
 const FLAG_OPAQUE: u32 = 16u;
 const FLAG_GLYPHS: u32 = 32u;
+const FLAG_TEXTURE: u32 = 64u;
+const FLAG_SHAPE: u32 = 128u;
+const FLAG_BACKDROP: u32 = 256u;
+const NO_EXTRAS: u32 = 0xffffffffu;
+const MODE_GROUP: u32 = 0u;
+const MODE_CLIP: u32 = 1u;
+const MODE_MASK_GROUP: u32 = 2u;
+const MODE_MASK_SOURCE: u32 = 3u;
+
+fn blendOf(flags: u32) -> u32 { return (flags >> 10u) & 31u; }
+fn layerModeOf(flags: u32) -> u32 { return (flags >> 16u) & 7u; }
+fn maskTypeOf(flags: u32) -> u32 { return (flags >> 19u) & 3u; }
 
 struct Config {
   viewport: vec2<u32>,
@@ -45,6 +59,10 @@ struct Config {
   // Index of this pass's first entry tile in the frame-wide glyph tile lists.
   glyphBase: u32,
   background: vec4<f32>,
+  time: f32,
+  _c0: f32,
+  _c1: f32,
+  _c2: f32,
 }
 
 struct Entry {
@@ -60,7 +78,8 @@ struct Entry {
   segBase: u32,
   segCount: u32,
   _pad0: u32,
-  _pad1: u32,
+  // Index of the entry's words in frameData (textures, backdrops, images), or NO_EXTRAS.
+  extras: u32,
 }
 
 struct Piece {
@@ -313,7 +332,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   let kind = e.flags & 3u;
   let evenodd = (e.flags & FLAG_EVENODD) != 0u;
   let glyphs = (e.flags & FLAG_GLYPHS) != 0u;
-  let hasGeometry = (kind == KIND_FILL && !glyphs) || (e.flags & FLAG_CLIP) != 0u;
+  let texture = (e.flags & FLAG_TEXTURE) != 0u;
+  let hasGeometry = (kind == KIND_FILL && !glyphs && !texture) || (e.flags & FLAG_CLIP) != 0u;
   let ty = e.bbox.y + row;
   let word = (ei >> 5u) & 7u;
   let chunk = ei >> 8u;
@@ -324,7 +344,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     let backdrop = acc;
     acc += tiles[ti].delta;
     tiles[ti].backdrop = backdrop;
-    var mark = kind != KIND_FILL;
+    var mark = kind != KIND_FILL || texture;
     if (glyphs) {
       mark = glyphData[(config.glyphBase + ti) * 2u + 1u] > 0u;
     } else if (hasGeometry && tiles[ti].head != 0u) {
@@ -433,6 +453,10 @@ struct Config {
   firstPass: u32,
   glyphBase: u32,
   background: vec4<f32>,
+  time: f32,
+  _c0: f32,
+  _c1: f32,
+  _c2: f32,
 }
 struct Counters {
   pieces: u32,
@@ -561,6 +585,11 @@ struct Paint {
 const MAX_DEPTH: u32 = 8u;
 const PAINT_SOLID: u32 = 0u;
 const PAINT_LINEAR: u32 = 1u;
+const PAINT_RADIAL: u32 = 2u;
+const PAINT_ANGULAR: u32 = 3u;
+const PAINT_DIAMOND: u32 = 4u;
+const PAINT_IMAGE: u32 = 5u;
+const PAINT_SHADER: u32 = 6u;
 
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> entries: array<Entry>;
@@ -572,22 +601,31 @@ const PAINT_LINEAR: u32 = 1u;
 @group(0) @binding(7) var<storage, read> stops: array<vec4<f32>>;
 @group(0) @binding(8) var previous: texture_2d<f32>;
 @group(0) @binding(9) var outTex: texture_storage_2d<rgba8unorm, write>;
-// Glyph data: per entry tile (first ref word, ref count), then refs of four words:
-// device x and y of the bitmap's corner (i32), atlas x | y << 16, width | height << 16.
-@group(0) @binding(10) var<storage, read> glyphData: array<u32>;
+// Frame data: glyph lists per entry tile (first ref word, ref count), glyph refs of four words
+// (device x and y of the bitmap's corner as i32, atlas x | y << 16, width | height << 16),
+// then per-entry extras of eight words (texture: atlas xy, origin xy as i16, size;
+// image: atlas xy, rect origin, rect size, level size, pixels per texel as f32).
+@group(0) @binding(10) var<storage, read> frameData: array<u32>;
 @group(0) @binding(11) var atlas: texture_2d<f32>;
+@group(0) @binding(12) var effectAtlas: texture_2d<f32>;
+@group(0) @binding(13) var imageAtlas: texture_2d<f32>;
+
+${blendWgsl}
+${noiseWgsl}
+${imageWgsl}
+${shaderLibWgsl}
 
 // Coverage of a glyph entry at a pixel: the sum of the atlas bitmaps covering it, clamped.
 fn glyphCoverage(ti: u32, pix: vec2<u32>) -> f32 {
   let t = (config.glyphBase + ti) * 2u;
-  let first = glyphData[t];
-  let count = glyphData[t + 1u];
+  let first = frameData[t];
+  let count = frameData[t + 1u];
   var c = 0.0;
   for (var k = 0u; k < count; k++) {
     let r = first + k * 4u;
-    let local = vec2<i32>(pix) - vec2<i32>(bitcast<i32>(glyphData[r]), bitcast<i32>(glyphData[r + 1u]));
-    let packedAtlas = glyphData[r + 2u];
-    let packedSize = glyphData[r + 3u];
+    let local = vec2<i32>(pix) - vec2<i32>(bitcast<i32>(frameData[r]), bitcast<i32>(frameData[r + 1u]));
+    let packedAtlas = frameData[r + 2u];
+    let packedSize = frameData[r + 3u];
     let size = vec2<i32>(i32(packedSize & 0xffffu), i32(packedSize >> 16u));
     if (all(local >= vec2<i32>(0)) && all(local < size)) {
       c += textureLoad(atlas, vec2<i32>(i32(packedAtlas & 0xffffu), i32(packedAtlas >> 16u)) + local, 0).r;
@@ -606,15 +644,7 @@ fn coverage(ti: u32, evenodd: bool, pixel: u32) -> f32 {
   return select(0.0, 1.0, t.backdrop != 0);
 }
 
-fn paintColor(e: Entry, pos: vec2<f32>) -> vec4<f32> {
-  let p = paints[e.paint];
-  if (p.kind == PAINT_SOLID) { return p.color; }
-  // Device -> local (inverse of the entry matrix) -> gradient parameter space.
-  let det = e.m.x * e.m.w - e.m.y * e.m.z;
-  let q = pos - e.t;
-  let lp = vec2<f32>(e.m.w * q.x - e.m.z * q.y, -e.m.y * q.x + e.m.x * q.y) / det;
-  let g = vec2<f32>(p.m.x * lp.x + p.m.z * lp.y + p.mt.x, p.m.y * lp.x + p.m.w * lp.y + p.mt.y);
-  let t = clamp(select(length(g), g.x, p.kind == PAINT_LINEAR), 0.0, 1.0);
+fn gradientStops(p: Paint, t: f32) -> vec4<f32> {
   var i = 0u;
   loop {
     if (i + 1u >= p.stopCount) { break; }
@@ -632,6 +662,53 @@ fn paintColor(e: Entry, pos: vec2<f32>) -> vec4<f32> {
   return vec4<f32>(c.rgb * c.a, c.a);
 }
 
+fn paintColor(e: Entry, pos: vec2<f32>) -> vec4<f32> {
+  let p = paints[e.paint];
+  if (p.kind == PAINT_SOLID) { return p.color; }
+  // Device -> local (inverse of the entry matrix) -> parameter space.
+  let det = e.m.x * e.m.w - e.m.y * e.m.z;
+  let q = pos - e.t;
+  let lp = vec2<f32>(e.m.w * q.x - e.m.z * q.y, -e.m.y * q.x + e.m.x * q.y) / det;
+  let g = vec2<f32>(p.m.x * lp.x + p.m.z * lp.y + p.mt.x, p.m.y * lp.x + p.m.w * lp.y + p.mt.y);
+  if (p.kind == PAINT_IMAGE) {
+    if (e.extras == NO_EXTRAS) { return vec4<f32>(0.0); }
+    let b = p.stopOffset * 2u;
+    let info = stops[b];
+    var c = sampleImage(imagePlace(e.extras), g, info.xy, info.z > 0.5);
+    let a2 = stops[b + 2u];
+    if (a2.w > 0.5 && c.a > 0.0) {
+      c = vec4<f32>(adjustImage(c.rgb / c.a, stops[b + 1u], a2) * c.a, c.a);
+    }
+    return c * info.w;
+  }
+  if (p.kind == PAINT_SHADER) {
+    return shaderPaint(p.stopOffset * 2u, lp, sqrt(abs(det)), e.extras, pos);
+  }
+  var t = 0.0;
+  if (p.kind == PAINT_LINEAR) {
+    t = g.x;
+  } else if (p.kind == PAINT_RADIAL) {
+    t = length(g);
+  } else if (p.kind == PAINT_ANGULAR) {
+    t = atan2(g.y, g.x) / 6.283185307;
+    if (t < 0.0) { t += 1.0; }
+  } else {
+    t = abs(g.x) + abs(g.y);
+  }
+  return gradientStops(p, clamp(t, 0.0, 1.0));
+}
+
+/** A texture entry's texel at pixel pix (transparent outside its texture). */
+fn textureColor(e: Entry, pix: vec2<u32>) -> vec4<f32> {
+  let x = e.extras;
+  let atlasXY = vec2<i32>(i32(frameData[x] & 0xffffu), i32(frameData[x] >> 16u));
+  let origin = vec2<i32>(entryTextureOrigin(x));
+  let size = vec2<i32>(i32(frameData[x + 2u] & 0xffffu), i32(frameData[x + 2u] >> 16u));
+  let local = vec2<i32>(pix) - origin;
+  if (any(local < vec2<i32>(0)) || any(local >= size)) { return vec4<f32>(0.0); }
+  return textureLoad(effectAtlas, atlasXY + local, 0);
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let pix = wid.xy * 16u + lid.xy;
@@ -644,6 +721,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
   }
   var stack: array<vec4<f32>, MAX_DEPTH>;
   var stackScale: array<f32, MAX_DEPTH>;
+  var maskValue: array<f32, MAX_DEPTH>;
   var depth = 0u;
   var skip = 0u;
   let range = ranges[screenTile];
@@ -658,10 +736,26 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
     let ti = e.tileOffset + (wid.y - e.bbox.y) * bw + (wid.x - e.bbox.x);
     let evenodd = (e.flags & FLAG_EVENODD) != 0u;
     if (kind == KIND_FILL) {
+      if ((e.flags & FLAG_TEXTURE) != 0u) {
+        let src = textureColor(e, pix) * e.opacity;
+        color = src + color * (1.0 - src.a);
+        continue;
+      }
       var cov: f32;
       if ((e.flags & FLAG_GLYPHS) != 0u) { cov = glyphCoverage(ti, pix); } else { cov = coverage(ti, evenodd, pixel); }
       if (cov > 0.0) {
-        let src = paintColor(e, pos) * (cov * e.opacity);
+        var src: vec4<f32>;
+        if ((e.flags & FLAG_SHAPE) != 0u) {
+          // Shape renders: solid and gradient paints count as opaque; images and shaders by their alpha.
+          var a = 1.0;
+          if (e.paint != 0xffffffffu) {
+            let k = paints[e.paint].kind;
+            if (k == PAINT_IMAGE || k == PAINT_SHADER) { a = paintColor(e, pos).a; }
+          }
+          src = vec4<f32>(cov * a);
+        } else {
+          src = paintColor(e, pos) * (cov * e.opacity);
+        }
         color = src + color * (1.0 - src.a);
       }
     } else if (kind == KIND_BEGIN) {
@@ -678,12 +772,24 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
       }
       stack[depth] = color;
       stackScale[depth] = scale;
+      maskValue[depth] = select(1.0, 0.0, layerModeOf(e.flags) == MODE_MASK_GROUP);
       depth++;
-      color = vec4<f32>(0.0);
+      // Non-isolated layers (clips whose content blends) start from what is below them.
+      if ((e.flags & FLAG_BACKDROP) == 0u) { color = vec4<f32>(0.0); }
     } else {
       depth--;
-      let src = color * stackScale[depth];
-      color = src + stack[depth] * (1.0 - src.a);
+      let mode = layerModeOf(e.flags);
+      if (mode == MODE_MASK_SOURCE) {
+        var m = color.a;
+        if (maskTypeOf(e.flags) == 1u) { m = dot(color.rgb, vec3<f32>(0.2125, 0.7154, 0.0721)); }
+        color = stack[depth];
+        if (depth > 0u) { maskValue[depth - 1u] = m; }
+      } else if ((e.flags & FLAG_BACKDROP) != 0u) {
+        color = mix(stack[depth], color, stackScale[depth]);
+      } else {
+        let src = color * (stackScale[depth] * maskValue[depth]);
+        color = blendPremul(blendOf(e.flags), src, stack[depth]);
+      }
     }
   }
   if (all(pix < config.viewport)) {

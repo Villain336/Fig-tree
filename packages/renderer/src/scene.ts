@@ -1,6 +1,7 @@
 import { IDENTITY, Path, type FillRule, type Mat2D } from "@fig-tree/geometry";
 import { runBounds, runOutlinePath, type GlyphRun } from "./glyphs/atlas";
-import type { Paint, Stroke } from "./types";
+import { shaderAnimated, shaderUsesBackdrop } from "./shaders/library";
+import type { BlendMode, Effect, MaskType, Paint, Stroke } from "./types";
 
 export interface NodeProps {
   readonly name?: string;
@@ -18,6 +19,17 @@ export interface NodeProps {
   readonly visible?: boolean;
   /** Text: a glyph run, filled with `fill` (its outlines are also the node's path). */
   readonly glyphs?: GlyphRun | null;
+  /** How the node (as one layer) blends with what is below it. Default "normal". */
+  readonly blendMode?: BlendMode;
+  /**
+   * CSS `isolation: isolate`: children blend only with each other. Nodes with
+   * opacity below 1, a blend mode, a mask or effects are isolated anyway.
+   */
+  readonly isolate?: boolean;
+  /** Shadows and blurs, drawn in their stacking order (see `Effect`). */
+  readonly effects?: readonly Effect[];
+  /** Makes this node a mask for its following siblings (it is not drawn itself). */
+  readonly mask?: MaskType | null;
 }
 
 /**
@@ -39,6 +51,10 @@ export class SceneNode {
   private _clipsContent: boolean;
   private _visible: boolean;
   private _glyphs: GlyphRun | null = null;
+  private _blendMode: BlendMode;
+  private _isolate: boolean;
+  private _effects: readonly Effect[];
+  private _mask: MaskType | null;
   /** @internal Bumped when the path or stroke style changes. */
   geometryVersion = 0;
   /** @internal Bumped when fill or stroke paint changes. */
@@ -56,6 +72,10 @@ export class SceneNode {
     this._opacity = clamp01(props.opacity ?? 1);
     this._clipsContent = props.clipsContent ?? false;
     this._visible = props.visible ?? true;
+    this._blendMode = props.blendMode ?? "normal";
+    this._isolate = props.isolate ?? false;
+    this._effects = props.effects ?? [];
+    this._mask = props.mask ?? null;
     if (props.glyphs) {
       this._glyphs = props.glyphs;
       this._path = glyphPath(props.glyphs);
@@ -112,7 +132,7 @@ export class SceneNode {
   }
 
   set fill(p: Paint | null) {
-    const structural = (p === null) !== (this._fill === null);
+    const structural = (p === null) !== (this._fill === null) || paintTraits(p) !== paintTraits(this._fill);
     this._fill = p;
     this.paintVersion++;
     if (structural) this.scene.markStructure();
@@ -136,7 +156,7 @@ export class SceneNode {
     const prev = this._stroke;
     this._stroke = s;
     this.paintVersion++;
-    if ((s === null) !== (prev === null)) {
+    if ((s === null) !== (prev === null) || paintTraits(s?.paint ?? null) !== paintTraits(prev?.paint ?? null)) {
       this.geometryVersion++;
       this.scene.markStructure();
       return;
@@ -169,6 +189,46 @@ export class SceneNode {
 
   get visible(): boolean {
     return this._visible;
+  }
+
+  get blendMode(): BlendMode {
+    return this._blendMode;
+  }
+
+  set blendMode(m: BlendMode) {
+    if (m === this._blendMode) return;
+    this._blendMode = m;
+    this.scene.markStructure();
+  }
+
+  get isolate(): boolean {
+    return this._isolate;
+  }
+
+  set isolate(v: boolean) {
+    if (v === this._isolate) return;
+    this._isolate = v;
+    this.scene.markStructure();
+  }
+
+  get effects(): readonly Effect[] {
+    return this._effects;
+  }
+
+  /** Effects change which items a node draws, so setting them recompiles the draw list. */
+  set effects(list: readonly Effect[]) {
+    this._effects = list;
+    this.scene.markStructure();
+  }
+
+  get mask(): MaskType | null {
+    return this._mask;
+  }
+
+  set mask(m: MaskType | null) {
+    if (m === this._mask) return;
+    this._mask = m;
+    this.scene.markStructure();
   }
 
   set visible(v: boolean) {
@@ -239,6 +299,12 @@ function glyphPath(run: GlyphRun): Path {
 
 function clamp01(v: number): number {
   return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+}
+
+/** Paint properties that change the draw list's structure (backdrops, animation): 0 for plain paints. */
+export function paintTraits(p: Paint | null): number {
+  if (!p || p.type !== "shader") return 0;
+  return (shaderUsesBackdrop(p) ? 1 : 0) | (shaderAnimated(p) ? 2 : 0);
 }
 
 function sameStrokeStyle(a: Stroke, b: Stroke): boolean {

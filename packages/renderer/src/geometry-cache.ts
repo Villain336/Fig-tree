@@ -2,6 +2,7 @@ import {
   flattenPath,
   inflateRect,
   strokePath,
+  type Path,
   type Polylines,
   type Rect,
 } from "@fig-tree/geometry";
@@ -45,14 +46,26 @@ export class GeometrySlot {
   private boundsVersion = -1;
   private bounds: Rect | null = null;
 
-  constructor(readonly node: SceneNode, readonly role: GeometryRole) {}
+  /**
+   * `fixedPath` makes the slot hold that (immutable) path instead of the
+   * node's: effects use it for their exact spread shapes.
+   */
+  constructor(readonly node: SceneNode, readonly role: GeometryRole, readonly fixedPath: Path | null = null) {}
+
+  private get version(): number {
+    return this.fixedPath ? 0 : this.node.geometryVersion;
+  }
+
+  private get path(): Path | null {
+    return this.fixedPath ?? this.node.path;
+  }
 
   /** Conservative local bounds, independent of tolerance. */
   localBounds(): Rect {
-    if (this.bounds && this.boundsVersion === this.node.geometryVersion) return this.bounds;
-    const path = this.node.path;
+    if (this.bounds && this.boundsVersion === this.version) return this.bounds;
+    const path = this.path;
     let b: Rect = path ? path.bounds() : { minX: 0, minY: 0, maxX: -1, maxY: -1 };
-    const stroke = this.node.stroke;
+    const stroke = this.fixedPath ? null : this.node.stroke;
     if (this.role === "stroke" && stroke) {
       const h = stroke.width / 2;
       const miter = (stroke.join ?? "miter") === "miter" ? Math.max(1, stroke.miterLimit ?? 4) : 1;
@@ -60,13 +73,13 @@ export class GeometrySlot {
       b = inflateRect(b, h * Math.max(miter, square));
     }
     this.bounds = b;
-    this.boundsVersion = this.node.geometryVersion;
+    this.boundsVersion = this.version;
     return b;
   }
 
   /** The level currently cached, if still valid for the node's geometry. */
   current(): GeometryLevel | null {
-    return this.cached && this.cachedVersion === this.node.geometryVersion ? this.cached : null;
+    return this.cached && this.cachedVersion === this.version ? this.cached : null;
   }
 
   /**
@@ -77,14 +90,14 @@ export class GeometrySlot {
     const c = this.current();
     if (c && c.level >= needed && c.level <= needed + LEVEL_HYSTERESIS) return c;
     this.cached = this.build(needed);
-    this.cachedVersion = this.node.geometryVersion;
+    this.cachedVersion = this.version;
     return this.cached;
   }
 
   private build(level: number): GeometryLevel {
     const tolerance = SCREEN_TOLERANCE / 2 ** level;
-    const path = this.node.path;
-    const stroke = this.node.stroke;
+    const path = this.path;
+    const stroke = this.fixedPath ? null : this.node.stroke;
     let polylines: Polylines;
     if (!path) polylines = { points: new Float64Array(0), contourStarts: new Uint32Array([0]), closed: new Uint8Array(0) };
     else if (this.role === "stroke" && stroke) polylines = strokePath(path, stroke, undefined, tolerance);
