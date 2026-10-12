@@ -40,6 +40,18 @@ const SOLIDS: [string, number, number, readonly number[]][] = [
   ["panel", 60, 545, [24, 24, 27]],
   ["clip frame fill", 600, 390, [255, 237, 213]],
   ["clipped hill", 560, 515, [22, 163, 74]],
+  // Laid out by the layout engine (see apps/editor/app/sample-document.ts).
+  ["toolbar avatar (flex row, padding 12)", 68, 648, [249, 115, 22]],
+  ["toolbar search (fills the remaining width)", 200, 648, [228, 228, 231]],
+  ["toolbar button (centered on the cross axis)", 352, 648, [24, 24, 27]],
+  ["list row 1 (column, stretched)", 220, 732, [14, 165, 233]],
+  ["list row 2", 220, 787, [74, 165, 183]],
+  ["list row 3", 220, 852, [134, 165, 133]],
+  ["grid cell spanning two columns", 602, 689, [139, 92, 246]],
+  ["grid cell spanning two rows", 774, 750, [236, 72, 153]],
+  ["grid cell a", 545, 811, [34, 197, 94]],
+  ["grid cell b", 660, 811, [234, 179, 8]],
+  ["grid column gap", 602.67, 811, [255, 255, 255]],
 ];
 
 for (const backend of backends) {
@@ -60,7 +72,7 @@ for (const backend of backends) {
         expectColor(await worldPixel(page, img, 40 + lx, 40 + ly), header(lx, ly), `header gradient at ${lx},${ly}`, 4);
       }
       expectGolden(`editor.${backend}`, img);
-      await expect(page.getByTestId("status")).toContainText(`${backend} · 33 nodes`);
+      await expect(page.getByTestId("status")).toContainText(`${backend} · 46 nodes`);
     });
 
     test("updates the pixels when a property is edited through the command API", async ({ page }) => {
@@ -91,6 +103,42 @@ for (const backend of backends) {
       r = await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "star", props: { opacity: 4 } }]));
       expect("error" in r && r.error).toMatch(/opacity: Too big/);
     });
+
+    test("lays out auto-layout and grid frames, and reflows gap, padding and alignment edits", async ({ page }) => {
+      await openEditor(page, backend);
+      const box = (id: string) => page.evaluate((i) => window.__figtree!.box(i), id);
+      expect(await box("tb-search")).toEqual({ x: 52, y: 12, width: 216, height: 32 });
+      expect(await box("list")).toEqual({ x: 40, y: 700, width: 360, height: 194 });
+      const tall = (await box("cell-tall"))!;
+      expect([tall.x, tall.y, tall.width, tall.height].map((v) => Math.round(v * 100) / 100)).toEqual([241.33, 12, 106.67, 236]);
+      let img = await frame(page);
+      expectColor(await worldPixel(page, img, 595, 811), [34, 197, 94], "grid cell a before the gap edit");
+      expectColor(await worldPixel(page, img, 60, 648), [249, 115, 22], "avatar before the padding edit");
+      expectColor(await worldPixel(page, img, 352, 634), [255, 255, 255], "above the centered button");
+
+      // Gap: three 96 px columns with 24 px gutters; cell a now ends at x = 588.
+      let r = await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "gallery", props: { columnGap: 24 } }]));
+      expect(r).toEqual({ affected: ["gallery"] });
+      // The frame plus the cells that moved or resized, nothing else.
+      expect(await page.evaluate(() => window.__figtree!.bridge.lastCompiled)).toBe(5);
+      img = await frame(page);
+      expectColor(await worldPixel(page, img, 595, 811), [255, 255, 255], "grid gap after the gap edit");
+      expectColor(await worldPixel(page, img, 560, 811), [34, 197, 94], "grid cell a after the gap edit");
+      expectColor(await worldPixel(page, img, 660, 811), [234, 179, 8], "grid cell b after the gap edit");
+
+      // Padding: the avatar moves 28 px right.
+      r = await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "toolbar", props: { padding: { top: 12, right: 12, bottom: 12, left: 40 } } }]));
+      expect("affected" in r).toBe(true);
+      img = await frame(page);
+      expectColor(await worldPixel(page, img, 60, 648), [255, 255, 255], "toolbar padding after the edit");
+      expectColor(await worldPixel(page, img, 96, 648), [249, 115, 22], "avatar after the padding edit");
+
+      // Alignment: flex-start moves the 24 px button to the top of the content box.
+      await page.evaluate(() => window.__figtree!.apply([{ type: "updateProps", id: "toolbar", props: { alignItems: "flex-start" } }]));
+      img = await frame(page);
+      expectColor(await worldPixel(page, img, 352, 634), [24, 24, 27], "button after align-items: flex-start");
+      expect((await box("tb-button"))!.y).toBe(12);
+    });
   });
 }
 
@@ -108,7 +156,7 @@ test("backends agree on the sample document", async ({ page }) => {
 test("lists layers and inspects a selected node's CSS", async ({ page }) => {
   await openEditor(page, "webgl2");
   const layers = page.getByTestId("layers");
-  await expect(layers.locator("button[data-node]")).toHaveCount(32);
+  await expect(layers.locator("button[data-node]")).toHaveCount(45);
   // The text node is stored but not rendered yet, and says so.
   await expect(layers.locator('button[data-node="title"] [aria-label="has unsupported features"]')).toHaveCount(1);
   await layers.locator('button[data-node="shapes"]').click();
@@ -120,4 +168,11 @@ test("lists layers and inspects a selected node's CSS", async ({ page }) => {
   await page.mouse.click(box.x + c.x, box.y + c.y);
   await expect(layers.locator('button[data-node="star"]')).toHaveClass(/bg-sky-100/);
   await expect(page.getByTestId("css")).toContainText("width: 88px;");
+  // The inspector shows the computed layout box of a grid item and the frame's padding.
+  await layers.locator('button[data-node="cell-tall"]').click();
+  await expect(page.getByTestId("box")).toContainText("x241.33y12w106.67h236");
+  await expect(page.getByTestId("css")).toContainText("align-self: stretch;");
+  await layers.locator('button[data-node="gallery"]').click();
+  await expect(page.getByTestId("box")).toContainText("padding12 12 12 12");
+  await expect(page.getByTestId("css")).toContainText("grid-template-columns: repeat(3, 1fr);");
 });

@@ -2,7 +2,7 @@
 
 import { multiply, scaling, translation, type Mat2D } from "@fig-tree/geometry";
 import { Renderer, Scene, backendFromSearch, type FrameStats } from "@fig-tree/renderer";
-import { CommandError, SceneBridge, cssDeclarations, type Command, type FigDocument, type NodeType } from "@fig-tree/document";
+import { CommandError, SceneBridge, cssDeclarations, type Command, type ComputedBox, type FigDocument, type NodeType } from "@fig-tree/document";
 import {
   Circle,
   Component,
@@ -21,8 +21,8 @@ import {
   Type,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildSampleDocument } from "./sample-document";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildLayoutDocument, buildSampleDocument } from "./sample-document";
 
 const ICONS: Record<NodeType, LucideIcon> = {
   page: File,
@@ -74,6 +74,8 @@ export interface EditorHarness {
   finish(): Promise<void>;
   /** Sets the view: world-to-canvas scale and translation. */
   setView(scale: number, x: number, y: number): void;
+  /** A node's computed layout box (relative to its parent), or null. */
+  box(id: string): { x: number; y: number; width: number; height: number } | null;
 }
 
 /** Layer rows shown in the dev panel; large documents are truncated. */
@@ -106,12 +108,28 @@ function layersOf(doc: FigDocument, bridge: SceneBridge): Layer[] {
   return out;
 }
 
+const fmt = (v: number): string => String(Math.round(v * 100) / 100);
+
+/** The computed box as inspector rows: position relative to the parent, size, and non-zero padding and border. */
+function boxRows(b: ComputedBox): [string, string][] {
+  const rows: [string, string][] = [
+    ["x", fmt(b.x)],
+    ["y", fmt(b.y)],
+    ["w", fmt(b.width)],
+    ["h", fmt(b.height)],
+  ];
+  const sides = (e: ComputedBox["padding"]): string => [e.top, e.right, e.bottom, e.left].map(fmt).join(" ");
+  if (b.padding.top || b.padding.right || b.padding.bottom || b.padding.left) rows.push(["padding", sides(b.padding)]);
+  if (b.border.top || b.border.right || b.border.bottom || b.border.left) rows.push(["border", sides(b.border)]);
+  return rows;
+}
+
 /** Editor shell: the sample document rendered through the document bridge, a layer tree and a small inspector. */
 export function Editor() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [layers, setLayers] = useState<Layer[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [inspect, setInspect] = useState<{ css: Record<string, string>; unsupported: readonly string[] } | null>(null);
+  const [inspect, setInspect] = useState<{ css: Record<string, string>; box: ComputedBox | undefined; unsupported: readonly string[] } | null>(null);
   const [status, setStatus] = useState("loading");
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -119,9 +137,9 @@ export function Editor() {
 
   useEffect(() => {
     const canvas = canvasRef.current!;
-    const grid = new URLSearchParams(window.location.search).get("doc") === "grid10k";
-    const doc = grid ? buildGridDocument() : buildSampleDocument();
-    const bounds = grid ? GRID_BOUNDS : SAMPLE_BOUNDS;
+    const which = new URLSearchParams(window.location.search).get("doc");
+    const doc = which === "grid10k" ? buildGridDocument() : which === "layout10k" ? buildLayoutDocument() : buildSampleDocument();
+    const bounds = which === "grid10k" || which === "layout10k" ? GRID_BOUNDS : SAMPLE_BOUNDS;
     const scene = new Scene();
     const bridge = new SceneBridge(doc, scene);
     const user = doc.actor("local-user");
@@ -252,6 +270,10 @@ export function Editor() {
           view = [scale, 0, 0, scale, x, y];
           schedule();
         },
+        box(id) {
+          const b = bridge.box(id);
+          return b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null;
+        },
       };
     })().catch((err: unknown) => setError(String(err)));
 
@@ -280,7 +302,7 @@ export function Editor() {
       setInspect(null);
       return;
     }
-    setInspect({ css: cssDeclarations(ctx.doc, selected), unsupported: [...(ctx.bridge.unsupported.get(selected) ?? [])] });
+    setInspect({ css: cssDeclarations(ctx.doc, selected), box: ctx.bridge.box(selected), unsupported: [...(ctx.bridge.unsupported.get(selected) ?? [])] });
   }, [selected, layers]);
 
   const fitView = useCallback(() => docRef.current?.fit(), []);
@@ -332,6 +354,19 @@ export function Editor() {
           {error && <p className="absolute left-3 top-3 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{error}</p>}
         </main>
         <aside className="w-64 shrink-0 overflow-y-auto border-l border-neutral-200 bg-white p-3 text-[12px]" aria-label="Inspector">
+          {inspect?.box && (
+            <>
+              <h2 className="pb-1 text-xs font-medium text-neutral-500">Layout</h2>
+              <dl className="mb-3 grid grid-cols-[auto_1fr] gap-x-3 font-mono text-[11px] leading-5 text-neutral-700" data-testid="box">
+                {boxRows(inspect.box).map(([k, v]) => (
+                  <Fragment key={k}>
+                    <dt className="text-neutral-400">{k}</dt>
+                    <dd>{v}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+            </>
+          )}
           <h2 className="pb-1 text-xs font-medium text-neutral-500">CSS</h2>
           {inspect ? (
             <>

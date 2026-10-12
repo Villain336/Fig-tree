@@ -3,7 +3,8 @@ import { FigDocument, seededRandom, type Command, type Paint } from "@fig-tree/d
 /**
  * The document the editor opens at `/`: frames with radii and clipping,
  * solid and gradient paint stacks, aligned strokes, nested groups, every
- * shape type and a text node (stored, not rendered until the text module).
+ * shape type and a text node (stored, not rendered until the text module),
+ * plus auto-layout (flexbox) and grid frames laid out by the layout engine.
  * Ids are fixed so tests can address nodes; e2e/editor.spec.ts knows the
  * coordinates.
  */
@@ -24,7 +25,7 @@ const radial = (...colors: ReturnType<typeof rgb>[]): Paint => ({
   stops: colors.map((color, i) => ({ position: i / (colors.length - 1), color })),
 });
 
-export const SAMPLE_BOUNDS = { x: 0, y: 0, width: 880, height: 600 };
+export const SAMPLE_BOUNDS = { x: 0, y: 0, width: 880, height: 920 };
 
 export function sampleCommands(page: string): Command[] {
   return [
@@ -129,6 +130,102 @@ export function sampleCommands(page: string): Command[] {
     },
     { type: "createNode", node: { id: "sun", type: "ellipse", props: { name: "Sun", x: 180, y: 60, width: 220, height: 220, fills: [radial(rgb(251, 146, 60), rgb(220, 38, 38))] } }, parent: "clip" },
     { type: "createNode", node: { id: "hill", type: "rectangle", props: { name: "Hill", x: -40, y: 140, width: 300, height: 120, rotation: -12, cornerRadius: 60, fills: [solid(22, 163, 74)] } }, parent: "clip" },
+
+    // Auto layout (flexbox): a toolbar row with fixed, filling and centered children.
+    {
+      type: "createNode",
+      node: {
+        id: "toolbar",
+        type: "frame",
+        props: {
+          name: "Toolbar",
+          x: 40,
+          y: 620,
+          width: 360,
+          height: 56,
+          cornerRadius: 14,
+          fills: [solid(255, 255, 255)],
+          display: "flex",
+          alignItems: "center",
+          columnGap: 8,
+          padding: { top: 12, right: 12, bottom: 12, left: 12 },
+        },
+      },
+      parent: page,
+    },
+    { type: "createNode", node: { id: "tb-avatar", type: "ellipse", props: { name: "Avatar", width: 32, height: 32, fills: [solid(249, 115, 22)] } }, parent: "toolbar" },
+    { type: "createNode", node: { id: "tb-search", type: "rectangle", props: { name: "Search", width: 40, height: 32, widthMode: "fill", cornerRadius: 8, fills: [solid(228, 228, 231)] } }, parent: "toolbar" },
+    { type: "createNode", node: { id: "tb-button", type: "rectangle", props: { name: "Button", width: 72, height: 24, cornerRadius: 12, fills: [solid(24, 24, 27)] } }, parent: "toolbar" },
+
+    // Auto layout, vertical and hugging its content: rows stretch across it.
+    {
+      type: "createNode",
+      node: {
+        id: "list",
+        type: "frame",
+        props: {
+          name: "List",
+          x: 40,
+          y: 700,
+          width: 360,
+          height: 100,
+          heightMode: "hug",
+          cornerRadius: 14,
+          fills: [solid(255, 255, 255)],
+          display: "flex",
+          flexDirection: "column",
+          rowGap: 10,
+          padding: { top: 12, right: 12, bottom: 12, left: 12 },
+        },
+      },
+      parent: page,
+    },
+    ...[0, 1, 2].map(
+      (i): Command => ({
+        type: "createNode",
+        node: { id: `row-${i}`, type: "rectangle", props: { name: `Row ${i + 1}`, width: 100, height: 40 + i * 10, widthMode: "fill", cornerRadius: 8, fills: [solid(14 + i * 60, 165, 233 - i * 50)] } },
+        parent: "list",
+      }),
+    ),
+
+    // CSS grid: three 1fr columns, two 1fr rows; one cell spans two columns, one spans two rows.
+    {
+      type: "createNode",
+      node: {
+        id: "gallery",
+        type: "frame",
+        props: {
+          name: "Gallery",
+          x: 480,
+          y: 620,
+          width: 360,
+          height: 260,
+          cornerRadius: 14,
+          fills: [solid(255, 255, 255)],
+          display: "grid",
+          gridTemplateColumns: [{ type: "repeat", count: 3, tracks: [{ type: "fr", value: 1 }] }],
+          gridTemplateRows: [{ type: "fr", value: 1 }, { type: "fr", value: 1 }],
+          rowGap: 8,
+          columnGap: 8,
+          padding: { top: 12, right: 12, bottom: 12, left: 12 },
+        },
+      },
+      parent: page,
+    },
+    ...(
+      [
+        ["cell-wide", { gridColumn: { start: { span: 2 }, end: "auto" } }, [139, 92, 246]],
+        ["cell-tall", { gridRow: { start: { span: 2 }, end: "auto" } }, [236, 72, 153]],
+        ["cell-a", {}, [34, 197, 94]],
+        ["cell-b", {}, [234, 179, 8]],
+      ] as const
+    ).map(
+      ([id, placement, [r, g, b]]): Command => ({
+        type: "createNode",
+        node: { id, type: "rectangle", props: { name: id, width: 10, height: 10, widthMode: "fill", heightMode: "fill", cornerRadius: 6, fills: [solid(r, g, b)], ...placement } },
+        parent: "gallery",
+      }),
+    ),
   ];
 }
 
@@ -175,3 +272,34 @@ export function buildGridDocument(): FigDocument {
 }
 
 export const GRID_BOUNDS = { x: 0, y: 0, width: 5980, height: 3980 };
+
+/**
+ * A 10,000-node document laid out by the layout engine (`/?doc=layout10k`):
+ * 100 frames, alternately wrapping flex rows and 10-column grids, of 99
+ * rectangles each. Same ids as the grid document.
+ */
+export function buildLayoutDocument(): FigDocument {
+  const doc = FigDocument.create({ random: seededRandom(10_001), clientId: 1, name: "Layout", pageName: "Layout" });
+  const page = doc.pages[0]!;
+  const commands: Command[] = [{ type: "updateProps", id: page, props: { backgroundColor: rgb(238, 238, 234) } }];
+  for (let f = 0; f < 100; f++) {
+    const container =
+      f % 2
+        ? { display: "flex" as const, flexWrap: "wrap" as const, alignItems: "center" as const, rowGap: 6, columnGap: 6 }
+        : { display: "grid" as const, gridTemplateColumns: [{ type: "repeat" as const, count: 10, tracks: [{ type: "fr" as const, value: 1 }] }], rowGap: 4, columnGap: 4 };
+    commands.push({
+      type: "createNode",
+      node: { id: `f${f}`, type: "frame", props: { name: `Frame ${f + 1}`, x: (f % 10) * 600, y: Math.floor(f / 10) * 400, width: 580, height: 380, cornerRadius: 8, fills: [solid(255, 255, 255)], padding: { top: 10, right: 10, bottom: 10, left: 10 }, ...container } },
+      parent: page,
+    });
+    for (let i = 0; i < 99; i++) {
+      commands.push({
+        type: "createNode",
+        node: { id: `n${f}-${i}`, type: i % 3 === 0 ? "ellipse" : "rectangle", props: { width: 40 + (i % 7) * 3, height: 20 + (i % 5) * 4, fills: [solid((f * 7) % 255, (i * 13) % 255, 160)] } },
+        parent: `f${f}`,
+      });
+    }
+  }
+  doc.apply(commands, doc.actor("sample", "system"));
+  return doc;
+}

@@ -88,8 +88,72 @@ for (const backend of backends) {
   });
 }
 
+interface LayoutResult {
+  backend: string;
+  edit: string;
+  updateMedianMs: number;
+  updateMaxMs: number;
+  compiledMedian: number;
+  frameCpuMedianMs: number;
+  loadMs: number;
+}
+
+const layoutResults: LayoutResult[] = [];
+
+for (const backend of backends) {
+  test(`layout edits on a 10k-node auto-layout document (${backend})`, async ({ page }) => {
+    const t0 = Date.now();
+    await page.goto(`/?renderer=${backend}&doc=layout10k`);
+    await page.waitForFunction(() => window.__figtree !== undefined, null, { timeout: 300_000 });
+    const loadMs = Date.now() - t0;
+    expect(await page.evaluate(() => window.__figtree!.doc.tree.size)).toBe(10_001);
+    await page.evaluate(() => window.__figtree!.setView(1.5, -1200, -800));
+    for (const edit of ["child width", "frame gap", "frame padding"] as const) {
+      const samples: { update: number; compiled: number; frameCpu: number }[] = await page.evaluate(async (edit) => {
+        const f = window.__figtree!;
+        f.renderFrame();
+        await f.finish();
+        const out: { update: number; compiled: number; frameCpu: number }[] = [];
+        for (let k = 0; k < 21; k++) {
+          const frame = `f${23 + (k % 2)}`;
+          const command =
+            edit === "child width" ? { type: "updateProps", id: `n${23 + (k % 2)}-42`, props: { width: 30 + k } }
+            : edit === "frame gap" ? { type: "updateProps", id: frame, props: { columnGap: 4 + k, rowGap: 4 + (k % 5) } }
+            : { type: "updateProps", id: frame, props: { padding: { top: 10, right: 10, bottom: 10, left: 10 + k } } };
+          const start = performance.now();
+          const r = f.apply([command]);
+          const update = performance.now() - start;
+          if ("error" in r) throw new Error(r.error);
+          const compiled = f.bridge.lastCompiled;
+          const stats = f.renderFrame();
+          await f.finish();
+          out.push({ update, compiled, frameCpu: stats.cpuMs });
+        }
+        return out;
+      }, edit);
+      const result: LayoutResult = {
+        backend,
+        edit,
+        updateMedianMs: median(samples.map((s) => s.update)),
+        updateMaxMs: Math.max(...samples.map((s) => s.update)),
+        compiledMedian: median(samples.map((s) => s.compiled)),
+        frameCpuMedianMs: median(samples.map((s) => s.frameCpu)),
+        loadMs,
+      };
+      layoutResults.push(result);
+      console.log(
+        `[layout-bench] ${backend} ${edit}: update (command + layout + bridge) median ${result.updateMedianMs.toFixed(2)} ms (max ${result.updateMaxMs.toFixed(2)}), ` +
+          `nodes recompiled median ${result.compiledMedian}, next frame cpu median ${result.frameCpuMedianMs.toFixed(1)} ms, page load ${loadMs} ms`,
+      );
+      // An edit relays out one frame: at most its 100 nodes are recompiled.
+      expect(result.compiledMedian).toBeLessThanOrEqual(100);
+      expect(result.updateMedianMs, "applying a layout-affecting update").toBeLessThan(16);
+    }
+  });
+}
+
 test.afterAll(() => {
   const dir = join(__dirname, "..", "test-results");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "document-bench.json"), JSON.stringify(results, null, 2));
+  writeFileSync(join(dir, "document-bench.json"), JSON.stringify({ updates: results, layout: layoutResults }, null, 2));
 });

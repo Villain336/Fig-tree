@@ -28,6 +28,7 @@ interface EditorHarness {
   renderFrame(): { cpuMs: number };
   finish(): Promise<void>;
   setView(scale: number, x: number, y: number): void;
+  box(id: string): { x: number; y: number; width: number; height: number } | null;
 }
 
 interface Window {
