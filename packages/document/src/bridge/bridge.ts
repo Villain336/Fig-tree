@@ -1,13 +1,13 @@
 import { Path, inflateRect, roundedRectPath, type Mat2D } from "@fig-tree/geometry";
 import type { Color, GlyphRun, Paint as RenderPaint, Scene, SceneNode, Stroke } from "@fig-tree/renderer";
-import type { FontRegistry } from "@fig-tree/text";
+import { SYNTHETIC_OBLIQUE_SKEW, syntheticBoldStrength, type FontRegistry } from "@fig-tree/text";
 import type { DocumentChange, FigDocument } from "../document";
 import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
 import { boxMatrix } from "../transform";
 import { geometryKey, outlinePath, regionPaths, strokeOutline } from "./geometry";
 import { DocumentLayout, type ComputedBox } from "./layout";
 import { toRenderPaint } from "./paints";
-import { SYNTHETIC_OBLIQUE_SKEW, glyphSource, syntheticBoldStrength } from "./text";
+import { glyphSource } from "./text";
 
 /**
  * Projects one page of a document into a renderer {@link Scene} and keeps

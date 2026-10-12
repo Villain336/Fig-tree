@@ -375,7 +375,7 @@ function leadingBox(m: FontMetricsPx, lineHeight: number | null): [number, numbe
     const half = Math.floor(m.lineGap / 2);
     return [m.ascent + half, m.descent + m.lineGap - half];
   }
-  const L = Math.floor(lineHeight * 64) / 64;
+  const L = Math.floor(lineHeight * 64 + 1e-6) / 64;
   const half = Math.floor((L - (m.ascent + m.descent)) / 2);
   const a = m.ascent + half;
   return [a, L - a];
@@ -414,12 +414,13 @@ function buildLine(
   let drawEnd = e;
   while (drawEnd < b.end && flags[drawEnd]! & (CHAR_PRESERVED_SPACE) && !(flags[drawEnd]! & CHAR_FORCED_BREAK)) drawEnd++;
 
-  // Advances with tab stops resolved.
+  // Line edges inside a word are shaped on their own; advances with tab stops resolved.
+  const local = lineShaping(sp, s, drawEnd);
   const tabInterval = sp.spaceAdvance * style.tabSize;
   const adv = new Float64Array(drawEnd - s);
   let x = indent;
   for (let i = s; i < drawEnd; i++) {
-    let w = sp.advance[i]!;
+    let w = local.advance[i - s]!;
     if (Number.isNaN(w)) w = tabAdvance(x, tabInterval, sp.tabMinimum);
     adv[i - s] = w;
     x += w;
@@ -433,6 +434,23 @@ function buildLine(
       contentWidth += adv[e - s]!;
       e++;
     }
+  }
+  // Chromium sizes the text of each inline item on a line (a style run at one bidi
+  // level) in whole layout units, 1/64 px rounded up; the slack follows the item's
+  // text on its visual right.
+  const fragments: { anchor: number; slack: number }[] = [];
+  for (let a = s; a < e; ) {
+    const span = sp.prepared.span[a];
+    const level = sp.levels[a];
+    let w = 0;
+    let z = a;
+    for (; z < e && sp.prepared.span[z] === span && sp.levels[z] === level; z++) w += Number.isNaN(adv[z - s]!) ? 0 : adv[z - s]!;
+    const slack = Math.ceil(w * 64 - 1e-6) / 64 - w;
+    if (slack > 0) {
+      fragments.push({ anchor: level! & 1 ? a : z - 1, slack });
+      contentWidth += slack;
+    }
+    a = z;
   }
 
   // Hyphen, and ellipsis truncation: graphemes from `truncateAt` on keep their
@@ -499,11 +517,10 @@ function buildLine(
   for (let i = drawEnd - 1; i >= s && isSpaceFlag(flags[i]!, false); i--) levels[i - s] = sp.baseLevel;
   const runs: VisualRun[] = [];
   for (let i = s; i < drawEnd; ) {
-    const itemIndex = sp.itemOf[i]!;
-    const item = sp.items[itemIndex]!;
+    const item = local.item[i - s]!;
     const level = levels[i - s]!;
     let j = i + 1;
-    while (j < drawEnd && sp.itemOf[j] === itemIndex && levels[j - s] === level) j++;
+    while (j < drawEnd && local.item[j - s] === item && levels[j - s] === level) j++;
     runs.push({ item, start: i, end: j, level });
     i = j;
   }
@@ -564,7 +581,7 @@ function buildLine(
   let hang = 0;
   for (let i = e; i < truncateAt && i < drawEnd; i++) hang += adv[i - s]!;
   let pen = rtlPara ? left - hang : left;
-  const spacing = (cs: number): number => (sp.advance[cs]! || 0) - sp.glyphAdvance[cs]! + (opportunities[cs - s] ? expansion : 0) + (Number.isNaN(sp.advance[cs]!) ? adv[cs - s]! : 0);
+  const spacing = (cs: number): number => (local.advance[cs - s]! || 0) - local.glyphAdvance[cs - s]! + (opportunities[cs - s] ? expansion : 0) + (Number.isNaN(local.advance[cs - s]!) ? adv[cs - s]! : 0);
   for (const r of runs) {
     const item = r.item;
     const rtl = (r.level & 1) === 1;
@@ -578,7 +595,7 @@ function buildLine(
       for (let k = 0; k < g.gids.length; k++) {
         const c = g.clusters[k]!;
         if (c < r.start || c >= r.end) continue;
-        const cs = sp.clusterStart[c]!;
+        const cs = local.clusterStart[c - s]!;
         if (cs !== prev) {
           if (prev >= 0) {
             if (!rtl) pen += spacing(prev);
@@ -598,7 +615,7 @@ function buildLine(
     } else {
       // No glyphs (tabs, forced breaks, characters no font has): advances only.
       const order = [];
-      for (let i = r.start; i < r.end; i++) if (sp.clusterStart[i] === i) order.push(i);
+      for (let i = r.start; i < r.end; i++) if (local.clusterStart[i - s] === i) order.push(i);
       if (rtl) order.reverse();
       for (const i of order) {
         const w = (adv[i - s] ?? 0) + (opportunities[i - s] ? expansion : 0);
@@ -630,7 +647,7 @@ function buildLine(
     // Grapheme boxes: each cluster's box split evenly over its graphemes.
     for (const [cs, bl, br] of boxes) {
       let ce = cs + 1;
-      while (ce < r.end && sp.clusterStart[ce] === cs) ce++;
+      while (ce < r.end && local.clusterStart[ce - s] === cs) ce++;
       const gs: number[] = [];
       for (let i = cs; i < ce; i++) if (sp.graphemes[i] || i === cs) gs.push(i);
       const w = br - bl;
@@ -640,6 +657,7 @@ function buildLine(
         chars.push(rtl ? { index: gi, left: br - bb, right: br - a, span: item.span, rtl } : { index: gi, left: bl + a, right: bl + bb, span: item.span, rtl });
       });
     }
+    for (const f of fragments) if (f.anchor >= r.start && f.anchor < r.end) pen += f.slack;
   }
   // Hyphen or ellipsis at the end (visual right in LTR, left in RTL).
   // The ellipsis sits after the last drawn grapheme (before the first one in RTL).
@@ -705,6 +723,41 @@ function buildLine(
     hyphenated: hyphenInfo !== null,
     hidden,
   };
+}
+
+/**
+ * The paragraph's shaping as one line sees it, for `[s, end)`: where the
+ * line starts or ends inside a word at a point HarfBuzz marks unsafe to
+ * break (kerning, a ligature or contextual shaping across it), that part
+ * is shaped on its own, as browsers re-shape line edges.
+ */
+function lineShaping(sp: ShapedParagraph, s: number, end: number): { item: Item[]; advance: Float64Array; glyphAdvance: Float64Array; clusterStart: Int32Array } {
+  const n = end - s;
+  const item: Item[] = new Array(n);
+  const advance = sp.advance.slice(s, end);
+  const glyphAdvance = sp.glyphAdvance.slice(s, end);
+  const clusterStart = sp.clusterStart.slice(s, end);
+  for (let i = 0; i < n; i++) item[i] = sp.items[sp.itemOf[s + i]!]!;
+  if (n === 0) return { item, advance, glyphAdvance, clusterStart };
+  const apply = (itemIndex: number, a: number, b: number): void => {
+    const r = sp.reshape(itemIndex, a, b);
+    for (let i = a; i < b; i++) {
+      item[i - s] = r.item;
+      advance[i - s] = r.advance[i - a]!;
+      glyphAdvance[i - s] = r.glyphAdvance[i - a]!;
+      clusterStart[i - s] = r.clusterStart[i - a]!;
+    }
+  };
+  const first = sp.itemOf[s]!;
+  const last = sp.itemOf[end - 1]!;
+  const cutStart = sp.unsafeToBreak(s);
+  const cutEnd = sp.unsafeToBreak(end);
+  if (cutStart && cutEnd && first === last) apply(first, s, end);
+  else {
+    if (cutStart) apply(first, s, Math.min(sp.items[first]!.end, end));
+    if (cutEnd) apply(last, Math.max(sp.items[last]!.start, s), end);
+  }
+  return { item, advance, glyphAdvance, clusterStart };
 }
 
 function shapeEllipsis(sp: ShapedParagraph): { font: FontInstance; gids: number[]; advances: number[]; width: number; box: BoxMetrics } | null {

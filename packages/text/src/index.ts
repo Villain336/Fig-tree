@@ -23,4 +23,5 @@ export { TextBlock, ceil64, type TextBlockInput, type TextBlockLayout, type Plac
 export { lineBreaks, NO_BREAK, ALLOW_BREAK, MANDATORY_BREAK, type LineBreakOptions } from "./unicode/linebreak";
 export { graphemeBoundaries, graphemeStarts } from "./unicode/grapheme";
 export { firstStrongDirection } from "./unicode/direction";
+export { syntheticBoldStrength, SYNTHETIC_OBLIQUE_SKEW } from "./synthetic";
 export * as unicode from "./unicode/props";

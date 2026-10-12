@@ -187,7 +187,7 @@ export class ShapedParagraph {
       const cp = codePointAt(text, i);
       const span = prepared.span[i]!;
       const special = (prepared.flags[i]! & (CHAR_FORCED_BREAK | CHAR_TAB)) !== 0;
-      const match = special ? (this.spanBoxes[span]!.match ?? null) : fontAt(span, cp);
+      const match: MatchedFont | null = special ? (this.spanBoxes[span]!.match ?? null) : cur && cur.span === span && !cur.special && isDefaultIgnorable(cp) ? cur.match : fontAt(span, cp);
       const level = this.levels[i]!;
       const script = scripts[i]!;
       if (!cur || cur.span !== span || cur.level !== level || cur.script !== script || cur.match?.typeface !== match?.typeface || cur.special || special) {
@@ -251,6 +251,30 @@ export class ShapedParagraph {
       for (let i = start; i < end; i++) this.advance[i] = flags[i]! & CHAR_TAB ? NaN : 0;
       return;
     }
+    this.clusterAdvances(glyphs, start, end, scale, st, { advance: this.advance, glyphAdvance: this.glyphAdvance, clusterStart: this.clusterStart, offset: 0 });
+  }
+
+  /**
+   * Cluster starts, advances (glyph advances plus letter and word spacing)
+   * and glyph-only advances of `text[start, end)` shaped as `glyphs`,
+   * written to arrays indexed from `out.offset`. Each cluster's advance is
+   * stored at its first code unit; the others get 0.
+   */
+  private clusterAdvances(
+    glyphs: ShapedGlyphs | null,
+    start: number,
+    end: number,
+    scale: number,
+    st: TextStyle,
+    out: { advance: Float64Array; glyphAdvance: Float64Array; clusterStart: Int32Array; offset: number },
+  ): void {
+    const flags = this.prepared.flags;
+    const o = out.offset;
+    for (let i = start; i < end; i++) {
+      out.advance[i - o] = 0;
+      out.glyphAdvance[i - o] = 0;
+      out.clusterStart[i - o] = i;
+    }
     if (glyphs) {
       // Cluster starts: every code unit belongs to the largest glyph cluster value at or before it.
       const isStart = new Uint8Array(end - start);
@@ -262,21 +286,59 @@ export class ShapedParagraph {
       let cs = start;
       for (let i = start; i < end; i++) {
         if (isStart[i - start]) cs = i;
-        this.clusterStart[i] = cs;
+        out.clusterStart[i - o] = cs;
       }
       for (let g = 0; g < glyphs.clusters.length; g++) {
         const c = glyphs.clusters[g]!;
-        if (c >= start && c < end) this.advance[this.clusterStart[c]!] = this.advance[this.clusterStart[c]!]! + glyphs.advances[g]! * scale;
+        if (c >= start && c < end) {
+          const at = out.clusterStart[c - o]! - o;
+          out.advance[at] = out.advance[at]! + glyphs.advances[g]! * scale;
+        }
       }
-      for (let i = start; i < end; i++) this.glyphAdvance[i] = this.advance[i]!;
+      for (let i = start; i < end; i++) out.glyphAdvance[i - o] = out.advance[i - o]!;
     }
     // Letter spacing after every grapheme, word spacing on word separators (CSS Text 3 §8).
     const ls = st.letterSpacing;
     const ws = st.wordSpacing;
     for (let i = start; i < end; i++) {
-      if (ls !== 0 && this.graphemes[i] && !(flags[i]! & CHAR_SOFT_HYPHEN)) this.advance[this.clusterStart[i]!] = this.advance[this.clusterStart[i]!]! + ls;
-      if (ws !== 0 && flags[i]! & CHAR_WORD_SEPARATOR) this.advance[this.clusterStart[i]!] = this.advance[this.clusterStart[i]!]! + ws;
+      const at = out.clusterStart[i - o]! - o;
+      if (ls !== 0 && this.graphemes[i] && !(flags[i]! & CHAR_SOFT_HYPHEN)) out.advance[at] = out.advance[at]! + ls;
+      if (ws !== 0 && flags[i]! & CHAR_WORD_SEPARATOR) out.advance[at] = out.advance[at]! + ws;
     }
+  }
+
+  /**
+   * Whether breaking a line before `pos` cuts through shaping (HarfBuzz's
+   * unsafe-to-break flag on the glyph that starts there, or a cluster that
+   * spans it): the text on either side then needs shaping on its own, as
+   * browsers re-shape line edges (no kerning or ligature across a break).
+   */
+  unsafeToBreak(pos: number): boolean {
+    if (pos <= 0 || pos >= this.length) return false;
+    const item = this.items[this.itemOf[pos]!]!;
+    if (item.start === pos || !item.glyphs) return false;
+    if (this.clusterStart[pos] !== pos) return true;
+    const g = item.glyphs;
+    for (let k = 0; k < g.clusters.length; k++) if (g.clusters[k] === pos && g.flags[k]! & 1) return true;
+    return false;
+  }
+
+  /**
+   * `text[start, end)` (within one item) shaped on its own: the item for a
+   * line that starts or ends inside a word, with the advances of its code
+   * units (indexed from `start`).
+   */
+  reshape(itemIndex: number, start: number, end: number): { item: Item; advance: Float64Array; glyphAdvance: Float64Array; clusterStart: Int32Array } {
+    const item = this.items[itemIndex]!;
+    const st = this.input.spans[item.span]!.style;
+    let glyphs: ShapedGlyphs | null = null;
+    if (item.font) {
+      const shaped = shapeItem(this.prepared.text.slice(start, end), 0, end - start, item.font, (item.level & 1) === 1, item.script, st.language, featuresFor(st));
+      glyphs = { ...shaped, clusters: shaped.clusters.map((c) => c + start) };
+    }
+    const out = { advance: new Float64Array(end - start), glyphAdvance: new Float64Array(end - start), clusterStart: new Int32Array(end - start), offset: start };
+    this.clusterAdvances(glyphs, start, end, item.scale, st, out);
+    return { item: { ...item, start, end, glyphs }, ...out };
   }
 
   get length(): number {
@@ -345,25 +407,81 @@ export function tabAdvance(x: number, interval: number, minimum: number): number
   return next - x;
 }
 
-/** Script of every code unit, with Common and Inherited resolved to the surrounding script (UAX #24 §5.2, simplified). */
+/**
+ * Default ignorable code points (Unicode DerivedCoreProperties
+ * Default_Ignorable_Code_Point): they draw nothing, so they never pick a
+ * fallback font; they shape with the font around them, which keeps
+ * kerning and ligatures across them (a soft hyphen inside a word, ZWJ).
+ */
+export function isDefaultIgnorable(cp: number): boolean {
+  return (
+    cp === 0xad ||
+    cp === 0x34f ||
+    cp === 0x61c ||
+    (cp >= 0x115f && cp <= 0x1160) ||
+    (cp >= 0x17b4 && cp <= 0x17b5) ||
+    (cp >= 0x180b && cp <= 0x180f) ||
+    (cp >= 0x200b && cp <= 0x200f) ||
+    (cp >= 0x202a && cp <= 0x202e) ||
+    (cp >= 0x2060 && cp <= 0x206f) ||
+    cp === 0x3164 ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    cp === 0xfeff ||
+    cp === 0xffa0 ||
+    (cp >= 0xfff0 && cp <= 0xfff8) ||
+    (cp >= 0x1bca0 && cp <= 0x1bca3) ||
+    (cp >= 0x1d173 && cp <= 0x1d17a) ||
+    (cp >= 0xe0000 && cp <= 0xe0fff)
+  );
+}
+
+/**
+ * Script of every code unit (UAX #24 script runs, as browsers itemize
+ * text): Common and Inherited characters take the script before them
+ * (leading ones the first real script), except that a closing paired
+ * bracket takes the script of its opening bracket, so "(b)" after Arabic
+ * text keeps its brackets with the Arabic run.
+ */
 function resolveScripts(text: string): string[] {
+  bidi ??= bidiFactory();
   const n = text.length;
   const out: string[] = new Array(n);
+  const open: { closing: string; script: string }[] = [];
   let last = "";
   for (let i = 0; i < n; ) {
     const cp = codePointAt(text, i);
     const len = cpLength(cp);
     let sc: string = scriptOf(cp);
-    if (sc === "Zyyy" || sc === "Zinh" || sc === "Zzzz") sc = last;
+    if (sc === "Zyyy" || sc === "Zinh" || sc === "Zzzz") {
+      sc = last;
+      if (len === 1) {
+        const ch = text[i]!;
+        const closing = bidi.openingToClosingBracket(ch);
+        if (closing !== null) {
+          if (open.length < 64) open.push({ closing: bidi.getCanonicalBracket(closing) ?? closing, script: last });
+        } else if (bidi.closingToOpeningBracket(ch) !== null) {
+          const canonical = bidi.getCanonicalBracket(ch) ?? ch;
+          for (let k = open.length - 1; k >= 0; k--) {
+            if (open[k]!.closing !== canonical) continue;
+            sc = open[k]!.script || last;
+            open.length = k;
+            break;
+          }
+        }
+      }
+    }
     // Han, Hiragana and Katakana share East Asian width; keep them in one run for shaping.
     else if ((sc === "Hira" || sc === "Kana") && isEastAsianFWH(cp)) sc = "Hani";
     for (let k = 0; k < len; k++) out[i + k] = sc;
-    if (sc) last = sc;
+    if (sc) {
+      // Brackets opened before the first real script take it.
+      if (!last) for (const b of open) b.script ||= sc;
+      last = sc;
+    }
     i += len;
   }
   // Leading common characters take the first real script.
-  let first = out.find((s) => s) ?? "Zyyy";
+  const first = out.find((s) => s) ?? "Zyyy";
   for (let i = 0; i < n && !out[i]; i++) out[i] = first;
-  first = "";
   return out;
 }

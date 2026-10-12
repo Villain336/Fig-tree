@@ -115,6 +115,56 @@ describe("paragraph layout", () => {
   });
 });
 
+describe("shaping across style and line boundaries (as Chromium does it)", () => {
+  const charWidth = (b: TextBlock, width: number, index: number): number => {
+    for (const line of b.layout(width).paragraphs[0]!.layout.lines) for (const c of line.chars) if (c.index === index) return c.right - c.left;
+    return NaN;
+  };
+
+  it("kerns across a soft hyphen that does not break", () => {
+    // Inter kerns "r" before "e"; an unused soft hyphen between them changes nothing.
+    expect(charWidth(block("ter\u00ade"), 400, 2)).toBeCloseTo(charWidth(block("tere"), 400, 2), 6);
+    expect(charWidth(block("tere"), 400, 2)).toBeLessThan(charWidth(block("ter"), 400, 2));
+  });
+
+  it("shapes a line that ends inside a word on its own (no kerning across the break)", () => {
+    const b = block("oxoxoxoxoxox", "", "word-break: break-all");
+    const one = b.layout(1000);
+    const narrow = b.layout(40);
+    expect(one.lineCount).toBe(1);
+    expect(narrow.lineCount).toBeGreaterThan(1);
+    const lines = narrow.paragraphs[0]!.layout.lines;
+    const first = lines[0]!;
+    const last = first.chars[first.chars.length - 1]!;
+    // "o" kerns with the "x" after it, except where the line ends between them.
+    const kerned = one.paragraphs[0]!.layout.lines[0]!.chars[last.index]!;
+    expect(last.right - last.left).toBeGreaterThan(kerned.right - kerned.left + 0.1);
+  });
+
+  it("sizes each style run on a line in whole layout units (1/64 px, rounded up)", () => {
+    const r = root();
+    const bold = parseTextStyle("font-weight: 700", r);
+    const text = "Regular bold";
+    const b = new TextBlock(fonts, { paragraphs: [{ text, spans: [{ start: 0, end: 8, style: r }, { start: 8, end: 12, style: bold }], style: DEFAULT_PARAGRAPH_STYLE, root: r }] });
+    const chars = b.layout(1000).paragraphs[0]!.layout.lines[0]!.chars;
+    // The bold run starts on the layout-unit grid, after the regular run rounded up.
+    expect((chars[8]!.left * 64) % 1).toBeCloseTo(0, 6);
+    expect(chars[8]!.left).toBeGreaterThanOrEqual(chars[7]!.right);
+    expect(chars[8]!.left - chars[7]!.right).toBeLessThan(1 / 64);
+  });
+
+  it("keeps paired brackets in the script run of their opening bracket", () => {
+    // Brackets around Latin text after an Arabic word belong to the Arabic run: no kerning with "b".
+    const t = "\u0639\u0631\u0628\u064a (b) end";
+    const css = "font-family: Inter, 'Noto Sans Arabic'";
+    const after = block(t, css);
+    const alone = block("(b) end", css);
+    const w = (b: TextBlock, i: number) => charWidth(b, 1000, i);
+    expect(w(after, 6)).toBeCloseTo(charWidth(block("b", css), 1000, 0), 6);
+    expect(w(alone, 1)).toBeLessThan(w(after, 6));
+  });
+});
+
 describe("hit-testing", () => {
   it("maps points to caret positions and back", () => {
     const text = "hello world";

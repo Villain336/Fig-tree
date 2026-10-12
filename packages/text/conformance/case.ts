@@ -331,7 +331,12 @@ export function textGraphemes(t: EngineText, cx: number, cy: number, contentWidt
           box.r = Math.max(box.r, b.r);
         }
       }
-      graphemes.push(box ? [start, k, box.l, box.top, box.r - box.l, box.bottom - box.top] : [start, k, null]);
+      if (box) {
+        // DOM rects are in layout units (1/64 px): Chromium snaps a range's edges outwards.
+        const l = Math.floor(box.l * 64 + 1e-6) / 64;
+        const r = Math.ceil(box.r * 64 - 1e-6) / 64;
+        graphemes.push([start, k, l, box.top, r - l, box.bottom - box.top]);
+      } else graphemes.push([start, k, null]);
     }
     at += nodeText.length;
   });
@@ -367,6 +372,8 @@ export interface TextComparison {
   readonly graphemes: number;
   readonly graphemesWithin1: number;
   readonly graphemesWithin001: number;
+  /** Within one layout unit (1/64 px). */
+  readonly graphemesWithinUnit: number;
   readonly words: number;
   readonly wordsWithin1: number;
   readonly lines: number;
@@ -424,6 +431,7 @@ export function compareText(sources: readonly string[], ref: TextReference, actu
   let graphemes = 0;
   let graphemesWithin1 = 0;
   let graphemesWithin001 = 0;
+  let graphemesWithinUnit = 0;
   let words = 0;
   let wordsWithin1 = 0;
   let lines = 0;
@@ -466,6 +474,7 @@ export function compareText(sources: readonly string[], ref: TextReference, actu
       if (err <= 1) graphemesWithin1++;
       else if (msgs.length < 3) msgs.push(`text ${ti} grapheme @${g.index} ${JSON.stringify(source.slice(g.index, g.index + 2))}: chromium ${fmt(g.rect)} engine ${a ? fmt(a) : "none"}`);
       if (err <= 0.01) graphemesWithin001++;
+      if (err <= 1 / 64 + 1e-3) graphemesWithinUnit++;
     }
     // Words: maximal runs of non-space graphemes on one line, compared as unions.
     for (const l of refLines) {
@@ -497,6 +506,7 @@ export function compareText(sources: readonly string[], ref: TextReference, actu
     graphemes,
     graphemesWithin1,
     graphemesWithin001,
+    graphemesWithinUnit,
     words,
     wordsWithin1,
     lines,

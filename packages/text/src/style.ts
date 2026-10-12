@@ -122,7 +122,9 @@ export const DEFAULT_PARAGRAPH_STYLE: ParagraphStyle = {
 export function computedLineHeight(style: TextStyle): number | null {
   const lh = style.lineHeight;
   if (lh.kind === "normal") return null;
-  return lh.kind === "number" ? lh.value * style.fontSize : lh.value;
+  // Chromium keeps line heights in layout units (1/64 px): a number times the font
+  // size is truncated, a length (px, em, %) is rounded when it is computed.
+  return lh.kind === "number" ? Math.floor(lh.value * style.fontSize * 64 + 1e-6) / 64 : Math.round(lh.value * 64) / 64;
 }
 
 /** Whether two styles shape and measure identically (paint and decorations aside). */
