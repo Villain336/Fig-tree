@@ -116,8 +116,7 @@ export function blockChildWidth(child: LayoutNode, cbWidth: number, cbHeight: nu
 function replacedAutoWidth(child: LayoutNode, pbH: number): number {
   const r = child.replaced!;
   if (r.width !== undefined) return r.width + pbH;
-  const ratio = r.ratio ?? (r.height ? undefined : undefined);
-  if (ratio && r.height !== undefined) return r.height * ratio + pbH;
+  if (r.ratio && r.height !== undefined) return r.height * r.ratio + pbH;
   return 300 + pbH;
 }
 

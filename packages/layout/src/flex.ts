@@ -430,7 +430,7 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
     } else {
       const { overflow, value } = splitAlignment(s.alignContent);
       const n = lines.length;
-      const dist = distribute(value, overflow === "safe", free, n, true, wrapReverse, false);
+      const dist = distribute(value, overflow === "safe", free, n, wrapReverse, false);
       start = dist.start;
       between = dist.between;
       if ((value === "stretch" || value === "normal") && free > 0) for (const l of lines) l.cross += free / n;
@@ -482,7 +482,7 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
       autoShare = free / autos;
       free = 0;
     } else {
-      const d = distribute(jc.value, jc.overflow === "safe", free, line.items.length, false, reverse, row);
+      const d = distribute(jc.value, jc.overflow === "safe", free, line.items.length, reverse, row);
       start = d.start;
       between = d.between;
     }
@@ -566,7 +566,7 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
       if (row) layout(it.node, space(it.main, it.crossFixed ? it.cross : undefined, cw, ph), true);
       else layout(it.node, space(it.cross, it.main, cw, ph, { heightIndefinite: !it.mainDefinite }), true);
       place(it.node, it.x, it.y, cw, ph);
-      it.node.out.margin = finalMargins(it, lines);
+      it.node.out.margin = { top: it.marginTop, right: it.marginRight, bottom: it.marginBottom, left: it.marginLeft };
     }
   }
 
@@ -574,13 +574,12 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
   for (const child of outOfFlow) {
     const cs = child.style;
     const jcv = splitAlignment(s.justifyContent).value;
-    const mainFrac = staticFraction(jcv, reverse, row, false);
+    const mainFrac = staticFraction(jcv, reverse, row);
     const al = resolvedAlign(cs, s).value;
     // Baselines fall back to start/end alignment (physical, as Chromium does); stretch to flex-start.
-    const crossFrac = staticFraction(al === "baseline" ? "start" : al === "last baseline" ? "end" : al === "stretch" ? "flex-start" : al, wrapReverse, !row, true);
-    const w = row ? cw : cw;
-    if (row) setStatic(child, input.left, input.top, w, contentHeight, mainFrac, crossFrac);
-    else setStatic(child, input.left, input.top, w, contentHeight, crossFrac, mainFrac);
+    const crossFrac = staticFraction(al === "baseline" ? "start" : al === "last baseline" ? "end" : al === "stretch" ? "flex-start" : al, wrapReverse, !row);
+    if (row) setStatic(child, input.left, input.top, cw, contentHeight, mainFrac, crossFrac);
+    else setStatic(child, input.left, input.top, cw, contentHeight, crossFrac, mainFrac);
   }
 
   return { height: contentHeight, firstBaseline, lastBaseline };
@@ -639,10 +638,6 @@ export function layoutFlex(node: LayoutNode, input: ContentInput): ContentResult
   function lineCrossSize(line: Line): number {
     return measureBaselines(line);
   }
-}
-
-function finalMargins(it: Item, _lines: Line[]): Edges {
-  return { top: it.marginTop, right: it.marginRight, bottom: it.marginBottom, left: it.marginLeft };
 }
 
 /**
@@ -738,7 +733,7 @@ export function resolveFlexibleLengths(
  * direction. `reverse` says the logical start is the physical end;
  * `leftRight` says `left`/`right` are meaningful (a horizontal axis).
  */
-function distribute(value: string, safe: boolean, free: number, n: number, crossAxis: boolean, reverse: boolean, leftRight: boolean): { start: number; between: number } {
+function distribute(value: string, safe: boolean, free: number, n: number, reverse: boolean, leftRight: boolean): { start: number; between: number } {
   const physicalStart = reverse ? free : 0;
   const physicalEnd = reverse ? 0 : free;
   if (safe && free < 0) return { start: physicalStart, between: 0 };
@@ -754,7 +749,7 @@ function distribute(value: string, safe: boolean, free: number, n: number, cross
     case "end":
       return { start: physicalEnd, between: 0 };
     case "left":
-      return { start: leftRight ? physicalStart : physicalStart, between: 0 };
+      return { start: physicalStart, between: 0 };
     case "right":
       return { start: leftRight ? physicalEnd : physicalStart, between: 0 };
     case "center":
@@ -770,13 +765,12 @@ function distribute(value: string, safe: boolean, free: number, n: number, cross
       if (free <= 0) return { start: free < 0 ? physicalStart : 0, between: 0 };
       return { start: free / (n + 1), between: free / (n + 1) };
     default:
-      void crossAxis;
       return { start: 0, between: 0 };
   }
 }
 
 /** Where a sole item's margin box sits in the static-position area (0 start, 0.5 center, 1 end), physically. */
-function staticFraction(value: string, reverse: boolean, horizontal: boolean, self: boolean): number {
+function staticFraction(value: string, reverse: boolean, horizontal: boolean): number {
   const { value: v } = splitAlignment(value);
   switch (v) {
     case "center":
@@ -792,11 +786,10 @@ function staticFraction(value: string, reverse: boolean, horizontal: boolean, se
     case "self-start":
       return 0;
     case "left":
-      return horizontal ? 0 : 0;
+      return 0;
     case "right":
       return horizontal ? 1 : 0;
     default:
-      void self;
       return reverse ? 1 : 0; // flex-start, normal, stretch, space-between
   }
 }

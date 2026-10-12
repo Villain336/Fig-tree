@@ -63,7 +63,7 @@ What one update costs, measured on 2026-10-12 on the machine above:
 | Where | What is timed | Median | Max |
 |---|---|---|---|
 | Node 22 (Vitest), 3 runs × 41 updates per kind | `doc.apply` (zod validation, draft, one Yjs transaction), the change event, layout (restyle of the node, relayout of its frame), the bridge recompiling the node, and `DrawList.sync` (incremental) | fill 0.20–0.23 ms, `x` 0.43–0.47 ms, `width` 0.47–0.48 ms | 5.6 ms |
-| Chromium, 9–21 updates per kind and view | `apply` through the page harness, including layout and the bridge (the draw list updates during the next frame) | 0.7–1.2 ms | 6.3 ms |
+| Chromium, 9–21 updates per kind and view, two runs | `apply` through the page harness, including layout and the bridge (the draw list updates during the next frame) | 0.7–1.4 ms | 6.6 ms |
 
 Before layout existed these were 0.13–0.30 ms in Node and 0.3–0.9 ms in Chromium. A fill edit skips layout entirely; an `x` or `width` edit restyles the shape and relays out its frame, where the other 98 shapes hit their caches. Every update still recompiles exactly one node (`bridge.lastCompiled === 1`, asserted). The test requires the median to stay under 16 ms.
 
@@ -71,10 +71,10 @@ The frame after an update renders directly, because the tile cache is invalidate
 
 | Backend | View | Frame CPU median |
 |---|---|---|
-| WebGPU | zoomed in (one frame on screen) | 0.9–1.1 ms |
-| WebGL2 | zoomed in | 1.3–1.5 ms |
-| WebGPU | overview, all 10k nodes visible | 33–37 ms (frame planning of about 11k draws, plus encoding) |
-| WebGL2 | overview | 1,080–1,130 ms (blocked on SwiftShader; see below) |
+| WebGPU | zoomed in (one frame on screen) | 0.9–1.2 ms |
+| WebGL2 | zoomed in | 1.2–1.6 ms |
+| WebGPU | overview, all 10k nodes visible | 33–50 ms (frame planning of about 11k draws, plus encoding) |
+| WebGL2 | overview | 1,080–1,160 ms (blocked on SwiftShader; see below) |
 
 At the overview, the WebGL2 frame waits on SwiftShader. Its 500 clip layers (100 clipping frames, and 400 inside strokes on ellipses, which need a clip) each resolve and composite an offscreen MSAA target. Rectangles' inside strokes need no layer since Module 2, which cut this frame from about 1,240 ms. Full-screen WebGL2 frames in `/bench` cost about the same.
 
@@ -109,11 +109,11 @@ A 10,001-node document of 100 auto-layout frames (alternately wrapping flex and 
 | Where | Edit | Median | Max | Nodes recompiled (median) |
 |---|---|---|---|---|
 | Node: command, layout and bridge, plus `DrawList.sync` | a child's width | 1.5–1.9 ms | 9–13 ms | |
-| Chromium, WebGPU / WebGL2 (`apply` through the page harness) | a child's width | 2.1 / 2.2 ms | 9.3 / 9.0 ms | 8 |
-| | a frame's gap | 2.7 / 3.0 ms | 5.7 / 8.0 ms | 99 (every child moves) |
-| | a frame's padding | 2.8 / 3.0 ms | 5.2 / 8.5 ms | 100 |
+| Chromium, WebGPU / WebGL2 (`apply` through the page harness), two runs | a child's width | 2.1–2.2 / 2.0–2.2 ms | 15.3 / 11.2 ms | 8 |
+| | a frame's gap | 2.7–2.8 / 2.6–3.0 ms | 13.7 / 8.3 ms | 99 (every child moves) |
+| | a frame's padding | 2.8–3.7 / 2.6–3.0 ms | 5.8 / 8.5 ms | 100 |
 
-The next frame, zoomed in, takes 1.2–2.6 ms of CPU. Building this document's bridge (layout and scene) takes about 1.1 s in Node, and the editor page is ready in about 2.1 s on WebGPU and 2.8 s on WebGL2. Each edit relays out one frame: other frames keep their cached layout, and nothing outside the edited frame is recompiled (asserted).
+The next frame, zoomed in, takes 1.2–2.7 ms of CPU. Building this document's bridge (layout and scene) takes about 1.1 s in Node, and the editor page is ready in about 2.1 s on WebGPU and 2.8–2.9 s on WebGL2. Each edit relays out one frame: other frames keep their cached layout, and nothing outside the edited frame is recompiled (asserted).
 
 ### What could be faster
 
