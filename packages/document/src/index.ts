@@ -32,5 +32,6 @@ export { decodeHistory, encodeHistory } from "./format/history";
 export { DEFAULT_LIMITS, readFigtree, writeFigtree, type FigtreeArchive, type ReadLimits, type ReadOptions, type WriteOptions } from "./format/zip";
 export { figtreeJsonSchema } from "./format/json-schema";
 export { SceneBridge } from "./bridge/bridge";
+export { fontAssetDescriptor, registerDocumentFonts, uploadFont } from "./bridge/fonts";
 export { DocumentLayout, type ComputedBox } from "./bridge/layout";
 export { cssDeclarations } from "./css";

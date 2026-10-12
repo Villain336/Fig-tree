@@ -6,12 +6,27 @@ export {
   FontRegistry,
   FontFaceEntry,
   instanceFor,
+  typefaceDescriptor,
   NORMAL_REQUEST,
   type FaceDescriptor,
   type FontRequest,
   type FontSource,
   type MatchedFont,
 } from "./font/registry";
+export {
+  GoogleFontsLoader,
+  GoogleFontsError,
+  googleFamilyDirectory,
+  googleFamilyFromMetadata,
+  googleFaceDescriptor,
+  parseTextProto,
+  type GoogleFamily,
+  type GoogleFontFile,
+  type GoogleFontAxis,
+  type GoogleFontsLicense,
+  type GoogleFontsOptions,
+  type TextProtoMessage,
+} from "./font/google";
 export { SCRIPT_FALLBACKS, fallbackFamilyFor } from "./ported/penpot/fallback";
 export * from "./style";
 export { parseTextStyle, parseParagraphStyle, declarations, TextCssError, type Declarations } from "./css";

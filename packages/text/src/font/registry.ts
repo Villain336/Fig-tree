@@ -37,6 +37,22 @@ export type FaceState = "unloaded" | "loading" | "loaded" | "error";
 
 let nextFaceId = 1;
 
+/**
+ * A font's own `@font-face` descriptor: its typographic family name, and
+ * its weight, style and width (for variable fonts, the ranges of the
+ * `wght` and `wdth` axes).
+ */
+export function typefaceDescriptor(typeface: Typeface): Required<Omit<FaceDescriptor, "unicodeRange">> {
+  const wght = typeface.axis("wght");
+  const wdth = typeface.axis("wdth");
+  return {
+    family: typeface.familyName,
+    weight: wght ? [wght.min, wght.max] : typeface.weight,
+    style: typeface.style,
+    stretch: wdth ? [wdth.min, wdth.max] : typeface.stretch,
+  };
+}
+
 /** A registered face: its descriptor, source and load state. */
 export class FontFaceEntry {
   readonly id = nextFaceId++;
@@ -110,6 +126,7 @@ export class FontRegistry {
     list.push(entry);
     this.families.set(key, list);
     this.version++;
+    for (const l of this.listeners) l(entry);
     return entry;
   }
 
@@ -119,14 +136,13 @@ export class FontRegistry {
    * ranges of their `wght` and `wdth` axes.
    */
   addTypeface(typeface: Typeface, descriptor: Partial<FaceDescriptor> = {}): FontFaceEntry {
-    const wght = typeface.axis("wght");
-    const wdth = typeface.axis("wdth");
+    const own = typefaceDescriptor(typeface);
     const entry = new FontFaceEntry(
       {
-        family: descriptor.family ?? typeface.familyName,
-        weight: descriptor.weight ?? (wght ? [wght.min, wght.max] : typeface.weight),
-        style: descriptor.style ?? typeface.style,
-        stretch: descriptor.stretch ?? (wdth ? [wdth.min, wdth.max] : typeface.stretch),
+        family: descriptor.family ?? own.family,
+        weight: descriptor.weight ?? own.weight,
+        style: descriptor.style ?? own.style,
+        stretch: descriptor.stretch ?? own.stretch,
         ...(descriptor.unicodeRange ? { unicodeRange: descriptor.unicodeRange } : {}),
       },
       null,
@@ -138,6 +154,7 @@ export class FontRegistry {
     list.push(entry);
     this.families.set(key, list);
     this.version++;
+    for (const l of this.listeners) l(entry);
     return entry;
   }
 
@@ -150,7 +167,11 @@ export class FontRegistry {
     return this.families.has(familyKey(family));
   }
 
-  /** Called when a face finishes loading (or fails). Returns an unsubscribe function. */
+  /**
+   * Called when a face is added or finishes loading (or fails to): text
+   * laid out before may now resolve differently. Returns an unsubscribe
+   * function.
+   */
   onLoad(listener: (entry: FontFaceEntry) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

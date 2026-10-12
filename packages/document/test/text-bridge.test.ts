@@ -5,7 +5,7 @@ import { GlyphAtlas, Scene, type SceneNode } from "@fig-tree/renderer";
 import { FontRegistry, loadHarfBuzz } from "@fig-tree/text";
 import { beforeAll, describe, expect, it } from "vitest";
 import { PaintCache, planFrame } from "../../renderer/src/frame";
-import { FigDocument, SceneBridge, cssDeclarations, seededRandom, type Command } from "../src";
+import { AssetStore, FigDocument, SceneBridge, cssDeclarations, fontAssetDescriptor, readFigtree, registerDocumentFonts, seededRandom, uploadFont, writeFigtree, type Command } from "../src";
 import { fixtureRegistry } from "../../text/conformance/fonts";
 
 /**
@@ -171,5 +171,53 @@ describe("text in the bridge", () => {
     const glyphEntries = plan.entries.filter((e) => e.glyphs);
     expect(glyphEntries.length).toBe(1);
     expect(glyphEntries[0]!.glyphs!.length).toBe(5);
+  });
+
+  it("uses fonts uploaded into the document, also after a round trip through a .figtree file", async () => {
+    const regular = new Uint8Array(readFileSync(join(FONTS, "noto-sans/NotoSans-Regular.ttf")));
+    expect(fontAssetDescriptor(regular)).toEqual({ family: "Noto Sans", weight: 400, style: "normal", stretch: 100 });
+    expect(fontAssetDescriptor(new Uint8Array(readFileSync(join(FONTS, "noto-sans/NotoSans[wdth,wght].ttf"))))).toEqual({ family: "Noto Sans", weight: [100, 900], style: "normal", stretch: [62.5, 100] });
+    expect(() => fontAssetDescriptor(new Uint8Array([1, 2, 3, 4]))).toThrow(/not a font file/);
+
+    // The app's fonts: only Inter, which stands in for families it does not have.
+    const appFonts = () => {
+      const reg = new FontRegistry();
+      reg.scriptFallback = false;
+      reg.add({ family: "Inter", weight: [100, 900] }, new Uint8Array(readFileSync(join(FONTS, "inter/Inter[opsz,wght].ttf"))));
+      reg.lastResort = ["Inter"];
+      return reg;
+    };
+    const d = doc((p) => [text("t", p, "Uploaded font", { fontFamily: "Noto Sans" })]);
+    const assets = new AssetStore();
+    const reg = appFonts();
+    const stop = registerDocumentFonts(d, assets, reg);
+    const bridge = new SceneBridge(d, new Scene(), { fonts: reg });
+    await reg.whenIdle();
+    await Promise.resolve();
+    const fallbackWidth = bridge.box("t")!.width;
+    expect(glyphNodes(bridge, "t")[0]!.glyphs!.source.key).toMatch(/^\d+\//);
+    const interKey = glyphNodes(bridge, "t")[0]!.glyphs!.source.key;
+
+    const upload = await uploadFont(assets, regular, "NotoSans-Regular.ttf");
+    d.apply([upload.command], d.actor("author"));
+    await reg.whenIdle();
+    await Promise.resolve();
+    await reg.whenIdle();
+    await Promise.resolve();
+    expect(glyphNodes(bridge, "t")[0]!.glyphs!.source.key).not.toBe(interKey);
+    expect(bridge.box("t")!.width).not.toBeCloseTo(fallbackWidth, 1);
+    const uploadedWidth = bridge.box("t")!.width;
+    stop();
+    bridge.dispose();
+
+    // Saved and opened again elsewhere: the font travels with the file.
+    const bytes = await writeFigtree(d, assets);
+    const opened = await readFigtree(bytes);
+    const reg2 = appFonts();
+    registerDocumentFonts(opened.doc, opened.assets, reg2);
+    const bridge2 = new SceneBridge(opened.doc, new Scene(), { fonts: reg2 });
+    await reg2.whenIdle();
+    await Promise.resolve();
+    expect(bridge2.box("t")!.width).toBeCloseTo(uploadedWidth, 6);
   });
 });
