@@ -204,15 +204,21 @@ export const DEFAULT_STYLE: Style = Object.freeze({
   gridColumnEnd: "auto",
 } satisfies Style);
 
+/** Styles made by {@link makeStyle}: complete and frozen, so they can be reused as they are. */
+const complete = new WeakSet<object>();
+complete.add(DEFAULT_STYLE);
+
 /** A full style from a partial one (unset properties take their initial values). */
 export function makeStyle(partial: Partial<Style> = {}): Style {
-  return Object.freeze({ ...DEFAULT_STYLE, ...stripUndefined(partial) });
-}
-
-function stripUndefined<T extends object>(o: T): T {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
-  return out as T;
+  if (complete.has(partial)) return partial as Style;
+  const out: Record<string, unknown> = { ...DEFAULT_STYLE };
+  for (const k in partial) {
+    const v = (partial as Record<string, unknown>)[k];
+    if (v !== undefined) out[k] = v;
+  }
+  Object.freeze(out);
+  complete.add(out);
+  return out as unknown as Style;
 }
 
 // ── Value helpers ────────────────────────────────────────────────────────

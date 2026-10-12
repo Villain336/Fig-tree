@@ -8,8 +8,8 @@ export function cornerRadii(r: CornerRadius): CornerRadii {
   return typeof r === "number" ? r : [r.topLeft, r.topRight, r.bottomRight, r.bottomLeft];
 }
 
-/** Properties that determine a node's outline, as a cache key. */
-export function geometryKey(doc: FigDocument, id: string, type: NodeType): string {
+/** Properties that determine a node's outline (at its laid-out size `w` × `h`), as a cache key. */
+export function geometryKey(doc: FigDocument, id: string, type: NodeType, w: number, h: number): string {
   const g = (k: string): unknown => doc.get(id, k);
   switch (type) {
     case "frame":
@@ -17,15 +17,15 @@ export function geometryKey(doc: FigDocument, id: string, type: NodeType): strin
     case "instance":
     case "rectangle":
     case "image":
-      return JSON.stringify([type, g("width"), g("height"), g("cornerRadius"), g("cornerSmoothing")]);
+      return JSON.stringify([type, w, h, g("cornerRadius"), g("cornerSmoothing")]);
     case "ellipse":
-      return JSON.stringify([type, g("width"), g("height"), g("arcStart"), g("arcSweep"), g("innerRadius")]);
+      return JSON.stringify([type, w, h, g("arcStart"), g("arcSweep"), g("innerRadius")]);
     case "polygon":
-      return JSON.stringify([type, g("width"), g("height"), g("pointCount"), g("cornerRadius")]);
+      return JSON.stringify([type, w, h, g("pointCount"), g("cornerRadius")]);
     case "star":
-      return JSON.stringify([type, g("width"), g("height"), g("pointCount"), g("innerRadius"), g("cornerRadius")]);
+      return JSON.stringify([type, w, h, g("pointCount"), g("innerRadius"), g("cornerRadius")]);
     case "line":
-      return JSON.stringify([type, g("width")]);
+      return JSON.stringify([type, w]);
     case "vector":
       return JSON.stringify([type, g("vectorNetwork")]);
     default:
@@ -33,11 +33,9 @@ export function geometryKey(doc: FigDocument, id: string, type: NodeType): strin
   }
 }
 
-/** The outline of a node in its local space (null for nodes without one: pages, groups, text). */
-export function outlinePath(doc: FigDocument, id: string, type: NodeType): Path | null {
+/** The outline of a node in its local space at its laid-out size (null for nodes without one: pages, groups, text). */
+export function outlinePath(doc: FigDocument, id: string, type: NodeType, w: number, h: number): Path | null {
   const n = (k: string): number => doc.get<number>(id, k);
-  const w = n("width");
-  const h = n("height");
   switch (type) {
     case "frame":
     case "component":

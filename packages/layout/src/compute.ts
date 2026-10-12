@@ -20,6 +20,14 @@ import { isScrollContainer, resolveLP, type MaxSize, type Size } from "./style";
 /** Work counters of the current (or last) {@link computeLayout} call. */
 export const stats: LayoutStats = { layouts: 0, cacheHits: 0, intrinsic: 0, placed: 0 };
 
+/** Nodes whose box was written during the current {@link computeLayout} call, when the caller asked for them. */
+let touched: Set<LayoutNode> | null = null;
+
+/** @internal Records that a node's box (position or size) was written. */
+export function touch(node: LayoutNode): void {
+  touched?.add(node);
+}
+
 /** What a formatting context gets to lay out a box's content. */
 export interface ContentInput {
   /** Content-box width. */
@@ -78,6 +86,7 @@ export function layout(node: LayoutNode, s: Space, perform: boolean): LayoutResu
     return cached;
   }
   stats.layouts++;
+  node.layoutRuns++;
   const result = computeBox(node, s, perform);
   if (!cached) node.cachePut(key, result);
   if (perform) {
@@ -131,6 +140,7 @@ function computeBox(node: LayoutNode, s: Space, perform: boolean): LayoutResult 
   const r = runContent(node, contentWidth, contentHeight, Math.max(0, min - pb.v), max - pb.v, contentHeight ?? (s.contentHeight ? breakHeight : max - pb.v), definite ? contentHeight : undefined, perform, pb);
   const height = (contentHeight ?? r.height) + pb.v;
   if (perform) {
+    touch(node);
     const o = node.out;
     o.width = s.width;
     o.height = height;
@@ -183,6 +193,7 @@ function blockSizeBound(node: LayoutNode, v: Size | MaxSize, cbHeight: number | 
 
 /** Zeroes the boxes of a `display: none` subtree. */
 export function hide(node: LayoutNode): void {
+  touch(node);
   const o = node.out;
   o.x = o.y = o.width = o.height = 0;
   o.baseline = undefined;
@@ -203,6 +214,7 @@ export function place(child: LayoutNode, x: number, y: number, cbWidth: number |
     dx = l ?? (r !== undefined ? -r : 0);
     dy = t ?? (b !== undefined ? -b : 0);
   }
+  touch(child);
   child.out.x = x + dx;
   child.out.y = y + dy;
   child.out.margin = marginOf(s, cbWidth);
@@ -294,9 +306,20 @@ export function fitContentWidth(node: LayoutNode, available: number, pbH: number
  * margins, or as an absolutely positioned box when it is one. Afterwards
  * every node's {@link LayoutNode.box} holds its box relative to its parent
  * (the root's is relative to the viewport). Only dirty nodes, or nodes whose
- * constraints changed, are laid out again.
+ * constraints changed, are laid out again. `options.touched` collects the
+ * nodes whose box was written (a superset of those whose box changed).
  */
-export function computeLayout(root: LayoutNode, width: number, height: number): LayoutStats {
+export function computeLayout(root: LayoutNode, width: number, height: number, options: { touched?: Set<LayoutNode> } = {}): LayoutStats {
+  touched = options.touched ?? null;
+  try {
+    return run(root, width, height);
+  } finally {
+    touched = null;
+  }
+}
+
+function run(root: LayoutNode, width: number, height: number): LayoutStats {
+  touch(root);
   stats.layouts = 0;
   stats.cacheHits = 0;
   stats.intrinsic = 0;

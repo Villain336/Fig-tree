@@ -108,6 +108,10 @@ export class LayoutNode {
 
   /** @internal Layout cache (content of the last few constraint spaces). */
   cache: CacheEntry[] = [];
+  /** @internal Absolutely and fixed positioned nodes in this subtree, this node included (out-of-flow passes skip subtrees without any). */
+  outOfFlowInSubtree = 0;
+  /** How many times this node's content was laid out (cache misses), for tests and profiling. */
+  layoutRuns = 0;
   /** @internal Cached intrinsic inline sizes. */
   intrinsicCache: Intrinsic | null = null;
   /** @internal Key of the space of the last final (placing) layout, or null when stale. */
@@ -125,6 +129,8 @@ export class LayoutNode {
   staticH = 0;
   staticAlignX = 0;
   staticAlignY = 0;
+  /** @internal Inputs of the last absolute placement (containing block, static position, parent offset). */
+  absKey = "";
   /** @internal Containing block a grid container computed for this absolutely positioned child (its grid area), in the grid's border-box coordinates. */
   absArea: Rect | null = null;
   /** Number of nodes styled `position: fixed` (they belong to the initial containing block). */
@@ -166,7 +172,14 @@ export class LayoutNode {
 
   private assignStyle(style: Style): void {
     LayoutNode.fixedCount += (style.position === "fixed" ? 1 : 0) - (this._style.position === "fixed" ? 1 : 0);
+    const delta = (isOutOfFlowStyle(style) ? 1 : 0) - (isOutOfFlowStyle(this._style) ? 1 : 0);
     this._style = style;
+    if (delta) this.adjustOutOfFlow(delta);
+  }
+
+  /** Adds `delta` to the out-of-flow counts of this node and its ancestors. */
+  private adjustOutOfFlow(delta: number): void {
+    for (let p: LayoutNode | null = this; p; p = p._parent) p.outOfFlowInSubtree += delta;
   }
 
   get parent(): LayoutNode | null {
@@ -207,6 +220,7 @@ export class LayoutNode {
     this._children.splice(Math.max(0, Math.min(index, this._children.length)), 0, child);
     child._parent = this;
     child.placedKey = null;
+    if (child.outOfFlowInSubtree) this.adjustOutOfFlow(child.outOfFlowInSubtree);
     this.markDirty();
     return this;
   }
@@ -215,6 +229,7 @@ export class LayoutNode {
     const i = this._children.indexOf(child);
     if (i < 0) return this;
     this._children.splice(i, 1);
+    if (child.outOfFlowInSubtree) this.adjustOutOfFlow(-child.outOfFlowInSubtree);
     child._parent = null;
     this.markDirty();
     return this;
@@ -222,10 +237,19 @@ export class LayoutNode {
 
   /** Replaces the child list (keeping nodes that stay). */
   setChildren(children: readonly LayoutNode[]): void {
-    for (const c of this._children) if (!children.includes(c)) c._parent = null;
+    const keep = new Set(children);
+    for (const c of this._children) {
+      if (keep.has(c)) continue;
+      c._parent = null;
+      if (c.outOfFlowInSubtree) this.adjustOutOfFlow(-c.outOfFlowInSubtree);
+    }
     for (const c of children) {
-      if (c._parent && c._parent !== this) c._parent.removeChild(c);
+      if (c._parent === this) continue;
+      for (let p: LayoutNode | null = this; p; p = p._parent) if (p === c) throw new Error("layout: cycle");
+      if (c._parent) c._parent.removeChild(c);
       c._parent = this;
+      c.placedKey = null;
+      if (c.outOfFlowInSubtree) this.adjustOutOfFlow(c.outOfFlowInSubtree);
     }
     this._children = [...children];
     this.markDirty();
@@ -285,4 +309,8 @@ export function setStatic(node: LayoutNode, x: number, y: number, w: number, h: 
   node.staticH = h;
   node.staticAlignX = alignX;
   node.staticAlignY = alignY;
+}
+
+function isOutOfFlowStyle(s: Style): boolean {
+  return s.position === "absolute" || s.position === "fixed";
 }

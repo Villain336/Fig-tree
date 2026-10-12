@@ -1,4 +1,4 @@
-import { fitContentWidth, inlineBounds, intrinsic, layout, space } from "./compute";
+import { fitContentWidth, inlineBounds, intrinsic, layout, space, touch } from "./compute";
 import { LayoutNode, type Rect } from "./node";
 import { INF, aspectRatioOf, clamp, isAuto, pbOf, ratioHeightFromWidth, ratioWidthFromHeight, resolveLength } from "./sizing";
 import { resolveLP, resolveLPOrZero, splitAlignment, type LengthPercentage } from "./style";
@@ -19,12 +19,10 @@ export function layoutOutOfFlow(cb: LayoutNode): void {
   const visit = (n: LayoutNode, ox: number, oy: number): void => {
     for (const c of n.children) {
       const s = c.style;
-      if (s.display === "none") continue;
+      if (s.display === "none" || c.outOfFlowInSubtree === 0) continue;
       if (s.position === "absolute") {
         const area = n === cb && c.absArea ? c.absArea : padding;
-        layoutAbsoluteBox(c, area, ox + c.staticX, oy + c.staticY);
-        c.out.x -= ox;
-        c.out.y -= oy;
+        layoutAbsoluteBox(c, area, ox + c.staticX, oy + c.staticY, ox, oy);
       } else if (s.position === "static") {
         if (!c.measure && !c.replaced) visit(c, ox + c.out.x, oy + c.out.y);
       }
@@ -39,11 +37,9 @@ export function layoutInitialOutOfFlow(root: LayoutNode, width: number, height: 
   const visit = (n: LayoutNode, ox: number, oy: number, absCaptured: boolean): void => {
     for (const c of n.children) {
       const s = c.style;
-      if (s.display === "none") continue;
+      if (s.display === "none" || c.outOfFlowInSubtree === 0) continue;
       if (s.position === "fixed" || (s.position === "absolute" && !absCaptured)) {
-        layoutAbsoluteBox(c, icb, ox + c.staticX, oy + c.staticY);
-        c.out.x -= ox;
-        c.out.y -= oy;
+        layoutAbsoluteBox(c, icb, ox + c.staticX, oy + c.staticY, ox, oy);
       }
       if (c.measure || c.replaced) continue;
       const captured = absCaptured || s.position !== "static";
@@ -106,9 +102,14 @@ function alignInInsets(a: number, b: number, size: number, outer: number, align:
 /**
  * Sizes and places one absolutely positioned box in the containing block
  * `cb` (a rectangle in the coordinates the static position is given in).
- * Writes the box's position in those coordinates.
+ * `(ox, oy)` is the box's parent's origin in those coordinates; the box's
+ * position is written relative to its parent. A box whose inputs did not
+ * change since its last placement (and that is not dirty) is left alone.
  */
-export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, staticY: number): void {
+export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, staticY: number, ox = 0, oy = 0): void {
+  const key = `${cb.x},${cb.y},${cb.width},${cb.height},${staticX},${staticY},${node.staticW},${node.staticH},${node.staticAlignX},${node.staticAlignY},${ox},${oy}`;
+  if (node.placedKey !== null && node.absKey === key) return;
+  node.absKey = key;
   const s = node.style;
   const cbW = cb.width;
   const cbH = cb.height;
@@ -197,8 +198,9 @@ export function layoutAbsoluteBox(node: LayoutNode, cb: Rect, staticX: number, s
     y = alignInInsets(top, bottom, cbH, h + mt + mb, alignSelf, false) + mt;
   }
   const o = node.out;
-  o.x = cb.x + x;
-  o.y = cb.y + y;
+  touch(node);
+  o.x = cb.x + x - ox;
+  o.y = cb.y + y - oy;
   o.margin = { top: mt, right: mr, bottom: mb, left: ml };
 }
 

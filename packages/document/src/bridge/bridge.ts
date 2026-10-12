@@ -4,14 +4,16 @@ import type { DocumentChange, FigDocument } from "../document";
 import type { CornerRadius, Effect, NodeType, Paint, StrokeWeight, VectorNetwork } from "../schema";
 import { boxMatrix } from "../transform";
 import { geometryKey, outlinePath, regionPaths, strokeOutline } from "./geometry";
+import { DocumentLayout, type ComputedBox } from "./layout";
 import { toRenderPaint } from "./paints";
 
 /**
  * Projects one page of a document into a renderer {@link Scene} and keeps
  * it in sync: each transaction's {@link DocumentChange} recompiles only the
  * nodes it touched, and structural edits relink only the containers whose
- * child lists changed. Layout is not computed yet (module 3): nodes use their
- * stored x/y/width/height.
+ * child lists changed. Boxes come from the layout engine
+ * ({@link DocumentLayout}): flex and grid containers position and size their
+ * children, and a change recompiles the nodes whose computed box moved too.
  *
  * A document node becomes a small group of scene nodes:
  *
@@ -36,6 +38,10 @@ export class SceneBridge {
   totalCompiled = 0;
   /** Called after each change was applied to the scene. */
   onSync: ((compiled: number) => void) | null = null;
+  /** The page's computed layout (boxes of every node). */
+  readonly layout: DocumentLayout;
+  /** Nodes recompiled by the last change only because their computed box moved. */
+  lastRelaidOut = 0;
 
   constructor(
     readonly doc: FigDocument,
@@ -44,7 +50,13 @@ export class SceneBridge {
   ) {
     this._page = options.page ?? doc.pages[0] ?? "";
     this.unsubscribe = doc.onChange(this.onChange);
+    this.layout = new DocumentLayout(doc, this._page);
     this.build();
+  }
+
+  /** The computed box of a node (relative to its parent; groups have none). */
+  box(id: string): ComputedBox | undefined {
+    return this.layout.box(id);
   }
 
   get page(): string {
@@ -100,6 +112,7 @@ export class SceneBridge {
     this.clear();
     if (!this.doc.has(this._page)) this._page = this.doc.pages[0] ?? "";
     if (!this._page) return;
+    this.layout.build(this._page);
     const before = this.totalCompiled;
     const ids = this.doc.tree.subtree(this._page);
     for (const id of ids) this.compile(id);
@@ -112,12 +125,14 @@ export class SceneBridge {
     const before = this.totalCompiled;
     const tree = this.doc.tree;
     const s = change.structure;
+    if (s && !tree.has(this._page)) {
+      this.build();
+      this.onSync?.(this.lastCompiled);
+      return;
+    }
+    const compiled = new Set<string>();
+    const moved = this.layout.update(change);
     if (s) {
-      if (!tree.has(this._page)) {
-        this.build();
-        this.onSync?.(this.lastCompiled);
-        return;
-      }
       const onPage = (id: string): boolean => tree.pageOf(id) === this._page;
       for (const id of s.removed) this.drop(id);
       for (const id of s.reparented) {
@@ -129,18 +144,31 @@ export class SceneBridge {
         }
       }
       const added = [...s.added].filter(onPage);
-      for (const id of added) this.compile(id);
+      for (const id of added) {
+        this.compile(id);
+        compiled.add(id);
+      }
       for (const id of added) this.relink(id);
       for (const p of s.parents) if (this.entries.has(p)) this.relink(p);
     }
     for (const id of change.props.keys()) {
       if (!this.entries.has(id) || s?.added.has(id)) continue;
       this.compile(id);
+      compiled.add(id);
     }
     for (const id of change.text) {
-      if (!this.entries.has(id) || s?.added.has(id) || change.props.has(id)) continue;
+      if (!this.entries.has(id) || compiled.has(id)) continue;
       this.compile(id);
+      compiled.add(id);
     }
+    // Nodes the layout moved or resized.
+    let relaid = 0;
+    for (const id of moved) {
+      if (!this.entries.has(id) || compiled.has(id)) continue;
+      this.compile(id);
+      relaid++;
+    }
+    this.lastRelaidOut = relaid;
     this.lastCompiled = this.totalCompiled - before;
     this.onSync?.(this.lastCompiled);
   };
@@ -206,11 +234,14 @@ export class SceneBridge {
     const notes = new Set<string>();
     const get = <T>(k: string): T => doc.get<T>(id, k);
 
-    // Transform, visibility, opacity.
+    // Transform, visibility, opacity. The box is the computed layout box.
+    const box = type === "page" || type === "group" ? undefined : this.layout.box(id);
+    const width = type === "page" || type === "group" ? 0 : (box?.width ?? get<number>("width"));
+    const height = type === "page" || type === "group" ? 0 : (box?.height ?? get<number>("height"));
     const transform: Mat2D =
       type === "page" || type === "group"
         ? [1, 0, 0, 1, 0, 0]
-        : boxMatrix({ x: get("x"), y: get("y"), width: get("width"), height: get("height"), rotation: get("rotation"), flipX: get("flipX"), flipY: get("flipY") });
+        : boxMatrix({ x: box?.x ?? get("x"), y: box?.y ?? get("y"), width, height, rotation: get("rotation"), flipX: get("flipX"), flipY: get("flipY") });
     if (!sameMatrix(e.main.transform, transform)) e.main.transform = transform;
     const visible = type === "page" ? true : get<boolean>("visible");
     if (e.main.visible !== visible) e.main.visible = visible;
@@ -225,10 +256,10 @@ export class SceneBridge {
     if (type === "image") notes.add("image");
 
     // Geometry.
-    const gk = geometryKey(doc, id, type);
+    const gk = geometryKey(doc, id, type, width, height);
     if (gk !== e.geometryKey) {
       e.geometryKey = gk;
-      e.outline = outlinePath(doc, id, type);
+      e.outline = outlinePath(doc, id, type, width, height);
       if (type === "vector") {
         const net = get<VectorNetwork>("vectorNetwork");
         e.regions = regionPaths(net);
@@ -246,8 +277,6 @@ export class SceneBridge {
     }
 
     // Paints.
-    const width = type === "page" || type === "group" ? 0 : get<number>("width");
-    const height = type === "page" || type === "group" ? 0 : get<number>("height");
     const fillsDoc = hasFills(type) ? get<Paint[]>("fills") : [];
     const strokesDoc = hasStrokes(type) ? get<Paint[]>("strokes") : [];
     const strokeStyle = hasStrokes(type)

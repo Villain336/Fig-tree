@@ -185,8 +185,10 @@ function insets(doc: FigDocument, id: string, parent: string, parentType: string
   const c = doc.get<Constraints>(id, "constraints");
   const sized = parentType !== null && parentType !== "page" && parentType !== "group" && position !== "fixed";
   if (!sized) return { left: px(x), top: px(y) };
-  const pw = doc.get<number>(parent, "width");
-  const ph = doc.get<number>(parent, "height");
+  // Insets are measured from the parent's padding box: inside its borders when strokes take layout space.
+  const b = parentBorders(doc, parent, parentType);
+  const pw = doc.get<number>(parent, "width") - b.left - b.right;
+  const ph = doc.get<number>(parent, "height") - b.top - b.bottom;
   const out: Record<string, string> = {};
   const axis = (kind: Constraints["horizontal"], start: number, size: number, parentSize: number, startName: string, endName: string): void => {
     switch (kind) {
@@ -211,11 +213,17 @@ function insets(doc: FigDocument, id: string, parent: string, parentType: string
         return;
     }
   };
-  axis(c.horizontal, x, w, pw, "left", "right");
-  axis(c.vertical, y, h, ph, "top", "bottom");
+  axis(c.horizontal, x - b.left, w, pw, "left", "right");
+  axis(c.vertical, y - b.top, h, ph, "top", "bottom");
   if (c.horizontal === "scale" && pw > 0) out.width = `${num((w / pw) * 100)}%`;
   if (c.vertical === "scale" && ph > 0) out.height = `${num((h / ph) * 100)}%`;
   return out;
+}
+
+function parentBorders(doc: FigDocument, parent: string, parentType: string): { top: number; right: number; bottom: number; left: number } {
+  if (!hasProp(parentType as Parameters<typeof hasProp>[0], "strokesInLayout") || !doc.get<boolean>(parent, "strokesInLayout")) return { top: 0, right: 0, bottom: 0, left: 0 };
+  const w = doc.get<StrokeWeight>(parent, "strokeWeight");
+  return typeof w === "number" ? { top: w, right: w, bottom: w, left: w } : (w as { top: number; right: number; bottom: number; left: number });
 }
 
 function num(v: number): string {
