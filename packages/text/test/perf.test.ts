@@ -36,7 +36,7 @@ describe("text performance", () => {
     const relayoutMs: number[] = [];
     let lines = 0;
     for (let run = 0; run < 7; run++) {
-      // Every 50th word is bold: about 200 style runs.
+      // Style runs of 250 characters, alternately regular and bold (40 runs).
       const spans: { start: number; end: number; style: typeof style }[] = [];
       let at = 0;
       for (let k = 0; at < text.length; k++) {

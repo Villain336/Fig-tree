@@ -94,11 +94,13 @@ A 10,001-node tree: a column flex container of 100 sections, alternately wrappin
 
 | What | Time |
 |---|---|
-| First layout | 339–340 ms (24,193 box layouts and 6,633 intrinsic-size computations; it includes JIT warm-up) |
-| Full relayout after marking every node dirty | 166–195 ms |
-| One property change (a child's width or flex factor), then relayout: median | 2.2–2.7 ms |
-| Same, max over 41 changes | 8.4–12.4 ms |
+| First layout | 153–222 ms (21,751 box layouts and 6,633 intrinsic-size computations; it includes JIT warm-up) |
+| Full relayout after marking every node dirty | 136–169 ms |
+| One property change (a child's width or flex factor), then relayout: median | 1.5–2.6 ms |
+| Same, max over 41 changes | 5.0–6.9 ms |
 | Boxes laid out again per change: median / max | 8 / 54 |
+
+Re-measured after Module 4: a leaf without percentages now keys its layout cache without its containing block's size, which removed about 2,400 box layouts from the first layout (it was 339–340 ms, 24,193 layouts, and 2.2–2.7 ms per change).
 
 A change lays out only the node, its ancestors and the siblings whose constraints changed: the test asserts that no node outside the edited section is laid out again. The maximum (54) comes from grid sections, where one item's width can change the column sizes and so every item's area. The remaining per-change cost is mostly the root's flex pass over its 100 sections, which mostly hits caches.
 
@@ -119,6 +121,47 @@ The next frame, zoomed in, takes 1.2–2.7 ms of CPU. Building this document's b
 
 - **The initial build.** For each of 10k nodes it builds the CSS declarations from Yjs reads and parses them, which takes about half of the 0.6 s that layout adds to the bridge build. Building styles directly from stored properties would skip the string round trip, but would duplicate the CSS mapping. We chose one mapping, shared with code export, because it is the contract that conformance checks.
 - **The first layout of a large tree** (about 0.34 s at 10k nodes) is JavaScript doing what browser engines do in C++. String cache keys and per-call style resolution show up in profiles.
+
+## Text engine (Module 4)
+
+Measured on 2026-10-12 on the machine above. Node 22 numbers come from each test file run alone, twice; Chromium numbers from `npm run bench`, where both backends run on SwiftShader.
+
+### A 10,000-character paragraph (`packages/text/test/perf.test.ts`)
+
+Inter 16 px with about 40 style runs (alternating regular and bold), laid out at 600 px (138 lines):
+
+| What | Time |
+|---|---|
+| Shaping: `text-transform` and white space, bidi, itemization and font matching, HarfBuzz, spacing and line break opportunities | 31–46 ms median (110–145 ms the first time, with JIT warm-up) |
+| Line layout at 600 px (breaking, line boxes, alignment, glyph placement, grapheme boxes) | 20–28 ms |
+| Relayout at another width (shaping cached) | 18–32 ms |
+| `text-wrap: pretty` | 24–32 ms |
+| Min-content and max-content widths | 22–28 ms |
+
+### A 10,001-node document with 2,000 text nodes (`packages/document/test/text-perf.test.ts`, `/?doc=text10k`)
+
+100 auto-layout cards (580 × 380, a flex column) each hold a heading, a hugging flex row of six text labels, thirteen wrapping paragraphs (fill width, 12 px, 130% line height) and a wrapping frame of 77 swatches. An edit inserts text into one paragraph or one label through the command API.
+
+| Where | What is timed | Median | Max |
+|---|---|---|---|
+| Node | Building the bridge: layout (2,000 paragraphs shaped once each) and the scene | 2.1–2.4 s (build), then 0.10–0.18 s for the first draw-list compile | |
+| Node | A paragraph edit: command, Yjs, text layout, layout, bridge, `DrawList.sync` | 2.4–3.0 ms | 7–11 ms |
+| Node | A label edit (the row and its card reflow) | 2.3–3.2 ms | 4–6 ms |
+| Chromium WebGPU / WebGL2 | A paragraph edit through the page harness | 2.1–2.3 / 2.2–2.6 ms | 5.6–15.7 / 12–14 ms |
+| Chromium WebGPU / WebGL2 | A label edit | 2.2–2.4 / 2.5–2.9 ms | 4.5 / 7.3–8.4 ms |
+| Chromium WebGPU / WebGL2 | The next frame's CPU after an edit, zoomed in on four cards | 3.6–5.5 / 3.8–4.6 ms | |
+| Chromium WebGPU / WebGL2 | A steady-state pan frame's CPU (second sweep over the same ground, 40 frames) | 0.3–0.4 / 0.1–0.2 ms | 3.0–8.2 / 0.6–1.8 ms |
+
+What the tests assert, and what the numbers show:
+- **An edit touches one text.** Each edit shapes exactly one paragraph (`ShapedParagraph.shapedCount`), lays out again at most the edited text and its ancestors (every node's `layoutRuns` is compared before and after: the paragraph and its card; for a label, the label, its row and its card), and recompiles one scene node for a paragraph (the label edit also moves its row's other labels: 5–7 nodes). The siblings of a growing label stay cached because a text leaf's layout does not depend on its containing block's size.
+- **Typing changes geometry, not structure.** A text node draws one glyph run per font, size and paint, merged across its lines, and reuses its scene nodes, so typing (even when it rewraps lines) updates geometry and the draw list syncs incrementally. Before this, every keystroke recompiled the draw list (60 ms per edit at this size).
+- **Panning rasterizes no glyphs.** On a second sweep over the same ground at a fixed zoom, both backends rasterize **0** glyphs (asserted); after the edits above, the first sweep needed none either, because the cards share their glyphs. Zooming rasterizes each glyph once per size bucket and subpixel phase (the editor test asserts this too).
+- **The overview.** Rendering the whole document directly at 12.5% zoom (all 2,000 texts, 168 glyph bitmaps at that size) takes 139–200 ms of CPU on WebGPU, mostly frame planning (glyph placement for about 150,000 glyphs). On WebGL2 the same frame blocks for 2.7–2.8 s, about as long without drawing any glyphs (measured by skipping them): it is SwiftShader rendering 100 clipping cards and 7,700 swatches through the MSAA path, as in the other 10k-node documents. Consecutive glyph entries draw as one instanced draw.
+- **Opening.** The editor page is ready, with its fonts loaded and every text laid out, in 3.4–3.8 s on WebGPU and 4.7–5.6 s on WebGL2. Shaping is about a quarter of the build: 2,000 paragraphs at about 0.25 ms each.
+
+### Glyph atlas
+
+Unit tests (`packages/renderer/test/glyphs.test.ts`) check the coverage rasterizer against exact polygon areas (within 8-bit rounding), caching (a glyph is rasterized once per size bucket and subpixel phase), eviction (least recently used first, never a glyph of the current frame), that panning re-rasterizes nothing, and that rotated or zoomed-in runs draw as outline paths.
 
 ## Pending: real-GPU numbers
 

@@ -167,6 +167,7 @@ Hits agree with pixels to within the flattening tolerance.
 | Tiling math | Reference-mirror property tests against exact polygon clipping. |
 | Renderer CPU | Scene versions, draw-list ordering and layers, culling, zoom-level hysteresis, paint caching, hit-testing, the range allocator, the tile cache. |
 | GPU (Playwright) | Exact analytic coverage (fractional rect, circle), crack-free shared edges, gradients against reference stop math, even-odd, isolated group opacity and clips, occlusion, tiled vs direct, goldens per backend, cross-backend agreement. |
+| Glyphs | The coverage rasterizer against exact polygon areas; atlas caching per glyph, size bucket and subpixel phase, eviction, placement, run bounds without outlines; atlas versus path drawing by transform and size; a glyph pixel scene (exact coverage, gradient fill, clipping) on both backends. |
 | Benchmark (Playwright) | 5 s of mixed pan and zoom, plus 5 s of sustained pan, per backend. Asserts that panning uploads 0 bytes. |
 
 ## 3. Document model (`packages/document`)
@@ -305,7 +306,8 @@ history.yjs            optional: the full Yjs update behind a small header, to k
 | Format | Fuzzed documents round-trip byte-identically and validate with ajv against the published schema; archives are deterministic; history, migrations, asset tampering and size limits. |
 | Bridge | Scene structure per feature, unsupported notes, single-node recompiles, relinks, remote updates and undo, incremental scene equals a fresh projection under random edits, aligned-stroke equivalence, and 10k-node timings. |
 | Layout in documents | Flex and grid frames with fixed, hug and fill children; constraints under layout resizes; groups; agreement with the engine run on `cssDeclarations`; reflow after gap, padding and alignment edits recompiling only moved nodes; paint edits that skip layout; structural edits; 10k-node auto-layout timings. 128 documents rendered from their CSS in Chromium match both the engine and `DocumentLayout` (`docs/conformance.md`). |
-| Editor (Playwright) | Per-backend goldens of the sample, exact colors at solid points and along a gradient, cross-backend agreement, pixels following paint, geometry and structural edits made through the command API, the layer panel and canvas hit-testing. The sample's flex and grid frames: their pixels, and gap, padding and alignment edits that reflow them; the inspector's computed box. |
+| Text in documents | Text measured by the text engine in layout (hug, wrap, auto height, vertical alignment), glyph runs per fill, reflow and recompile scope on text edits, relayout when fonts arrive (no faked metrics), uploaded fonts through a `.figtree` round trip, hit-testing, and a 10k-node document with 2,000 texts (one paragraph shaped and only the text and its ancestors laid out per edit). 56 documents rendered from their CSS in Chromium match the bridge's text geometry (`docs/conformance.md`). |
+| Editor (Playwright) | Per-backend goldens of the sample, exact colors at solid points and along a gradient, cross-backend agreement, pixels following paint, geometry and structural edits made through the command API, the layer panel and canvas hit-testing. The sample's flex and grid frames: their pixels, and gap, padding and alignment edits that reflow them; the inspector's computed box. Typography on both backends: headings, wrapped paragraphs, buttons hugging their labels, right-to-left Arabic, Devanagari, variable weights; reflow of layout and pixels on text, weight and font-family edits; panning that rasterizes no glyphs. |
 
 ## 4. Layout engine (`packages/layout`)
 
@@ -404,7 +406,7 @@ Everything that does not depend on the available width:
 - **Breaking.** Greedy first fit with emergency breaks (`overflow-wrap: anywhere/break-word`, `word-break: break-all`), soft hyphens that show a hyphen, `text-wrap: balance` (binary search over widths for up to 4 lines) and `pretty` (avoids a short last line). Trailing spaces hang or are removed per `white-space`.
 - **Line edges.** Where a line starts or ends inside a word at a point HarfBuzz marks unsafe to break, that part is shaped again on its own, as browsers do.
 - **Line boxes.** CSS Inline 3: the strut of the root inline box plus every span on the line, each with its own `line-height` and half-leading (fallback fonts count under `line-height: normal`), ascent and descent rounded like Chromium's, number line heights truncated and lengths rounded to 1/64 px.
-- **Placement.** `text-align` (incl. `justify` over word separators and CJK, `text-align-last`), `text-indent`, `text-overflow: ellipsis` and `-webkit-line-clamp` (hidden text keeps its geometry), lists (outside markers), paragraph spacing. Bidi reordering (L1, L2) per line, then glyphs are placed in visual order; each style run on a line takes a width rounded up to 1/64 px. Decorations (underline, overline, line-through) come from the fonts' `post`/`OS/2` metrics.
+- **Placement.** `text-align` (incl. `justify` over word separators and CJK, `text-align-last`), `text-indent`, `text-overflow: ellipsis` and `-webkit-line-clamp` (hidden text keeps its geometry), lists (outside markers), paragraph spacing. Bidi reordering (L1, L2) per line, then glyphs are placed in visual order; each style run on a line takes a width rounded up to 1/64 px. Decorations follow Chromium: underlines their rounded thickness below the baseline with skip-ink gaps around descenders, overlines just above the text, line-throughs at the font's strikeout position, snapped to whole pixels.
 
 ### 5.4 Blocks, measuring and hit-testing (`TextBlock`)
 
@@ -420,7 +422,7 @@ A scene node can carry a **glyph run**: a glyph source (outlines and bounds in f
 
 ### 5.6 Matching Chromium
 
-`docs/conformance.md` describes the method (grapheme rects, line breaks and baselines from Chromium with the same font files) and the results: every grapheme of the 164 text cases within 1/64 px, identical breaks everywhere, and a per-case pixel comparison of our rendering with Chromium's.
+`docs/conformance.md` describes the method (grapheme rects, line breaks and baselines from Chromium with the same font files) and the results: every grapheme of the 166 text cases within 1/64 px, identical breaks everywhere, and a per-case pixel comparison of our rendering with Chromium's.
 
 ## 6. How later modules plug in
 

@@ -7,7 +7,7 @@ This table lists the core features Figma documents publicly, plus the features t
 - **partial**: the engine side exists and is tested, but the user-facing tool does not exist yet.
 - **planned**: not started.
 
-Module 1 built the geometry kernel and the renderer. Module 2 built the document model: a Yjs CRDT of CSS-semantic nodes, the command API, per-user undo, reviewable proposals, the `.figtree` format and the bridge that renders a document. Module 3 built our own CSS layout engine (box model, flexbox, grid, positioned layout), checked against Chromium, and wired it into the bridge. Most tools a designer touches are still planned. That is deliberate: this file only marks as done what actually works and is tested.
+Module 1 built the geometry kernel and the renderer. Module 2 built the document model: a Yjs CRDT of CSS-semantic nodes, the command API, per-user undo, reviewable proposals, the `.figtree` format and the bridge that renders a document. Module 3 built our own CSS layout engine (box model, flexbox, grid, positioned layout), checked against Chromium, and wired it into the bridge. Module 4 built the text engine (fonts, HarfBuzz shaping, CSS line layout) and glyph rendering, checked against Chromium's geometry and pixels, and wired it into layout and the bridge. Most tools a designer touches are still planned. That is deliberate: this file only marks as done what actually works and is tested.
 
 ## Canvas and rendering
 
@@ -49,11 +49,34 @@ Module 1 built the geometry kernel and the renderer. Module 2 built the document
 
 ## Text
 
-| Feature | Status | Fig Tree angle |
+Text is laid out by our own engine (`packages/text`) from the CSS each text node states, so text in the editor wraps, hugs and aligns like the exported CSS in a browser: 166 cases and 56 documents match Chromium's line breaks exactly and every glyph box to one layout unit (1/64 px), and the pixels to within 2% on 154 of 166 cases (`docs/conformance.md`). Most rows below are rendering features with no editing UI yet: they are set through the command API.
+
+| Figma | Status | Fig Tree |
 |---|---|---|
-| Text layers with shaping | partial | Content and style runs are stored as Yjs text (concurrent typing and styling merge) with CSS typography properties, and round-trip through files. They are not rendered yet: harfbuzzjs shaping plus a glyph atlas is module 4. |
-| Text styles, OpenType features, variable fonts | planned | |
-| Lists, links, rich text | planned | |
+| Text layers rendered on the canvas | done | Glyph runs from a glyph atlas (exact-area coverage, 4 subpixel positions) on WebGPU and WebGL2; large or transformed text as outlines; fills from the paint stack (solid and gradients). Editor tests on both backends; per-case pixel comparison with Chromium. |
+| Auto width, auto height, fixed size | done | `width: max-content`, `height: auto`, fixed sizes: text hugs, wraps and drives auto layout (conformance "sizing" cases, document cases, editor tests). |
+| Truncate text, max lines | done | `text-overflow: ellipsis` and `-webkit-line-clamp`, matching Chromium's geometry. |
+| Font family, weight, style, size | done | CSS Fonts 4 matching over registered faces, synthetic bold and oblique when a face is missing. No font picker yet. |
+| Variable fonts (axes) | done | `wght`, `wdth`, `opsz`, `ital`, `slnt` from CSS properties, plus any axis through `fontVariations`. No axis sliders yet. |
+| OpenType features (Details panel) | done | Kerning, ligatures, numeric styles, fractions, stylistic and contextual alternates through `fontFeatures` (`font-feature-settings`) and the `font-variant-*` mapping. |
+| Line height, letter spacing, paragraph spacing, paragraph indent | done | CSS `line-height` (normal, number, px, %), `letter-spacing` (px, em), paragraph spacing between paragraphs, `text-indent`. |
+| Horizontal and vertical alignment | done | `text-align` (left, center, right, justify, start, end) and top/center/bottom placement in fixed boxes. |
+| Text case | partial | Upper, lower and title case (`text-transform`) done. Small caps only through the `smcp` feature: there is no synthesized small caps. |
+| Decoration (underline, strikethrough) | done | Positioned like Chromium, skipping ink under descenders. The document has no decoration style, thickness or offset properties yet (the engine supports thickness and offset). |
+| Lists (bulleted, numbered, nested) | done | `listStyle` and `listLevel` per paragraph: outside markers, 1.5 em per level, numbering per level (document conformance cases). |
+| Links | partial | Stored per style run (`link`) and exported; not clickable or styled on the canvas. |
+| Mixed styles in one text layer | done | Style runs are Yjs text formatting (concurrent typing and styling merge); each run is a CSS inline box. |
+| Right-to-left and complex scripts | done | UAX #9 bidi (bidi-js), Arabic joining, Devanagari conjuncts, CJK line breaking, through HarfBuzz; direction `auto` follows the first strong character. |
+| Script fallback | done | Per-character fallback through the family list, then a per-script table (ported from Penpot), then last-resort families. |
+| Emoji | partial | Emoji keep one grapheme (ZWJ sequences, flags) for carets; without an emoji font they draw the font's missing-glyph box. Color fonts (COLR, CBDT, sbix, SVG) are not drawn in color. |
+| Fonts: Google Fonts | partial | `GoogleFontsLoader` loads any OFL, Apache 2.0 or UFL family from github.com/google/fonts (tested offline, and live with `GOOGLE_FONTS_LIVE=1`). No font picker. |
+| Fonts: uploaded and shared | partial | Uploaded font files are content-addressed assets in the `.figtree` file with their `@font-face` descriptor, used by every client that opens it (tested). No upload UI. |
+| Missing fonts | partial | Text waits for a loading font and never lays out with faked metrics; a family nobody has falls back to the last-resort family. There is no missing-font warning or replace dialog. |
+| Text editing (caret, selection, IME) | partial | Engine side: hit-testing (point to caret index) and caret rectangles per text node, and the `insertText`, `deleteText` and `formatText` commands. No editing UI. |
+| Text styles | planned | Module 7: named styles resolved into the same text properties. |
+| Vertical trim (leading trim), hanging punctuation | planned | CSS `text-box-trim` and `hanging-punctuation`. |
+| Text strokes | planned | Reported as unsupported per node; not drawn. |
+| Spell check | planned | |
 
 ## Layout
 
@@ -166,7 +189,7 @@ Where we exceed Figma: real CSS grid, `fr`/`minmax()`/`fit-content()` tracks and
 ## Document model limitations (honest list)
 
 1. **Groups have no box.** Their children live in the group's parent space and join its layout as with `display: contents`; inside flex and grid frames, a group's children stay absolutely positioned.
-2. **Not drawn yet, and listed per node instead:** text, image bitmaps, angular, diamond, image and shader paints, blend modes (layer and paint), effects, per-side stroke weights, single-axis overflow (both axes clip), and vector vertex radii and caps.
+2. **Not drawn yet, and listed per node instead:** text strokes, image bitmaps, angular, diamond, image and shader paints, blend modes (layer and paint), effects, per-side stroke weights, single-axis overflow (both axes clip), and vector vertex radii and caps.
 3. **Delete wins.** A node created inside a container that someone deleted concurrently is dropped. A node moved there goes back to its previous parent. Undoing your own creation of a container also hides what others put in it meanwhile, until redone.
 4. **Undo can resurrect cycles.** Undo restores old placement values without re-validating them. If the restored placement conflicts with a concurrent move, tree repair resolves it deterministically, which can move the other user's node back.
 5. **Structural edits rebuild the tree.** Creating, moving or deleting nodes rebuilds the effective tree in O(n) (milliseconds at 10k nodes). Property edits do not.
@@ -174,15 +197,24 @@ Where we exceed Figma: real CSS grid, `fr`/`minmax()`/`fit-content()` tracks and
 
 ## Layout limitations (honest list)
 
-1. **Horizontal, left-to-right only.** Writing modes and `direction: rtl` are not modelled.
+1. **Horizontal, left-to-right boxes.** Writing modes and `direction: rtl` for box layout (flex and grid order) are not modelled. Text inside a box is laid out right to left where its direction says so.
 2. **Block layout is simplified.** Every block container establishes an independent formatting context (`display: flow-root`): sibling margins collapse, but there is no parent–child margin collapsing, no collapsing through empty boxes, no floats and no inline formatting context. Text is a measured leaf. Documents only use block frames as canvases of absolutely positioned children, so this does not affect them.
-3. **Text measures as its stored box** until module 4 shapes it. The measure callback (min-content, max-content, height for width, baselines) is in place and tested with a deterministic measurer.
+3. **Text is a leaf.** Text boxes are measured by the text engine (min-content, max-content, height for width, baselines); there is no inline formatting context mixing text with other inline boxes.
 4. **Grid gaps:** no subgrid (the stretch goal was not reached), no masonry, no baseline alignment in the column axis (`justify-self: baseline`), and no second column-sizing pass for items whose min-content width depends on row sizes (§11.1 step 3; it matters for orthogonal flows and aspect ratios).
 5. **Units and values:** `px`, `%` and `calc()` of them only (no `em`, `rem` or viewport units). Not supported: `display: contents` and `inline-*` (inline variants lay out as block-level boxes), `position: sticky` (documents treat it as `relative`), anchor positioning, the areas form of the `grid-template` shorthand. `border-width` without a border style is taken as solid.
 6. **Scrollbars take no space**: scroll containers lay out like `overflow: hidden`.
 7. **`position: fixed`** uses the viewport; documents lay it out like `absolute`.
 8. **Chromium is the only reference.** Matching it sometimes means following Chromium over a literal reading of the spec (listed in `docs/conformance.md`). Firefox and WebKit are not checked.
 9. **Cost of opening large documents.** Layout adds about 0.6 s to building a 10,000-node document's bridge, half of it styles parsed from `cssDeclarations` (`docs/benchmarks.md`). Edits stay at a few milliseconds.
+
+## Text limitations (honest list)
+
+1. **Chromium is the reference.** Geometry and line breaking follow Chromium on Linux with the same font files; Firefox and Safari break and position text differently in places and are not checked. One unexplained difference: for a few fractional font sizes (16.3 px to 20.3 px) Chromium's advances are 1/64 px off from the rule the engine uses.
+2. **Glyph coverage is exact area, not Chromium's.** Chromium applies a gamma and contrast curve to glyph coverage (thin strokes lighter); we draw exact-area coverage like every other shape, which is what the per-case pixel differences (1.4% of the text region on average, at most 3.0%) consist of. No hinting, no subpixel (LCD) anti-aliasing.
+3. **No color glyphs.** COLR/CPAL, CBDT/CBLC, sbix and SVG glyphs are not drawn in color; emoji without a monochrome glyph show the missing-glyph box.
+4. **Not implemented:** `hyphens: auto` (dictionary hyphenation; manual soft hyphens work), `text-box-trim`, `hanging-punctuation`, `text-wrap: pretty` beyond avoiding a one-word last line, `text-emphasis`, ruby, vertical writing modes, `text-decoration-style` other than solid, `font-synthesis` control, `font-palette`, and line breaking dictionaries for Thai, Lao, Khmer and Myanmar (they break as UAX #14 alone allows).
+5. **Font loading is per face, all or nothing.** A font file loads completely before any glyph is used; there is no `unicode-range` subsetting of large CJK fonts beyond what the faces declare.
+6. **Shaping cost.** A paragraph is shaped as a whole and re-shaped on every edit (about 0.25 ms for a short paragraph, 35–45 ms for 10,000 characters); there is no incremental re-shaping within a paragraph.
 
 ## Renderer limitations (honest list)
 
@@ -193,6 +225,6 @@ Where we exceed Figma: real CSS grid, `fr`/`minmax()`/`fit-content()` tracks and
 5. **Tile-cache invalidation is all or nothing.** Any scene edit or zoom change re-renders directly and drops the cache. A per-shape tile index for targeted invalidation, as Penpot keeps, is the next step. The cache needs at most half the 256-slot atlas for the visible tiles, so very large canvases (about 4K at 2x DPR) always render directly.
 6. **Snapped translation.** The view translation is snapped to whole device pixels, so tiles and direct frames match exactly. Sub-pixel panning is not shown.
 7. **Single float precision on the GPU.** Local-space segments keep precision near each node. Extreme zoom on very large coordinates is untested beyond ±1e5.
-8. **Not implemented in the renderer yet:** blend modes, effects, image fills, angular and diamond gradients, and text.
+8. **Not implemented in the renderer yet:** blend modes, effects, image fills, angular and diamond gradients, color glyphs and text strokes.
 9. **Performance numbers are software-rendered.** All measurements come from SwiftShader on a CPU. Real-GPU numbers are pending; see `benchmarks.md`.
 10. **WebGL2 layers are expensive on SwiftShader.** Each clip or group-opacity layer resolves and composites through an offscreen MSAA target. With hundreds of layers on screen (for example 100 clipping frames and 400 clipped ellipse strokes in the 10k-node document), a full WebGL2 frame blocks for about 1 s on this machine, most of it waiting for SwiftShader. WebGPU's CPU time for the same frame is about 0.04 s; its GPU time, also on SwiftShader, is not in that number. A stencil-only clip path (no offscreen target when there is no group opacity) is the planned fix.

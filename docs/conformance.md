@@ -32,7 +32,7 @@ The document suite turns each node of a document into a `div` that carries exact
 | Command | What it does |
 |---|---|
 | `npm test` | Compares the engine against the stored Chromium results (`packages/layout/conformance/fixtures/chromium.json`, `packages/document/test/conformance/chromium.json`). No browser needed. Fails when a fixture is missing or was recorded from an older case definition. |
-| `npm run conformance:update` | Re-renders every case in Playwright's Chromium and rewrites both fixture files. `CONFORMANCE_FILTER=<name part>` limits it to matching cases. |
+| `npm run conformance:update` | Re-renders every case in Playwright's Chromium and rewrites the fixture files (layout, document CSS, and the two text suites below). `CONFORMANCE_FILTER=<name part>` limits it to matching cases. |
 | `npm run test:conformance` | The Playwright project: re-renders every case live, compares the engine with the live browser, and checks that the stored fixtures are still what this Chromium renders. CI runs it. |
 | `CONFORMANCE_DEBUG=<name part> npx vitest run packages/layout` | Prints the matching cases' trees with the expected and actual boxes. |
 
@@ -90,7 +90,7 @@ Two suites run this way, plus a visual one:
 
 | Suite | Cases | Source |
 |---|---|---|
-| Text engine | 164 hand-written cases in 16 areas | `packages/text/conformance/` |
+| Text engine | 166 hand-written cases in 16 areas | `packages/text/conformance/` |
 | Document text | 56 documents built through the command API (26 hand-written, 30 seeded random), as the HTML `cssDeclarations` states for them (direction `auto` is `dir="auto"`) | `packages/document/test/conformance/text-cases.ts` |
 | Visual | every text-engine case, drawn by our renderer and screenshotted from Chromium | `e2e/text-visual.spec.ts` |
 
@@ -98,11 +98,11 @@ The fixtures (`packages/text/conformance/fixtures/chromium.json`, `packages/docu
 
 ## Text: results
 
-All 164 text cases and all 56 document text cases pass.
+All 166 text cases and all 56 document text cases pass.
 
 | Area | Cases | Line breaks identical | Boxes within 1 px | Graphemes within 1 px | Graphemes within 0.01 px | Graphemes within 1/64 px | Words within 1 px | Lines |
 |---|---|---|---|---|---|---|---|---|
-| Basic (sizes, weights, italics, runs, WOFF2) | 23 / 23 | 23 / 23 | 45 / 45 | 1,821 / 1,821 | 1,770 | 1,821 | 318 / 318 | 77 |
+| Basic (sizes, weights, italics, runs, decorations, WOFF2) | 25 / 25 | 25 / 25 | 47 / 47 | 1,970 / 1,970 | 1,906 | 1,970 | 345 / 345 | 83 |
 | White space (all `white-space` values, tabs) | 16 / 16 | 16 / 16 | 17 / 17 | 850 / 850 | 833 | 850 | 137 / 137 | 35 |
 | Breaking (UAX #14, `overflow-wrap`, `word-break`, soft hyphens) | 14 / 14 | 14 / 14 | 17 / 17 | 483 / 483 | 475 | 483 | 86 / 86 | 49 |
 | Spacing (letter, word, `text-indent`) | 12 / 12 | 12 / 12 | 12 / 12 | 961 / 961 | 945 | 961 | 197 / 197 | 39 |
@@ -118,7 +118,7 @@ All 164 text cases and all 56 document text cases pass.
 | Truncation (`text-overflow: ellipsis`, `-webkit-line-clamp`) | 8 / 8 | 8 / 8 | 8 / 8 | 516 / 516 | 494 | 516 | 106 / 106 | 20 |
 | `text-wrap: balance` and `pretty` | 10 / 10 | 10 / 10 | 10 / 10 | 642 / 642 | 624 | 642 | 121 / 121 | 31 |
 | Sizing (text in flex and grid, intrinsic sizes, baselines) | 12 / 12 | 12 / 12 | 41 / 41 | 711 / 711 | 684 | 711 | 145 / 145 | 59 |
-| **All text cases** | **164 / 164** | **164 / 164** | **262 / 262** | **9,901 / 9,901** | **9,513 (96.1%)** | **9,901** | **1,883 / 1,883** | **514** |
+| **All text cases** | **166 / 166** | **166 / 166** | **264 / 264** | **10,050 / 10,050** | **9,649 (96.0%)** | **10,050** | **1,910 / 1,910** | **520** |
 | Document text (`DocumentLayout` and the bridge) | 56 / 56 | 56 / 56 | 243 / 243 (226 within 0.01 px) | 5,231 / 5,231 | | 5,218 | | 339 |
 
 The largest difference in the text suite is one layout unit (0.0156 px). In the document suite it is two units (0.031 px): the boxes of flex items next to hugging text, whose intrinsic widths differ from Chromium's by a unit in the last float digit. CJK glyphs agree to one unit rather than 0.01 px because their advances (1 em) put many rect edges exactly on the rounding boundary.
@@ -131,7 +131,7 @@ Unicode algorithms are also tested against the Unicode test files (Unicode 15.1,
 
 | Area | Cases ≤ 2% | Mean fraction > 25/255 | Worst case | Mean \|Δ\| (of 255) | Max \|Δ\| |
 |---|---|---|---|---|---|
-| Basic | 21 / 23 | 1.34% | 2.43% | 1.76 | 83 |
+| Basic | 23 / 25 | 1.32% | 2.43% | 1.75 | 255 |
 | White space | 14 / 16 | 1.53% | 2.83% | 1.82 | 67 |
 | Breaking | 13 / 14 | 1.54% | 2.34% | 1.81 | 125 |
 | Spacing | 12 / 12 | 1.26% | 1.49% | 1.54 | 72 |
@@ -147,9 +147,9 @@ Unicode algorithms are also tested against the Unicode test files (Unicode 15.1,
 | Truncation | 7 / 8 | 1.56% | 2.60% | 1.89 | 60 |
 | Wrap style | 10 / 10 | 1.75% | 1.98% | 2.02 | 72 |
 | Sizing | 12 / 12 | 1.12% | 2.00% | 1.42 | 89 |
-| **All** | **152 / 164** | **1.37%** | **3.02%** | **1.71** | **172** |
+| **All** | **154 / 166** | **1.37%** | **3.02%** | **1.71** | **255** |
 
-The target is at most 2% of a case's text region differing by more than 25/255; the test gates at 4%. Glyph positions agree (the geometry above), so the differences are in coverage at glyph edges: Chromium's rasterizer adjusts glyph coverage with a gamma and contrast curve (thin strokes come out lighter, and our total ink is about 3% higher in dense CJK text), while we draw exact-area coverage, the same as every other shape. The twelve cases between 2% and 3% are dense scripts (five CJK cases, Devanagari weights) and cases whose text region is tiny (a single short line, the ellipsis case), where a few hundred edge pixels are a large fraction. The single largest pixel difference (172) is on a Devanagari conjunct edge.
+The target is at most 2% of a case's text region differing by more than 25/255; the test gates at 4%. Glyph positions agree (the geometry above), so the differences are in coverage at glyph edges: Chromium's rasterizer adjusts glyph coverage with a gamma and contrast curve (thin strokes come out lighter, and our total ink is about 3% higher in dense CJK text), while we draw exact-area coverage, the same as every other shape. The twelve cases between 2% and 3% are dense scripts (five CJK cases, Devanagari weights) and cases whose text region is tiny (a single short line, the ellipsis case), where a few hundred edge pixels are a large fraction. The largest single-pixel differences are at the ends of underline segments (255, where an end or a skip-ink gap edge lands one pixel apart) and on a Devanagari conjunct edge (172). The decorations' rows (position and thickness) match Chromium's exactly in both decoration cases.
 
 ### Where Chromium differs from a literal reading of the specs (text)
 
