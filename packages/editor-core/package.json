@@ -1,0 +1,18 @@
+{
+  "name": "@fig-tree/editor-core",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Fig Tree editor logic without a UI framework: tools, selection, interaction state machines, hit-testing, snapping, text editing, clipboard, keyboard map and the UI anchor registry.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fig-tree/document": "0.1.0",
+    "@fig-tree/geometry": "0.1.0",
+    "@fig-tree/renderer": "0.1.0",
+    "@fig-tree/text": "0.1.0"
+  }
+}
