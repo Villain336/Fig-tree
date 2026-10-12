@@ -163,6 +163,33 @@ What the tests assert, and what the numbers show:
 
 Unit tests (`packages/renderer/test/glyphs.test.ts`) check the coverage rasterizer against exact polygon areas (within 8-bit rounding), caching (a glyph is rasterized once per size bucket and subpixel phase), eviction (least recently used first, never a glyph of the current frame), that panning re-rasterizes nothing, and that rotated or zoomed-in runs draw as outline paths.
 
+## Booleans (Module 5b)
+
+Node 22 on the machine above, CPU only (no rendering). Ranges come from three runs of `packages/geometry/test/boolean-perf.test.ts` and `packages/document/test/vector.test.ts`.
+
+| | Median | Max |
+|---|---|---|
+| Union of 100 overlapping curved shapes (ellipses, smoothed rounded rects, rounded stars; one cluster; 16 contours and 277 curves out) | 153–178 ms | 351 ms |
+| 1,000 operands in 26 overlap clusters: full evaluation | 617–672 ms | |
+| The same after editing one operand (only its cluster is recomputed) | 25–35 ms | 48 ms |
+| 1,000 mutually overlapping operands (one cluster: the worst case) | 2.3–2.5 s | |
+| Boolean group with 1,000 children in a document: building the bridge (layout, every child, the result) | 762–785 ms | |
+| The same: one child edited → command, layout, result recomputed and redrawn | 32–49 ms | 80 ms |
+
+**Robustness** (`packages/geometry/test/boolean.test.ts`). 1,383 cases pass: the adversarial set, 100 near-tangent configurations and 200 random seeds, each under all four operations. Every result is compared with the scanline reference (inputs flattened within 5e-6 of their extent):
+- the largest area where result and reference disagree is 3.8e-4 of the expected area, all of it from the reference's own flattening on small, curved results;
+- in the 100-shape union above the disagreement is 5.9e-6;
+- 409,602 sample points away from boundaries: 0 classified differently;
+- 0 winding inconsistencies, so the coarser-tolerance retry was never needed;
+- no output curves cross;
+- curves out: 28,259 for 30,512 curves in, over the deterministic cases.
+
+**Two bugs the suites found and fixed:**
+- Cardano's formula lost two of three real roots when a line met a nearly quadratic cubic.
+- Tangent curves leaving a vertex were ordered by tangent angles that agreed only to rounding.
+
+**Outline stroke** (`packages/geometry/test/outline.test.ts`). Results are compared with the polygon stroker at a 0.001 tolerance over 45 path, join and cap combinations. The two disagree on at most 2e-4 of the stroke area, with 8 to 72 curves instead of hundreds of polygon points.
+
 ## Pending: real-GPU numbers
 
 The architecture is aimed at real GPUs:
