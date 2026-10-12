@@ -1,0 +1,12 @@
+{
+  "name": "@fig-tree/layout",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "Fig Tree layout engine: CSS box model, block (flow-root), flexbox, grid and positioned layout, implemented from the W3C specifications.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

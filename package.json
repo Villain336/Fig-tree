@@ -11,13 +11,15 @@
     "node": ">=20.9.0"
   },
   "scripts": {
-    "typecheck": "tsc -p packages/geometry && tsc -p packages/renderer && tsc -p packages/document && tsc -p packages/document/test && tsc -p e2e && npm run typecheck -w @fig-tree/editor",
+    "typecheck": "tsc -p packages/geometry && tsc -p packages/renderer && tsc -p packages/layout && tsc -p packages/document && tsc -p packages/document/test && tsc -p e2e && npm run typecheck -w @fig-tree/editor",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "npm run build -w @fig-tree/editor",
     "test:e2e": "playwright test",
     "test:render": "playwright test --project=render",
-    "bench": "playwright test --project=bench"
+    "bench": "playwright test --project=bench",
+    "conformance:update": "UPDATE_CONFORMANCE=1 PW_NO_SERVER=1 playwright test --project=conformance",
+    "test:conformance": "PW_NO_SERVER=1 playwright test --project=conformance"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
