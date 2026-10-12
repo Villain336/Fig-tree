@@ -331,6 +331,12 @@ function planRange(ctx: PlanContext, first: number, end: number, rect: IRect, sh
   const deviceBounds = (item: DrawItem): Rect => intersectRect(transformRect(view, item.worldBounds), screen);
   /** Frame-pixel rectangle of local device bounds. */
   const toFrame = (r: IRect): IRect => ({ x: r.x + rect.x, y: r.y + rect.y, width: r.width, height: r.height });
+  /** Content of a mask group never shows outside its mask: entries are cut to it (tiles outside never see the group). */
+  const maskedBounds = (layers: readonly number[], r: Rect): Rect => {
+    let b = r;
+    for (const p of layers) if (items[p]!.layer!.mode === "mask-group") b = intersectRect(b, deviceBounds(items[p]!));
+    return b;
+  };
   const isRegister = (p: number): boolean => {
     const mode = items[p]!.layer!.mode;
     return shape ? mode === "clip" || mode === "mask-group" || mode === "mask-source" : mode !== "offscreen";
@@ -431,7 +437,7 @@ function planRange(ctx: PlanContext, first: number, end: number, rect: IRect, sh
     if (item.kind === ItemKind.BeginLayer) continue; // offscreen layers in shape mode: their content is hit on its own
     if (item.kind === ItemKind.Effect) {
       if (shape || item.alpha <= 0) continue;
-      const out = toIRect(deviceBounds(item));
+      const out = toIRect(maskedBounds(chain, deviceBounds(item)));
       if (!out) continue;
       const effect = planEffect(ctx, item, view, toFrame(out));
       if (effect) pushTexture(item, effect.node, toFrame(out), item.alpha, effect.blend);
@@ -441,7 +447,7 @@ function planRange(ctx: PlanContext, first: number, end: number, rect: IRect, sh
     // Fills.
     const alpha = shape ? 1 : item.alpha;
     if (alpha <= 0) continue;
-    const bounds = deviceBounds(item);
+    const bounds = maskedBounds(chain, deviceBounds(item));
     if (isEmptyRect(bounds) || bounds.maxX <= bounds.minX || bounds.maxY <= bounds.minY) continue;
     const matrix = multiply(view, item.world);
     if (!isUsable(matrix)) continue;

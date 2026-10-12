@@ -17,6 +17,12 @@ export interface FrameStats {
   readonly uploadedBytes: number;
   /** Glyph bitmaps rasterized into the atlas this frame (0 on frames that reuse the atlas). */
   readonly glyphsRasterized: number;
+  /** Render-graph nodes planned (effects, blurred layers, backdrops, mesh lookups); cached ones are not recomputed. */
+  readonly graphNodes: number;
+  /** GPU memory held for effects and images: effect atlas, pooled effect textures, image atlas (bytes). */
+  readonly textureBytes: number;
+  /** Whether the scene has paints that change with the clock (the frame must be redrawn as time passes). */
+  readonly animated: boolean;
   /** CPU time spent planning and encoding the frame. */
   readonly cpuMs: number;
 }
@@ -48,6 +54,8 @@ export interface Backend {
    * hit an internal capacity limit and has to be rendered again.
    */
   settle(): Promise<boolean>;
+  /** GPU bytes held for effects and images. */
+  readonly textureBytes: number;
   /** Latest per-stage GPU timings, when the backend can measure them (lags a frame or two). */
   readonly gpuTimings: StageTimings | null;
   /** Reads back the last rendered frame. */

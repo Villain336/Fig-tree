@@ -38,6 +38,10 @@ export function RenderTest() {
     let renderer: Renderer | null = null;
     let disposed = false;
     (async () => {
+      // React's development double mount disposes the first effect at once: do not create a
+      // renderer for it (destroying it would lose the shared canvas context of the second).
+      await Promise.resolve();
+      if (disposed) return;
       renderer = await Renderer.create(canvas, { backend: backendFromSearch(window.location.search) });
       if (disposed) {
         renderer.destroy();

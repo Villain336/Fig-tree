@@ -423,7 +423,7 @@ export class DrawList {
             this.warnDepth();
             continue; // the mask itself is never drawn
           }
-          const groupBegin = pushBegin(c, world, 1, null, parentLayer, clip, { mode: "mask-group" });
+          const groupBegin = pushBegin(c, world, 1, null, parentLayer, clip, { mode: "mask-group", maskType: c.mask });
           const sourceBegin = pushBegin(c, world, 1, null, groupBegin, clip, { mode: "mask-source", maskType: c.mask });
           const maskBounds = visit(c, world, 1, sourceBegin, depth + 2, clip, { first: sourceBegin + 1, canvas: false });
           own = outerOwn;
@@ -569,6 +569,8 @@ export class DrawList {
         if (it.kind === ItemKind.Fill || it.kind === ItemKind.Effect || (it.kind === ItemKind.BeginLayer && it.layer!.mode === "offscreen")) bounds = unionRect(bounds, it.worldBounds);
       }
       if (b.layer!.mode === "offscreen") bounds = intersectRect(inflateRect(bounds, blurReach(b.layer!.blurRadius) * maxScale(b.world)), b.clip);
+      // A mask group shows nothing outside its mask (its first child layer, already updated).
+      if (b.layer!.mode === "mask-group" && items[begin + 1]?.layer?.mode === "mask-source") bounds = intersectRect(bounds, items[begin + 1]!.worldBounds);
       b.worldBounds = bounds;
       const end = items[b.match]!;
       end.worldBounds = bounds;

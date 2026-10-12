@@ -3,6 +3,7 @@ import type { Backend, FrameStats, PixelData } from "./backend";
 import { DrawList } from "./compile";
 import { PaintCache, planFrame, type FramePlan } from "./frame";
 import { GlyphAtlas } from "./glyphs/atlas";
+import { ImageAtlas } from "./images";
 import { hitTest } from "./hit-test";
 import { ATLAS_SLOTS, TILE_SIZE, TileCache } from "./tile-cache";
 import { Scene, type SceneNode } from "./scene";
@@ -45,6 +46,14 @@ export class Renderer {
   private readonly paints = new PaintCache();
   /** Coverage bitmaps of small, axis-aligned glyphs, shared by every frame. */
   readonly glyphAtlas = new GlyphAtlas();
+  /** Visible regions of images at the mip level each draw needs. */
+  readonly imageAtlas = new ImageAtlas();
+  /**
+   * The animation clock in seconds. Shader paints with a speed animate
+   * with it; set it before rendering a frame (static paints ignore it).
+   */
+  time = 0;
+  private lastTime = 0;
   private width = 0;
   private height = 0;
   private pixelRatio = 1;
@@ -106,13 +115,15 @@ export class Renderer {
     this.lastViewport = viewport;
     this.list.sync(this.scene);
     this.glyphAtlas.beginFrame();
+    this.imageAtlas.beginFrame();
     const raw = multiply(scaling(this.pixelRatio), viewport.transform);
     // Whole-device-pixel translation keeps cached tiles aligned and makes
     // direct and tiled frames identical.
     const view: Mat2D = [raw[0], raw[1], raw[2], raw[3], Math.round(raw[4]), Math.round(raw[5])];
     const prev = this.lastView;
     const sameScale = prev !== null && prev[0] === view[0] && prev[1] === view[1] && prev[2] === view[2] && prev[3] === view[3];
-    const sameScene = this.scene.version === this.lastSceneVersion;
+    const sameScene = this.scene.version === this.lastSceneVersion && (!this.list.animated || this.time === this.lastTime);
+    this.lastTime = this.time;
     const viewMoving = !sameScale || prev[4] !== view[4] || prev[5] !== view[5];
     this.lastView = view;
     this.lastSceneVersion = this.scene.version;
@@ -122,27 +133,41 @@ export class Renderer {
     // once scale and scene hold still, panning only rasterizes new tiles.
     const tilesAcross = (Math.ceil(this.width / TILE_SIZE) + 1) * (Math.ceil(this.height / TILE_SIZE) + 1);
     if (!this.tiles || !sameScale || !sameScene || tilesAcross * 2 > this.tiles.capacity) {
-      const plan = planFrame(this.list, this.paints, view, this.width, this.height, this.glyphAtlas);
+      const plan = this.plan(view, this.width, this.height);
       const uploadedBytes = this.backend.render(plan, this.background);
       return this.stats("direct", [plan], uploadedBytes, 0, start);
     }
     const frame = this.tiles.schedule(view[4], view[5], this.width, this.height, viewMoving);
     const linear: Mat2D = [view[0], view[1], view[2], view[3], 0, 0];
-    const jobs = frame.regions.map((r) => ({
-      plan: planFrame(this.list, this.paints, multiply(translation(-r.x, -r.y), linear), r.width, r.height, this.glyphAtlas),
-      copies: r.copies,
-    }));
+    let jobs = frame.regions.map((r) => ({ plan: this.plan(multiply(translation(-r.x, -r.y), linear), r.width, r.height, false), copies: r.copies }));
+    if (this.imageAtlas.repeatFrame) {
+      this.imageAtlas.beginFrame(true);
+      jobs = frame.regions.map((r) => ({ plan: this.plan(multiply(translation(-r.x, -r.y), linear), r.width, r.height, false), copies: r.copies }));
+    }
     const uploadedBytes = jobs.length > 0 ? this.backend.renderTiles(jobs, this.background) : 0;
     this.backend.presentTiles(frame.placements, this.width, this.height);
     const tilesRendered = frame.regions.reduce((n, r) => n + r.copies.length, 0);
     return this.stats("tiles", jobs.map((j) => j.plan), uploadedBytes, tilesRendered, start);
   }
 
+  /** Plans a frame; if the image atlas had to start over while planning, plans it again once. */
+  private plan(view: Mat2D, width: number, height: number, retry = true): FramePlan {
+    const options = { images: this.imageAtlas, background: this.background, contentVersion: this.scene.version, time: this.time };
+    let plan = planFrame(this.list, this.paints, view, width, height, this.glyphAtlas, options);
+    if (retry && this.imageAtlas.repeatFrame) {
+      this.imageAtlas.beginFrame(true);
+      plan = planFrame(this.list, this.paints, view, width, height, this.glyphAtlas, options);
+    }
+    return plan;
+  }
+
   private stats(mode: FrameStats["mode"], plans: readonly FramePlan[], uploadedBytes: number, tilesRendered: number, start: number): FrameStats {
     let entries = 0;
     let segments = 0;
+    let graphNodes = 0;
     for (const plan of plans) {
       entries += plan.entries.length;
+      graphNodes += plan.graph.length;
       for (const e of plan.entries) segments += e.geometry?.segmentCount ?? 0;
     }
     return {
@@ -153,6 +178,9 @@ export class Renderer {
       uploadedBytes,
       tilesRendered,
       glyphsRasterized: this.glyphAtlas.rasterizedThisFrame,
+      graphNodes,
+      textureBytes: this.backend.textureBytes,
+      animated: this.list.animated,
       cpuMs: performance.now() - start,
     };
   }

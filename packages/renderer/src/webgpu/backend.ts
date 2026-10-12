@@ -2,10 +2,13 @@
 import { RangeAllocator, type Range } from "../arena";
 import type { Backend, PixelData, TileJob } from "../backend";
 import { ItemKind, type DrawList } from "../compile";
-import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
+import type { FrameEntry, FramePlan, GraphNode, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
 import type { GlyphAtlas } from "../glyphs/atlas";
+import type { ImageAtlas } from "../images";
 import { PaintKind, premultiply } from "../paint";
+import { blendCode } from "../types";
+import { GraphExecutor, type AtlasSpot } from "./graph";
 import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
 import { binShader, compositeShader, coverageShader, indirectShader, listsShader, tilesShader } from "./shaders";
@@ -26,6 +29,14 @@ const FLAG_EVENODD = 4;
 const FLAG_CLIP = 8;
 const FLAG_OPAQUE = 16;
 const FLAG_GLYPHS = 32;
+const FLAG_TEXTURE = 64;
+const FLAG_SHAPE = 128;
+const FLAG_BACKDROP = 256;
+const NO_EXTRAS = 0xffffffff;
+const EXTRA_WORDS = 8;
+const CONFIG_BYTES = 80;
+const LAYER_MODES = { group: 0, clip: 1, "mask-group": 2, "mask-source": 3, offscreen: 0 } as const;
+const MASK_TYPES = { alpha: 0, luminance: 1, vector: 2 } as const;
 
 interface GeometryUpload {
   uploadId: number;
@@ -87,6 +98,13 @@ interface PassPlan {
   readonly glyphRefs: Int32Array | null;
 }
 
+/** A plan to rasterize this frame: a top-level plan, or a raster node of the render graph. */
+interface PlanJob {
+  readonly plan: FramePlan;
+  readonly background: readonly [number, number, number, number];
+  readonly node: GraphNode | null;
+}
+
 /**
  * WebGPU compute rasterizer (see `shaders.ts` for the pipeline). Geometry and
  * paints live in persistent GPU arenas keyed by upload ids, so a frame whose
@@ -128,6 +146,8 @@ export class WebGPUBackend implements Backend {
   private readonly glyphData: GrowableBuffer;
   private glyphAtlas: GPUTexture | null = null;
   private glyphAtlasGeneration = -1;
+  private imageAtlas: GPUTexture | null = null;
+  private readonly graph: GraphExecutor;
   private readonly readback: GPUBuffer;
   private readbackBusy = false;
   private readbackDone: Promise<void> = Promise.resolve();
@@ -179,7 +199,14 @@ export class WebGPUBackend implements Backend {
     this.lists = new GrowableBuffer(device, "tile lists", S, 1 << 16);
     this.ranges = new GrowableBuffer(device, "tile ranges", S | D, 1 << 16);
     this.glyphData = new GrowableBuffer(device, "glyph data", S | D, 1 << 12);
-    this.readback = device.createBuffer({ label: "counters readback", size: SLOT_ALIGN * 64, usage: GPUBufferUsage.MAP_READ | D });
+    this.readback = device.createBuffer({ label: "counters readback", size: SLOT_ALIGN * 256, usage: GPUBufferUsage.MAP_READ | D });
+    this.graph = new GraphExecutor(device);
+    this.graph.stopBase = (node) => (this.paintCache.get(node.paint.key)?.stops.offset ?? 0) * 2;
+  }
+
+  /** GPU bytes held by effect textures (atlas and pool) and the image atlas. */
+  get textureBytes(): number {
+    return this.graph.bytes + (this.imageAtlas ? this.imageAtlas.width * this.imageAtlas.height * 4 : 0);
   }
 
   /** Returns null when WebGPU is unavailable, so callers can fall back. */
@@ -263,8 +290,10 @@ export class WebGPUBackend implements Backend {
   }
 
   /**
-   * Rasterizes each plan in one command buffer. `after` runs once per plan,
-   * right after its passes, with the texture holding its result.
+   * Rasterizes each plan in one command buffer, after the render graph's
+   * offscreen work (effects, blurred layers, backdrops, mesh lookups).
+   * `after` runs once per plan, right after its passes, with the texture
+   * holding its result.
    */
   private encodeJobs(
     plans: readonly FramePlan[],
@@ -277,68 +306,96 @@ export class WebGPUBackend implements Backend {
       this.sweep(list);
       this.cacheGeneration = list.generation;
     }
+    const graph = plans.flatMap((p) => p.graph);
+    const fx = this.graph.prepare(plans, graph);
+    const bg = premultiply(background);
+    const jobs: PlanJob[] = [];
+    for (const node of fx.run) if (node.op === "raster") jobs.push({ plan: node.plan, background: node.background ?? [0, 0, 0, 0], node });
+    const topStart = jobs.length;
+    for (const plan of plans) jobs.push({ plan, background: bg, node: null });
+
     let uploaded = this.uploadGlyphs(plans[0]?.atlas ?? null);
-    for (const plan of plans) {
+    uploaded += this.uploadImages(plans[0]?.images ?? null);
+    for (const { plan } of jobs) {
       for (const e of plan.entries) {
         if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
         if (e.paint) uploaded += this.uploadPaint(e.paint);
       }
     }
-    this.ensureTargets(Math.max(...plans.map((p) => p.width)), Math.max(...plans.map((p) => p.height)));
+    // Mesh lookups read paint parameters of plans that may not be drawn this frame.
+    for (const node of fx.run) if (node.op === "mesh") uploaded += this.uploadPaint(node.paint);
+    this.ensureTargets(Math.max(...jobs.map((j) => j.plan.width)), Math.max(...jobs.map((j) => j.plan.height)));
 
+    // Per-entry extras (texture and image placements) go after the glyph lists in the frame data.
+    const extras: number[] = [];
     // Encode every plan's entries into one upload, each pass at an aligned offset.
-    const encoded = plans.map((plan) => {
+    const encoded = jobs.map((job) => {
+      const plan = job.plan;
       const tilesX = Math.ceil(plan.width / TILE);
       const tilesY = Math.ceil(plan.height / TILE);
-      return { plan, tilesX, tilesY, ...this.encodeEntries(plan.entries, this.planPasses(plan.entries, tilesX * tilesY), tilesX, tilesY) };
+      return { job, plan, tilesX, tilesY, ...this.encodeEntries(plan.entries, this.planPasses(plan.entries, tilesX * tilesY), tilesX, tilesY, fx.spots, extras) };
     });
     const totalBytes = encoded.reduce((sum, e) => sum + e.data.byteLength, 0);
     const data = new Uint8Array(totalBytes);
     let base = 0;
-    const jobs = encoded.map((e) => {
+    const encodedJobs = encoded.map((e) => {
       data.set(new Uint8Array(e.data), base);
       const passes = e.passes.map((p) => ({ ...p, entryByteOffset: p.entryByteOffset + base }));
       base += e.data.byteLength;
       return { ...e, passes };
     });
-    this.entries.ensure(totalBytes, false);
+    this.entries.ensure(Math.max(4, totalBytes), false);
     device.queue.writeBuffer(this.entries.buffer, 0, data);
 
-    // Glyph tile lists of every pass, concatenated; each pass reads from its base.
+    // Glyph tile lists of every pass, concatenated; each pass reads from its base. Then the extras.
     let glyphTileCount = 0;
     let glyphRefCount = 0;
     const glyphBases = new Map<PassPlan, number>();
-    for (const j of jobs) for (const p of j.passes) {
+    for (const j of encodedJobs) for (const p of j.passes) {
       if (!p.glyphTiles) continue;
       glyphBases.set(p, glyphTileCount);
       glyphTileCount += p.tileTotal;
       glyphRefCount += p.glyphRefs!.length / 4;
     }
-    if (glyphTileCount > 0) {
-      // Words: [entry tiles: (first ref word, count)] then [refs: x, y, atlas xy, size].
-      const words = new Uint32Array(glyphTileCount * 2 + glyphRefCount * 4);
+    const extrasBase = glyphTileCount * 2 + glyphRefCount * 4;
+    if (glyphTileCount > 0 || extras.length > 0) {
+      // Words: [entry tiles: (first ref word, count)] then [refs: x, y, atlas xy, size] then [extras].
+      const words = new Uint32Array(extrasBase + extras.length);
       const signed = new Int32Array(words.buffer);
       let refWord = glyphTileCount * 2;
-      for (const j of jobs) for (const p of j.passes) {
-        const base = glyphBases.get(p);
-        if (base === undefined) continue;
+      for (const j of encodedJobs) for (const p of j.passes) {
+        const gb = glyphBases.get(p);
+        if (gb === undefined) continue;
         const t = p.glyphTiles!;
         for (let i = 0; i < p.tileTotal; i++) {
-          words[(base + i) * 2] = refWord + t[i * 2]! * 4;
-          words[(base + i) * 2 + 1] = t[i * 2 + 1]!;
+          words[(gb + i) * 2] = refWord + t[i * 2]! * 4;
+          words[(gb + i) * 2 + 1] = t[i * 2 + 1]!;
         }
         signed.set(p.glyphRefs!, refWord);
         refWord += p.glyphRefs!.length;
       }
+      words.set(extras, extrasBase);
       this.glyphData.ensure(words.byteLength, false);
       device.queue.writeBuffer(this.glyphData.buffer, 0, words);
     }
+    if (extras.length > 0) {
+      // Entries point at extras relative to their start; move them past the glyph lists.
+      const u = new Uint32Array(data.buffer);
+      for (const j of encodedJobs) for (const p of j.passes) {
+        const first = p.entryByteOffset / 4;
+        for (let i = 0; i < p.end - p.start; i++) {
+          const k = first + i * ENTRY_WORDS + 19;
+          if (u[k] !== NO_EXTRAS) u[k] = u[k]! + extrasBase;
+        }
+      }
+      device.queue.writeBuffer(this.entries.buffer, 0, data);
+    }
     this.ensureGlyphAtlas();
 
-    const allPasses = jobs.flatMap((j) => j.passes.map((p) => ({ p, j })));
+    const allPasses = encodedJobs.flatMap((j) => j.passes.map((p) => ({ p, j })));
     const maxTiles = Math.max(1, ...allPasses.map(({ p }) => p.tileTotal));
     const maxBitmap = Math.max(1, ...allPasses.map(({ p, j }) => j.tilesX * j.tilesY * p.chunkCount * 32));
-    const maxScreenTiles = Math.max(...jobs.map((j) => j.tilesX * j.tilesY));
+    const maxScreenTiles = Math.max(...encodedJobs.map((j) => j.tilesX * j.tilesY));
     this.pathTiles.ensure(maxTiles * PATH_TILE_BYTES, false);
     this.bitmaps.ensure(maxBitmap, false);
     this.lists.ensure(maxTiles * 4, false);
@@ -350,28 +407,43 @@ export class WebGPUBackend implements Backend {
     this.counters.ensure(allPasses.length * SLOT_ALIGN, false);
     this.indirect.ensure(allPasses.length * SLOT_ALIGN, false);
 
-    const bg = premultiply(background);
+    const time = plans[0]?.time ?? 0;
     const enc = device.createCommandEncoder({ label: "frame" });
     this.timer?.beginFrame();
     let slot = 0;
-    jobs.forEach((job, jobIndex) => {
+    const runJob = (job: (typeof encodedJobs)[number]): GPUTexture => {
       job.passes.forEach((pass, i) => {
-        const config = new ArrayBuffer(64);
+        const config = new ArrayBuffer(CONFIG_BYTES);
         const u = new Uint32Array(config);
         const f = new Float32Array(config);
         u.set([job.plan.width, job.plan.height, job.tilesX, job.tilesY, pass.end - pass.start, pass.chunkCount, pass.segmentTotal,
           pass.rowTotal, this.pieceCapacity, this.maskCapacity, i === 0 ? 1 : 0, glyphBases.get(pass) ?? 0]);
-        f.set(bg, 12);
+        f.set(job.job.background, 12);
+        f[16] = time;
         device.queue.writeBuffer(this.config.buffer, slot * SLOT_ALIGN, config);
         this.encodePass(enc, pass, slot, i, job.tilesX, job.tilesY);
         slot++;
       });
-      after(enc, jobIndex, this.targets[(job.passes.length - 1) % 2]!);
-    });
-    const readCounters = !this.readbackBusy && slot <= 64;
+      return this.targets[(job.passes.length - 1) % 2]!;
+    };
+    // The render graph, in order: rasters through the tile pipeline, the rest as effect passes.
+    let rasterIndex = 0;
+    for (const node of fx.run) {
+      if (node.op === "raster") {
+        const target = runJob(encodedJobs[rasterIndex++]!);
+        this.graph.captureRaster(enc, node, target);
+      } else {
+        this.graph.encode(enc, node, this.stops.buffer);
+      }
+      const spot = fx.spots.get(node);
+      if (spot) this.graph.store(enc, node, spot);
+    }
+    for (let j = topStart; j < encodedJobs.length; j++) after(enc, j - topStart, runJob(encodedJobs[j]!));
+    const readCounters = !this.readbackBusy && slot <= 256;
     if (readCounters) enc.copyBufferToBuffer(this.counters.buffer, 0, this.readback, 0, slot * SLOT_ALIGN);
     this.timer?.endFrame(enc);
     device.queue.submit([enc.finish()]);
+    this.graph.endFrame();
     if (readCounters) this.checkCapacity(slot);
     this.timer?.collect();
     return uploaded;
@@ -407,6 +479,8 @@ export class WebGPUBackend implements Backend {
   }
 
   destroy(): void {
+    this.graph.destroy();
+    this.imageAtlas?.destroy();
     for (const t of this.targets) t.destroy();
     this.atlas?.destroy();
     this.present?.destroy();
@@ -451,6 +525,26 @@ export class WebGPUBackend implements Backend {
     for (const u of atlas.takeUploads()) {
       if (u.width === 0 || u.height === 0) continue;
       this.device.queue.writeTexture({ texture, origin: { x: u.x, y: u.y } }, u.data as Uint8Array<ArrayBuffer>, { bytesPerRow: u.width }, { width: u.width, height: u.height });
+      bytes += u.data.byteLength;
+    }
+    return bytes;
+  }
+
+  /** Uploads image regions placed since the last frame into the image atlas texture. */
+  private uploadImages(images: ImageAtlas | null): number {
+    if (!images || !images.used) return 0;
+    if (!this.imageAtlas || this.imageAtlas.width !== images.width) {
+      this.imageAtlas?.destroy();
+      this.imageAtlas = this.device.createTexture({
+        label: "image atlas",
+        size: { width: images.width, height: images.height },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+    }
+    let bytes = 0;
+    for (const u of images.takeUploads()) {
+      this.device.queue.writeTexture({ texture: this.imageAtlas, origin: { x: u.x, y: u.y } }, u.data as Uint8Array<ArrayBuffer>, { bytesPerRow: u.width * 4 }, { width: u.width, height: u.height });
       bytes += u.data.byteLength;
     }
     return bytes;
@@ -502,7 +596,9 @@ export class WebGPUBackend implements Backend {
     const cached = this.paintCache.get(record.key);
     if (cached && cached.uploadId === record.uploadId) return 0;
     const paint = record.paint;
-    const stopCount = paint.stops.length / 5;
+    // Images and shaders keep their parameters (vec4s) where gradients keep stops (two vec4s each).
+    const params = paint.params.length > 0 ? withImageMatrix(paint) : null;
+    const stopCount = params ? Math.ceil(params.length / 8) : paint.stops.length / 5;
     let slot = cached?.slot;
     if (!slot) slot = allocateGrowing(this.paintAlloc, 1, (cap) => this.paints.ensure(cap * PAINT_WORDS * 4, true));
     if (cached) this.stopAlloc.release(cached.stops);
@@ -517,7 +613,11 @@ export class WebGPUBackend implements Backend {
     const m = paint.matrix;
     f.set([m[0], m[1], m[2], m[3], m[4], m[5]], 8);
     this.device.queue.writeBuffer(this.paints.buffer, slot.offset * PAINT_WORDS * 4, data);
-    if (stopCount > 0) {
+    if (params) {
+      const sd = new Float32Array(stopCount * 8);
+      sd.set(params);
+      this.device.queue.writeBuffer(this.stops.buffer, stops.offset * 32, sd);
+    } else if (stopCount > 0) {
       const sd = new Float32Array(stopCount * 8);
       for (let i = 0; i < stopCount; i++) {
         sd[i * 8] = paint.stops[i * 5]!;
@@ -559,6 +659,8 @@ export class WebGPUBackend implements Backend {
     ranges: { start: number; end: number }[],
     tilesX: number,
     tilesY: number,
+    spots: ReadonlyMap<GraphNode, AtlasSpot>,
+    extras: number[],
   ): { data: ArrayBuffer; passes: PassPlan[] } {
     let bytes = 0;
     const offsets = ranges.map((r) => {
@@ -587,8 +689,38 @@ export class WebGPUBackend implements Backend {
         const m = e.matrix;
         f.set([m[0], m[1], m[2], m[3], m[4], m[5]], k);
         let flags: number = e.kind;
-        if (e.item.fillRule === "evenodd") flags |= FLAG_EVENODD;
-        if (e.kind === ItemKind.BeginLayer && e.geometry) flags |= FLAG_CLIP;
+        if (e.fillRule === "evenodd") flags |= FLAG_EVENODD;
+        if (e.kind === ItemKind.BeginLayer && e.geometry && e.layer?.mode === "clip") flags |= FLAG_CLIP;
+        if (e.layer) {
+          flags |= blendCode(e.layer.blend) << 10;
+          flags |= LAYER_MODES[e.layer.mode] << 16;
+          flags |= MASK_TYPES[e.layer.maskType ?? "alpha"] << 19;
+          if (e.layer.backdrop) flags |= FLAG_BACKDROP;
+        }
+        if (e.texture) flags |= FLAG_TEXTURE;
+        if (e.shape) flags |= FLAG_SHAPE;
+        // Textures, sampled textures and images: eight words of placements in the frame data.
+        let extra = NO_EXTRAS;
+        const tex = e.texture ?? e.sampled;
+        if (tex || e.image) {
+          extra = extras.length;
+          const w = new Array<number>(EXTRA_WORDS).fill(0);
+          const spot = tex ? spots.get(tex.node) : undefined;
+          if (tex && spot) {
+            w[0] = spot.x | (spot.y << 16);
+            w[1] = (tex.x & 0xffff) | ((tex.y & 0xffff) << 16);
+            w[2] = spot.width | (spot.height << 16);
+          }
+          const im = e.image;
+          if (im) {
+            w[3] = im.atlasX | (im.atlasY << 16);
+            w[4] = im.rectX | (im.rectY << 16);
+            w[5] = im.rectWidth | (im.rectHeight << 16);
+            w[6] = im.levelWidth | (im.levelHeight << 16);
+            w[7] = f32Bits(im.pixelsPerTexel);
+          }
+          extras.push(...w.map((v) => v >>> 0));
+        }
         if (e.kind === ItemKind.BeginLayer) depth++;
         else if (e.kind === ItemKind.EndLayer) depth--;
         else if (e.glyphs) {
@@ -603,13 +735,14 @@ export class WebGPUBackend implements Backend {
             const gy1 = clampInt(Math.ceil((g.y + g.glyph.height) / TILE), gy0 + 1, ty1);
             for (let ty = gy0; ty < gy1; ty++) for (let tx = gx0; tx < gx1; tx++) glyphPairs.push(tileTotal + (ty - ty0) * bw + (tx - tx0), ref);
           }
-        } else if (depth === 0 && e.item.alpha === 1 && e.paint && e.paint.paint.kind === PaintKind.Solid && e.paint.paint.color[3] === 1) {
+        } else if (depth === 0 && !e.shape && !e.texture && e.alpha === 1 && e.paint && e.paint.paint.kind === PaintKind.Solid && e.paint.paint.color[3] === 1) {
           flags |= FLAG_OPAQUE;
         }
         u[k + 6] = flags;
-        u[k + 7] = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : 0;
+        u[k + 7] = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : NO_EXTRAS;
         u.set([tx0, ty0, tx1, ty1, tileTotal, segmentTotal, rowTotal], k + 8);
-        f[k + 15] = e.item.alpha;
+        f[k + 15] = e.alpha;
+        u[k + 19] = extra;
         const geometry = e.geometry && e.kind !== ItemKind.EndLayer && e.item.geometry ? this.geometryCache.get(e.item.geometry) : undefined;
         const segCount = geometry && e.geometry ? e.geometry.segmentCount : 0;
         u[k + 16] = geometry ? geometry.range.offset : 0;
@@ -658,7 +791,7 @@ export class WebGPUBackend implements Backend {
     const slot = slotIndex * SLOT_ALIGN;
     const entryCount = pass.end - pass.start;
     const entriesBinding = { buffer: this.entries.buffer, offset: pass.entryByteOffset, size: Math.max(1, entryCount) * ENTRY_WORDS * 4 };
-    const config = { buffer: this.config.buffer, offset: slot, size: 64 };
+    const config = { buffer: this.config.buffer, offset: slot, size: CONFIG_BYTES };
     const counters = { buffer: this.counters.buffer, offset: slot, size: 16 };
     const indirect = { buffer: this.indirect.buffer, offset: slot, size: 12 };
     const tiles = { buffer: this.pathTiles.buffer, size: Math.max(1, pass.tileTotal) * PATH_TILE_BYTES };
@@ -712,6 +845,7 @@ export class WebGPUBackend implements Backend {
         config, entriesBinding, tiles, { buffer: this.masks.buffer }, { buffer: this.lists.buffer }, ranges, { buffer: this.paints.buffer },
         { buffer: this.stops.buffer }, this.targets[(index + 1) % 2]!.createView(), this.targets[index % 2]!.createView(),
         { buffer: this.glyphData.buffer }, this.ensureGlyphAtlas().createView(),
+        this.graph.atlasTexture.createView(), (this.imageAtlas ?? this.graph.dummyTexture).createView(),
       ]));
       cp.dispatchWorkgroups(tilesX, tilesY);
     });
@@ -746,6 +880,22 @@ export class WebGPUBackend implements Backend {
       },
     );
   }
+}
+
+/** Images get their image-to-local matrix appended; shaders reading an image get it after their parameters. */
+function withImageMatrix(paint: { readonly kind: number; readonly params: Float32Array; readonly imageMatrix: readonly number[]; readonly image: { width: number; height: number } | null }): Float32Array {
+  if (paint.kind !== PaintKind.Shader || !paint.image) return paint.params;
+  const m = paint.imageMatrix;
+  const out = new Float32Array(Math.max(paint.params.length, 24) + 8);
+  out.set(paint.params);
+  out.set([m[0]!, m[1]!, m[2]!, m[3]!, m[4]!, m[5]!, paint.image.width, paint.image.height], 24);
+  return out;
+}
+
+const f32View = new DataView(new ArrayBuffer(4));
+function f32Bits(v: number): number {
+  f32View.setFloat32(0, v, true);
+  return f32View.getUint32(0, true);
 }
 
 function dispatchLinear(pass: GPUComputePassEncoder, workgroups: number): void {

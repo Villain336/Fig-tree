@@ -105,7 +105,7 @@ export class GraphExecutor {
    * Decides which nodes run: every output drawn by `plans` (or by the plans
    * of raster nodes that run) that is not cached, and what it reads.
    */
-  prepare(plans: readonly FramePlan[]): GraphFrame {
+  prepare(plans: readonly FramePlan[], graph: readonly GraphNode[]): GraphFrame {
     this.frame++;
     this.slot = 0;
     const outputs = new Set<GraphNode>();
@@ -167,7 +167,7 @@ export class GraphExecutor {
       console.warn(`fig-tree renderer: ${dropped} effect textures did not fit the ${this.atlasSize}px effect atlas and were skipped`);
     }
     // Run in graph order: inputs always come first.
-    const order = [...run].sort((a, b) => a.id - b.id);
+    const order = graph.filter((n) => run.has(n));
     for (const node of order) {
       const spot = spots.get(node);
       if (spot) this.cache.set(node.key, { spot, frame: this.frame });
@@ -250,6 +250,8 @@ export class GraphExecutor {
 
   /** Returns this frame's textures to the pool and trims it to its budget. */
   endFrame(): void {
+    for (const b of this.retired) b.destroy();
+    this.retired = [];
     for (const t of this.pool) t.busy = false;
     this.live.clear();
     let bytes = this.pool.reduce((n, t) => n + t.width * t.height * (t.format === "rgba16float" ? 8 : 4), 0);
@@ -353,7 +355,7 @@ export class GraphExecutor {
   stopBase: (node: GraphNode & { op: "mesh" }) => number = () => 0;
 
   private writeUniforms(words: number[]): number {
-    if (this.slot >= this.uniformSlots) this.ensureUniforms(this.slot + 64);
+    if (this.slot >= this.uniformSlots) this.ensureUniforms(this.uniformSlots + 64);
     const offset = this.slot * UNIFORM_SLOT;
     this.slot++;
     const data = new ArrayBuffer(Math.max(16, align(words.length * 4, 16)));
@@ -363,19 +365,20 @@ export class GraphExecutor {
     return offset;
   }
 
+  /**
+   * Grows the uniform buffer. Bind groups of this frame may still reference
+   * the old one, so it is retired (destroyed at the end of the frame) and
+   * new slots start at 0 in the new buffer.
+   */
   private ensureUniforms(slots: number): void {
-    if (slots <= this.uniformSlots) return;
-    // Uniform writes of this frame were queued against the old buffer; only grow at frame start.
-    const old = this.uniforms;
+    if (this.slot + slots <= this.uniformSlots && slots <= this.uniformSlots) return;
+    this.retired.push(this.uniforms);
     this.uniformSlots = Math.max(slots, this.uniformSlots * 2);
     this.uniforms = this.device.createBuffer({ label: "fx uniforms", size: this.uniformSlots * UNIFORM_SLOT, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    if (this.slot > 0) {
-      const enc = this.device.createCommandEncoder();
-      enc.copyBufferToBuffer(old, 0, this.uniforms, 0, this.slot * UNIFORM_SLOT);
-      this.device.queue.submit([enc.finish()]);
-    }
-    old.destroy();
+    this.slot = 0;
   }
+
+  private retired: GPUBuffer[] = [];
 
   private acquire(format: GPUTextureFormat, width: number, height: number): GPUTexture {
     const w = Math.ceil(width / POOL_GRAIN) * POOL_GRAIN;

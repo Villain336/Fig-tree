@@ -356,7 +356,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
         atomicOr(&counters.overflow, 2u);
       }
       mark = true;
-    } else if (kind == KIND_FILL) {
+    } else if (kind == KIND_FILL && !texture) {
       mark = select(backdrop != 0, (backdrop & 1) != 0, evenodd);
     }
     if (mark) {

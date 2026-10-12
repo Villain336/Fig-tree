@@ -167,6 +167,13 @@ interface SvgContext {
 /** An SVG paint attribute value for a renderer paint (gradients become defs in user space). */
 function svgPaint(ctx: SvgContext, p: RenderPaint, m: Mat2D, opacity: number): { value: string; opacity: number } {
   if (p.type === "solid") return { value: hex(p.color), opacity: p.color.a * opacity };
+  // SVG has no angular or diamond gradients, bitmaps would need encoding, and shaders have no SVG form:
+  // angular and diamond gradients export as their first stop's color, images and shaders as nothing.
+  if (p.type === "image" || p.type === "shader") return { value: "none", opacity };
+  if (p.type === "angular-gradient" || p.type === "diamond-gradient") {
+    const first = [...p.stops].sort((a, b) => a.offset - b.offset)[0];
+    return first ? { value: hex(first.color), opacity: first.color.a * opacity } : { value: "none", opacity };
+  }
   const id = `g${ctx.next++}`;
   const stops = p.stops.map((s) => `<stop offset="${fmt(s.offset)}" stop-color="${hex(s.color)}"${s.color.a < 1 ? ` stop-opacity="${fmt(s.color.a)}"` : ""}/>`).join("");
   const gt = p.transform ? multiply(m, p.transform) : m;

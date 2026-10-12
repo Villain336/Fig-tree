@@ -1,16 +1,20 @@
+import { blendGlsl, imageGlsl, noiseGlsl, shaderLibGlsl } from "../shaders/glsl";
+
 /**
  * GLSL ES 3.0 for the WebGL2 fallback. Per-frame entry data and persistent
  * paint data live in RGBA32F textures read with texelFetch, so batches of
  * draws need no per-draw uniform updates.
  *
- * Entry texels (4 per entry): matrix (a, b, c, d) | (e, f, opacity, paint) |
- * cover rect in device px | (kind, -, -, -).
+ * Entry texels (8 per entry): matrix (a, b, c, d) | (e, f, opacity, paint) |
+ * cover rect in device px | (mode, blend, mask type, flags) | texture
+ * (origin x, y, width, height) | image (atlas x, y, rect x, y) | image
+ * (rect width, height, level width, height) | (pixels per texel, -, -, -).
  */
 
 const fetchEntry = /* glsl */ `
 uniform highp sampler2D u_entries;
 vec4 entryTexel(int id, int k) {
-  int i = id * 4 + k;
+  int i = id * 8 + k;
   return texelFetch(u_entries, ivec2(i % 1024, i / 1024), 0);
 }
 `;
@@ -58,10 +62,18 @@ void main() {
 }
 `;
 
-/** Paint evaluation shared by the cover and glyph passes: the premultiplied paint color of entry `v_id` at the fragment. */
+/**
+ * Paint evaluation shared by the cover and glyph passes: the premultiplied
+ * paint color of entry `v_id` at the fragment (twin of the WGSL composite's
+ * paintColor).
+ */
 const paintFunctions = /* glsl */ `
 uniform highp sampler2D u_paints;
 uniform highp sampler2D u_stops;
+uniform highp sampler2D u_imageAtlas;
+uniform highp sampler2D u_tex;
+uniform float u_time;
+flat in int v_id;
 vec4 paintTexel(int paint, int k) {
   int i = paint * 4 + k;
   return texelFetch(u_paints, ivec2(i % 1024, i / 1024), 0);
@@ -70,24 +82,28 @@ vec4 stopTexel(int stop, int k) {
   int i = stop * 2 + k;
   return texelFetch(u_stops, ivec2(i % 1024, i / 1024), 0);
 }
-vec4 paintColor(int id) {
-  vec4 t = entryTexel(id, 1);
-  float opacity = t.z;
-  int paint = int(t.w);
-  vec4 header = paintTexel(paint, 0);
-  int kind = int(header.x);
-  if (kind == 0) return paintTexel(paint, 1) * opacity;
-  vec4 m = entryTexel(id, 0);
-  vec2 pos = vec2(gl_FragCoord.x, u_viewport.y - gl_FragCoord.y);
-  vec2 q = pos - t.xy;
-  float det = m.x * m.w - m.y * m.z;
-  vec2 lp = vec2(m.w * q.x - m.z * q.y, -m.y * q.x + m.x * q.y) / det;
-  vec4 gm = paintTexel(paint, 2);
-  vec4 gt = paintTexel(paint, 3);
-  vec2 g = vec2(gm.x * lp.x + gm.z * lp.y + gt.x, gm.y * lp.x + gm.w * lp.y + gt.y);
-  float u = clamp(kind == 1 ? g.x : length(g), 0.0, 1.0);
-  int base = int(header.y);
-  int count = int(header.z);
+vec4 P(int b, int i) {
+  int k = b + i;
+  return texelFetch(u_stops, ivec2(k % 1024, k / 1024), 0);
+}
+ivec2 topDown(ivec2 p, ivec2 size) { return ivec2(p.x, size.y - 1 - p.y); }
+vec2 texOrigin() { return entryTexel(v_id, 4).xy; }
+vec2 texSize() { return entryTexel(v_id, 4).zw; }
+${imageGlsl}
+ImagePlace imagePlace() {
+  vec4 a = entryTexel(v_id, 5);
+  vec4 b = entryTexel(v_id, 6);
+  ImagePlace p;
+  p.atlas = ivec2(a.xy);
+  p.rectOrigin = ivec2(a.zw);
+  p.rectSize = ivec2(b.xy);
+  p.levelSize = ivec2(b.zw);
+  p.pixelsPerTexel = entryTexel(v_id, 7).x;
+  return p;
+}
+${noiseGlsl}
+${shaderLibGlsl}
+vec4 gradientStops(int base, int count, float u) {
   int i = 0;
   for (int k = 0; k < 4096; k++) {
     if (i + 1 >= count || stopTexel(base + i + 1, 0).x >= u) break;
@@ -98,26 +114,99 @@ vec4 paintColor(int id) {
   float o1 = stopTexel(base + j, 0).x;
   float s = o1 > o0 ? clamp((u - o0) / (o1 - o0), 0.0, 1.0) : (u >= o1 ? 1.0 : 0.0);
   vec4 c = mix(stopTexel(base + i, 1), stopTexel(base + j, 1), s);
-  return vec4(c.rgb * c.a, c.a) * opacity;
+  return vec4(c.rgb * c.a, c.a);
+}
+vec4 rawPaint(int id) {
+  vec4 t = entryTexel(id, 1);
+  int paint = int(t.w);
+  vec4 header = paintTexel(paint, 0);
+  int kind = int(header.x);
+  if (kind == 0) return paintTexel(paint, 1);
+  vec4 m = entryTexel(id, 0);
+  vec2 pos = vec2(gl_FragCoord.x, u_viewport.y - gl_FragCoord.y);
+  vec2 q = pos - t.xy;
+  float det = m.x * m.w - m.y * m.z;
+  vec2 lp = vec2(m.w * q.x - m.z * q.y, -m.y * q.x + m.x * q.y) / det;
+  vec4 gm = paintTexel(paint, 2);
+  vec4 gt = paintTexel(paint, 3);
+  vec2 g = vec2(gm.x * lp.x + gm.z * lp.y + gt.x, gm.y * lp.x + gm.w * lp.y + gt.y);
+  int base = int(header.y);
+  float flags = entryTexel(id, 3).w;
+  bool hasTex = mod(flags, 2.0) >= 1.0;
+  bool hasImage = mod(floor(flags / 2.0), 2.0) >= 1.0;
+  if (kind == 5) {
+    if (!hasImage) return vec4(0.0);
+    int b = base * 2;
+    vec4 info = P(b, 0);
+    vec4 c = sampleImage(imagePlace(), g, info.xy, info.z > 0.5);
+    vec4 a2 = P(b, 2);
+    if (a2.w > 0.5 && c.a > 0.0) c = vec4(adjustImage(c.rgb / c.a, P(b, 1), a2) * c.a, c.a);
+    return c * info.w;
+  }
+  if (kind == 6) return shaderPaint(base * 2, lp, sqrt(abs(det)), hasTex, hasImage, pos);
+  float u;
+  if (kind == 1) u = g.x;
+  else if (kind == 2) u = length(g);
+  else if (kind == 3) { u = atan(g.y, g.x) / 6.283185307; if (u < 0.0) u += 1.0; }
+  else u = abs(g.x) + abs(g.y);
+  return gradientStops(base, int(header.z), clamp(u, 0.0, 1.0));
+}
+vec4 paintColor(int id) {
+  float flags = entryTexel(id, 3).w;
+  if (mod(floor(flags / 4.0), 2.0) >= 1.0) {
+    // Shape renders: solid and gradient paints count as opaque; images and shaders by their alpha.
+    float paint = entryTexel(id, 1).w;
+    if (paint < 0.0) return vec4(1.0);
+    int kind = int(paintTexel(int(paint), 0).x);
+    return vec4(kind >= 5 ? rawPaint(id).a : 1.0);
+  }
+  return rawPaint(id) * entryTexel(id, 1).z;
 }
 `;
 
 export const coverFragmentShader = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
-flat in int v_id;
 uniform vec2 u_viewport;
 uniform highp sampler2D u_layer;
+uniform highp sampler2D u_backdrop;
+uniform highp sampler2D u_mask;
 out vec4 o_color;
 ${fetchEntry}
 ${paintFunctions}
+${blendGlsl}
 void main() {
-  if (entryTexel(v_id, 3).x > 0.5) {
-    // Composite a finished layer onto its parent.
-    o_color = texelFetch(u_layer, ivec2(gl_FragCoord.xy), 0) * entryTexel(v_id, 1).z;
+  vec4 info = entryTexel(v_id, 3);
+  int mode = int(info.x);
+  if (mode == 0) {
+    o_color = paintColor(v_id);
     return;
   }
-  o_color = paintColor(v_id);
+  if (mode == 2) {
+    // A texture entry: the effect texture at this pixel, transparent outside it.
+    vec2 pos = vec2(gl_FragCoord.x, u_viewport.y - gl_FragCoord.y);
+    ivec2 local = ivec2(floor(pos - texOrigin()));
+    ivec2 size = ivec2(texSize());
+    if (any(lessThan(local, ivec2(0))) || any(greaterThanEqual(local, size))) { o_color = vec4(0.0); return; }
+    o_color = texelFetch(u_tex, topDown(local, size), 0) * entryTexel(v_id, 1).z;
+    return;
+  }
+  // Layer composites (end entries): 1 src-over, 3 blend mode (blending off, backdrop read), 4 raw (non-isolated clip).
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 layer = texelFetch(u_layer, p, 0);
+  if (mode == 4) { o_color = layer; return; }
+  float scale = entryTexel(v_id, 1).z;
+  if (info.z > 2.5) {
+    // Mask group: multiply by the mask's value (type in info.z - 3: alpha, luminance).
+    vec4 m = texelFetch(u_mask, p, 0);
+    scale *= info.z > 3.5 ? dot(m.rgb, vec3(0.2125, 0.7154, 0.0721)) : m.a;
+  }
+  vec4 src = layer * scale;
+  if (mode == 3) {
+    o_color = blendPremul(int(info.y), src, texelFetch(u_backdrop, p, 0));
+    return;
+  }
+  o_color = src;
 }
 `;
 
@@ -143,7 +232,6 @@ void main() {
 export const glyphFragmentShader = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
-flat in int v_id;
 in vec2 v_atlas;
 uniform vec2 u_viewport;
 uniform highp sampler2D u_atlas;

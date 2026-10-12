@@ -1,4 +1,5 @@
 import { Path, ellipsePath, multiply, rotation, roundedRectPath, translation } from "@fig-tree/geometry";
+import { fxScenes } from "./fx-scenes";
 import { Scene, hexColor, rgba, solid, type GlyphSource, type GradientStop } from "@fig-tree/renderer";
 
 /**
@@ -35,6 +36,7 @@ const squareGlyphs: GlyphSource = {
 export const GLYPH_XS = [10, 30.25, 50.5, 70.75, 90.3, 110.6];
 
 export const testScenes: Record<string, TestScene> = {
+  ...fxScenes,
   // Text drawn from the glyph atlas: 8 px squares at quarter-pixel x positions on a baseline at y = 30.4
   // (snapped to 30), a gradient-filled run, and a run clipped by a frame.
   glyphs: {

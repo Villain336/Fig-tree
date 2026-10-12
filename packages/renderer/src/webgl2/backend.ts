@@ -2,9 +2,12 @@ import { intersectRect, transformRect, type Rect } from "@fig-tree/geometry";
 import { RangeAllocator, type Range } from "../arena";
 import type { Backend, PixelData, TileJob } from "../backend";
 import { ItemKind } from "../compile";
-import type { FrameEntry, FramePlan, PaintRecord } from "../frame";
+import type { FrameEntry, FramePlan, GraphNode, PaintRecord } from "../frame";
 import type { GeometryLevel, GeometrySlot } from "../geometry-cache";
-import { premultiply } from "../paint";
+import type { ImageAtlas } from "../images";
+import { PaintKind, premultiply } from "../paint";
+import { blendCode } from "../types";
+import { GLGraph, type GLTexture } from "./graph";
 import { ATLAS_SLOTS_PER_ROW, TILE_SIZE, slotOrigin, type TilePlacement } from "../tile-cache";
 import type { Color } from "../types";
 import type { GlyphAtlas } from "../glyphs/atlas";
@@ -18,7 +21,7 @@ import {
 } from "./shaders";
 
 const DATA_WIDTH = 1024; // texels per row of the data textures
-const ENTRY_TEXELS = 4;
+const ENTRY_TEXELS = 8;
 const PAINT_TEXELS = 4;
 const MAX_LAYERS = 8;
 /** Cell size of the occupancy grid used to find non-overlapping draws to batch. */
@@ -106,6 +109,16 @@ export class WebGL2Backend implements Backend {
   private glyphAtlasSize: [number, number] = [0, 0];
   private glyphAtlasGeneration = -1;
   private readonly multiDraw: MultiDraw | null;
+  private readonly graph: GLGraph;
+  /** Output textures of the render graph the current frame's entries draw. */
+  private textures = new Map<GraphNode, GLTexture>();
+  private imageAtlas: WebGLTexture | null = null;
+  private imageAtlasSize = 0;
+  /** Per layer depth: the mask texture of a mask group at that depth. */
+  private maskTargets: { fbo: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number }[] = [];
+  /** Scratch copy of a layer's backdrop for blend modes. */
+  private backdrop: { fbo: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
+  private time = 0;
   private readonly samples: number;
   private vertexBuffer: WebGLBuffer;
   private readonly vertexAlloc = new RangeAllocator(1 << 16);
@@ -135,8 +148,9 @@ export class WebGL2Backend implements Backend {
     this.multiDraw = gl.getExtension("WEBGL_multi_draw") as MultiDraw | null;
     this.samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) as number);
     this.stencilProgram = link(gl, stencilVertexShader(this.multiDraw !== null), stencilFragmentShader, ["u_entryBase", "u_viewport", "u_entries"]);
-    this.coverProgram = link(gl, coverVertexShader, coverFragmentShader, ["u_entryBase", "u_viewport", "u_entries", "u_paints", "u_stops", "u_layer"]);
-    this.glyphProgram = link(gl, glyphVertexShader, glyphFragmentShader, ["u_viewport", "u_entries", "u_paints", "u_stops", "u_atlas"]);
+    this.coverProgram = link(gl, coverVertexShader, coverFragmentShader, ["u_entryBase", "u_viewport", "u_entries", "u_paints", "u_stops", "u_layer", "u_backdrop", "u_mask", "u_imageAtlas", "u_tex", "u_time"]);
+    this.glyphProgram = link(gl, glyphVertexShader, glyphFragmentShader, ["u_viewport", "u_entries", "u_paints", "u_stops", "u_atlas", "u_imageAtlas", "u_tex", "u_time"]);
+    this.graph = new GLGraph(gl);
     this.glyphBuffer = gl.createBuffer()!;
     this.glyphVao = gl.createVertexArray()!;
     this.vertexBuffer = gl.createBuffer()!;
@@ -162,9 +176,40 @@ export class WebGL2Backend implements Backend {
     return gl ? new WebGL2Backend(gl) : null;
   }
 
+  /** GPU bytes held for effects (pooled and output textures) and the image atlas. */
+  get textureBytes(): number {
+    return this.graph.bytes + this.imageAtlasSize * this.imageAtlasSize * 4;
+  }
+
+  /** Runs the render graph of `plans` (rasters, effects), keeping the output textures their entries draw. */
+  private runGraph(plans: readonly FramePlan[]): number {
+    let uploaded = 0;
+    const graph = plans.flatMap((p) => p.graph);
+    this.time = plans[0]?.time ?? 0;
+    if (graph.length === 0) {
+      this.textures = new Map();
+      return 0;
+    }
+    // Mesh lookups read their paint's parameters.
+    for (const node of graph) if (node.op === "mesh") uploaded += this.uploadPaint(node.paint);
+    this.textures = this.graph.run(
+      plans,
+      graph,
+      (plan, background, textures) => {
+        this.textures = textures;
+        uploaded += this.draw(plan, background);
+        return this.targets[0]!.resolveFbo;
+      },
+      () => this.stops.texture,
+      (node) => (this.paintCache.get(node.paint.key)?.stops.offset ?? 0) * 2,
+    );
+    return uploaded;
+  }
+
   render(plan: FramePlan, background: Color): number {
     const gl = this.gl;
-    const uploaded = this.draw(plan, background);
+    let uploaded = this.runGraph([plan]);
+    uploaded += this.draw(plan, background);
     const main = this.targets[0]!;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, main.resolveFbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
@@ -178,6 +223,7 @@ export class WebGL2Backend implements Backend {
     const atlas = this.ensureAtlas();
     let uploaded = 0;
     for (const job of jobs) {
+      uploaded += this.runGraph([job.plan]);
       uploaded += this.draw(job.plan, background);
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.targets[0]!.resolveFbo);
       gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, atlas.fbo);
@@ -221,7 +267,7 @@ export class WebGL2Backend implements Backend {
   }
 
   /** Rasterizes `plan` into the main MSAA target and resolves it; returns bytes uploaded. */
-  private draw(plan: FramePlan, background: Color): number {
+  private draw(plan: FramePlan, background: Color | readonly [number, number, number, number]): number {
     const gl = this.gl;
     this.ensureTargets(plan.width, plan.height);
     if (plan.list.generation !== this.cacheGeneration) {
@@ -230,6 +276,7 @@ export class WebGL2Backend implements Backend {
     }
     gl.activeTexture(gl.TEXTURE0);
     let uploaded = this.uploadGlyphs(plan.atlas);
+    uploaded += this.uploadImages(plan.images);
     this.prepareGlyphInstances(plan.entries);
     for (const e of plan.entries) {
       if (e.geometry && e.item.geometry) uploaded += this.uploadGeometry(e.item.geometry, e.geometry);
@@ -247,7 +294,7 @@ export class WebGL2Backend implements Backend {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.targets[0]!.msaaFbo);
-    const bg = premultiply(background);
+    const bg = "r" in background ? premultiply(background) : background;
     gl.clearColor(bg[0], bg[1], bg[2], bg[3]);
     gl.clearStencil(0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
@@ -268,25 +315,38 @@ export class WebGL2Backend implements Backend {
       const e = entries[i]!;
       if (e.kind === ItemKind.Fill && e.glyphs) {
         flush(i);
-        // Consecutive glyph entries draw together.
+        // Consecutive glyph entries draw together (one with its own texture draws alone).
         let j = i + 1;
-        while (j < entries.length && entries[j]!.kind === ItemKind.Fill && entries[j]!.glyphs) j++;
+        if (!e.sampled) while (j < entries.length && entries[j]!.kind === ItemKind.Fill && entries[j]!.glyphs && !entries[j]!.sampled) j++;
+        this.bindEntryTexture(e);
         this.drawGlyphs(i, j);
         i = j - 1;
         continue;
       }
+      if (e.kind === ItemKind.Fill && e.texture) {
+        flush(i);
+        this.bindEntryTexture(e);
+        this.cover(i, 1, false);
+        continue;
+      }
+      if (e.kind === ItemKind.Fill && e.sampled) {
+        flush(i);
+        this.bindEntryTexture(e);
+        this.drawBatch(entries, i, i + 1);
+        continue;
+      }
       if (e.kind === ItemKind.Fill) {
         const cells = cellsOf(rects[i]!);
-        const rule = e.item.fillRule;
+        const rule = e.fillRule;
         const conflicts =
-          batchStart >= 0 && (entries[batchStart]!.item.fillRule !== rule || cells.some((c) => occupied.has(c)));
+          batchStart >= 0 && (entries[batchStart]!.fillRule !== rule || cells.some((c) => occupied.has(c)));
         if (conflicts) flush(i);
         if (batchStart < 0) batchStart = i;
         for (const c of cells) occupied.add(c);
       } else if (e.kind === ItemKind.BeginLayer) {
         flush(i);
         layerStack.push(i);
-        this.beginLayer(layerStack.length, e);
+        this.beginLayer(layerStack.length, e, i);
       } else {
         flush(i);
         const begin = entries[layerStack.pop()!]!;
@@ -351,7 +411,7 @@ export class WebGL2Backend implements Backend {
       firsts[i - start] = up.range.offset;
       counts[i - start] = up.range.size;
     }
-    this.stencil(start, firsts, counts, entries[start]!.item.fillRule === "evenodd");
+    this.stencil(start, firsts, counts, entries[start]!.fillRule === "evenodd");
     this.cover(start, end - start);
   }
 
@@ -439,6 +499,7 @@ export class WebGL2Backend implements Backend {
     const p = this.glyphProgram;
     gl.useProgram(p.program);
     gl.uniform2f(p.uniforms["u_viewport"]!, this.width, this.height);
+    gl.uniform1f(p.uniforms["u_time"]!, this.time);
     gl.bindVertexArray(this.glyphVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.glyphBuffer);
     const stride = GLYPH_FLOATS * 4;
@@ -486,14 +547,16 @@ export class WebGL2Backend implements Backend {
   }
 
   /** Draws cover quads where the stencil is non-zero, resetting it to zero. */
-  private cover(entryBase: number, count: number, useStencil = true): void {
+  private cover(entryBase: number, count: number, useStencil = true, replace = false): void {
     const gl = this.gl;
     gl.useProgram(this.coverProgram.program);
     gl.uniform1i(this.coverProgram.uniforms["u_entryBase"]!, entryBase);
     gl.uniform2f(this.coverProgram.uniforms["u_viewport"]!, this.width, this.height);
+    gl.uniform1f(this.coverProgram.uniforms["u_time"]!, this.time);
     gl.bindVertexArray(this.emptyVao);
     gl.colorMask(true, true, true, true);
-    gl.enable(gl.BLEND);
+    if (replace) gl.disable(gl.BLEND);
+    else gl.enable(gl.BLEND);
     if (useStencil) {
       gl.enable(gl.STENCIL_TEST);
       gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
@@ -503,46 +566,146 @@ export class WebGL2Backend implements Backend {
     }
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, count);
     gl.enable(gl.STENCIL_TEST);
+    gl.enable(gl.BLEND);
   }
 
-  private beginLayer(depth: number, e: FrameEntry): void {
+  private beginLayer(depth: number, e: FrameEntry, index: number): void {
     const gl = this.gl;
     const t = this.target(depth);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, t.msaaFbo);
     gl.enable(gl.SCISSOR_TEST);
     const r = scissorRect(e, this.height);
     gl.scissor(r[0], r[1], r[2], r[3]);
-    gl.clearColor(0, 0, 0, 0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    if (e.layer?.backdrop) {
+      // A non-isolated layer starts from what is below it: resolve the parent, then copy it in
+      // (GL ES cannot blit into a multisampled framebuffer).
+      const b = this.backdropTarget();
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.targets[depth - 1]!.msaaFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, b.fbo);
+      gl.blitFramebuffer(r[0], r[1], r[0] + r[2], r[1] + r[3], r[0], r[1], r[0] + r[2], r[1] + r[3], gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.msaaFbo);
+      gl.clear(gl.STENCIL_BUFFER_BIT);
+      gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, b.texture);
+      gl.activeTexture(gl.TEXTURE0);
+      this.cover(index, 1, false, true);
+    } else {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.msaaFbo);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    }
+    if (e.layer?.mode === "mask-group") {
+      // No mask drawn means nothing shows.
+      const m = this.maskTarget(depth);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, m.fbo);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, t.msaaFbo);
+    }
     gl.disable(gl.SCISSOR_TEST);
   }
 
-  /** Resolves layer `depth` and composites it into its parent, clipped by the begin entry's path. */
+  /** Resolves layer `depth` and composites it into its parent (clip, opacity, mask, blend mode). */
   private endLayer(depth: number, begin: FrameEntry, endIndex: number): void {
     const gl = this.gl;
     const layer = this.target(depth);
     const parent = this.targets[depth - 1]!;
     const r = scissorRect(begin, this.height);
+    const info = begin.layer!;
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(r[0], r[1], r[2], r[3]);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, layer.msaaFbo);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, layer.resolveFbo);
     gl.blitFramebuffer(0, 0, this.width, this.height, 0, 0, this.width, this.height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    if (info.mode === "mask-source") {
+      // The mask's rendering becomes its group's mask; nothing is composited.
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, layer.resolveFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.maskTarget(depth - 1).fbo);
+      gl.blitFramebuffer(r[0], r[1], r[0] + r[2], r[1] + r[3], r[0], r[1], r[0] + r[2], r[1] + r[3], gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, parent.msaaFbo);
+      gl.disable(gl.SCISSOR_TEST);
+      return;
+    }
+    const blends = info.blend !== "normal" && !info.backdrop;
+    if (blends) {
+      // Blend modes read the backdrop: resolve the parent's pixels under the layer.
+      const b = this.backdropTarget();
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, parent.msaaFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, b.fbo);
+      gl.blitFramebuffer(r[0], r[1], r[0] + r[2], r[1] + r[3], r[0], r[1], r[0] + r[2], r[1] + r[3], gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.activeTexture(gl.TEXTURE0 + BACKDROP_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, b.texture);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, parent.msaaFbo);
     gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, layer.resolveTexture);
-    const clip = begin.geometry && begin.item.geometry ? this.geometryCache.get(begin.item.geometry) : undefined;
+    if (info.mode === "mask-group") {
+      gl.activeTexture(gl.TEXTURE0 + MASK_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.maskTarget(depth).texture);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    const clip = info.mode === "clip" && begin.geometry && begin.item.geometry ? this.geometryCache.get(begin.item.geometry) : undefined;
+    // Blend modes and non-isolated clips replace the parent's pixels (they already include it).
+    const replace = blends || info.backdrop;
     // The scissor stays on: the clip path's stencil may extend past the layer's
     // bounds, and the cover (which resets the stencil) only spans those bounds.
     // Stencil left outside would leak into later covers.
     if (clip) {
-      this.stencil(endIndex, Int32Array.of(clip.range.offset), Int32Array.of(clip.range.size), begin.item.fillRule === "evenodd");
-      this.cover(endIndex, 1);
+      this.stencil(endIndex, Int32Array.of(clip.range.offset), Int32Array.of(clip.range.size), begin.fillRule === "evenodd");
+      this.cover(endIndex, 1, true, replace);
     } else {
-      this.cover(endIndex, 1, false);
+      this.cover(endIndex, 1, false, replace);
     }
     gl.disable(gl.SCISSOR_TEST);
+    gl.activeTexture(gl.TEXTURE0 + LAYER_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  /** Binds the texture a fill entry draws or samples (effect output, backdrop, mesh lookup). */
+  private bindEntryTexture(e: FrameEntry): void {
+    const gl = this.gl;
+    const node = e.texture?.node ?? e.sampled?.node;
+    const t = node ? this.textures.get(node) : undefined;
+    gl.activeTexture(gl.TEXTURE0 + TEX_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, t?.texture ?? null);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  private maskTarget(depth: number) {
+    while (this.maskTargets.length <= depth) this.maskTargets.push(createColorTarget(this.gl, this.capacityWidth, this.capacityHeight));
+    return this.maskTargets[depth]!;
+  }
+
+  private backdropTarget() {
+    this.backdrop ??= createColorTarget(this.gl, this.capacityWidth, this.capacityHeight);
+    return this.backdrop;
+  }
+
+  /** Uploads image regions placed since the last frame into the image atlas texture. */
+  private uploadImages(images: ImageAtlas | null): number {
+    if (!images || !images.used) return 0;
+    const gl = this.gl;
+    if (!this.imageAtlas || this.imageAtlasSize !== images.width) {
+      if (this.imageAtlas) gl.deleteTexture(this.imageAtlas);
+      this.imageAtlas = gl.createTexture()!;
+      gl.activeTexture(gl.TEXTURE0 + IMAGE_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.imageAtlas);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, images.width, images.height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      this.imageAtlasSize = images.width;
+    }
+    const uploads = images.takeUploads();
+    if (uploads.length === 0) return 0;
+    gl.activeTexture(gl.TEXTURE0 + IMAGE_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, this.imageAtlas);
+    let bytes = 0;
+    for (const u of uploads) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, u.x, u.y, u.width, u.height, gl.RGBA, gl.UNSIGNED_BYTE, u.data);
+      bytes += u.data.byteLength;
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    return bytes;
   }
 
   private bindTextures(): void {
@@ -561,12 +724,19 @@ export class WebGL2Backend implements Backend {
     gl.uniform1i(this.coverProgram.uniforms["u_paints"]!, 1);
     gl.uniform1i(this.coverProgram.uniforms["u_stops"]!, 2);
     gl.uniform1i(this.coverProgram.uniforms["u_layer"]!, LAYER_UNIT);
+    gl.uniform1i(this.coverProgram.uniforms["u_backdrop"]!, BACKDROP_UNIT);
+    gl.uniform1i(this.coverProgram.uniforms["u_mask"]!, MASK_UNIT);
+    gl.uniform1i(this.coverProgram.uniforms["u_imageAtlas"]!, IMAGE_UNIT);
+    gl.uniform1i(this.coverProgram.uniforms["u_tex"]!, TEX_UNIT);
     bind(GLYPH_UNIT, this.glyphAtlas);
+    bind(IMAGE_UNIT, this.imageAtlas);
     gl.useProgram(this.glyphProgram.program);
     gl.uniform1i(this.glyphProgram.uniforms["u_entries"]!, 0);
     gl.uniform1i(this.glyphProgram.uniforms["u_paints"]!, 1);
     gl.uniform1i(this.glyphProgram.uniforms["u_stops"]!, 2);
     gl.uniform1i(this.glyphProgram.uniforms["u_atlas"]!, GLYPH_UNIT);
+    gl.uniform1i(this.glyphProgram.uniforms["u_imageAtlas"]!, IMAGE_UNIT);
+    gl.uniform1i(this.glyphProgram.uniforms["u_tex"]!, TEX_UNIT);
     gl.activeTexture(gl.TEXTURE0);
   }
 
@@ -577,17 +747,36 @@ export class WebGL2Backend implements Backend {
     entries.forEach((e, i) => {
       const k = i * ENTRY_TEXELS * 4;
       const m = e.matrix;
-      const paint = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : 0;
+      const paint = e.paint ? this.paintCache.get(e.paint.key)!.slot.offset : -1;
       const pad = 1; // cover one extra pixel so every MSAA sample the stencil touched is reset
-      data.set([m[0], m[1], m[2], m[3], m[4], m[5], e.item.alpha, paint], k);
+      data.set([m[0], m[1], m[2], m[3], m[4], m[5], e.alpha, paint], k);
       const r = rects[i]!;
       // Layer composites cover exactly their scissor rect (see endLayer).
-      const end = e.kind === ItemKind.EndLayer;
+      const end = e.kind === ItemKind.EndLayer || (e.kind === ItemKind.BeginLayer && !!e.layer?.backdrop);
       data.set([
         Math.max(0, end ? Math.floor(r.minX) - 1 : r.minX - pad), Math.max(0, end ? Math.floor(r.minY) - 1 : r.minY - pad),
         Math.min(this.width, end ? Math.ceil(r.maxX) + 1 : r.maxX + pad), Math.min(this.height, end ? Math.ceil(r.maxY) + 1 : r.maxY + pad),
-        end ? 1 : 0, 0, 0, 0,
       ], k + 8);
+      let mode = 0;
+      let mask = 0;
+      const layer = e.layer;
+      if (e.kind === ItemKind.BeginLayer && layer?.backdrop) {
+        mode = 4; // copies the parent's pixels into the layer (see beginLayer)
+      } else if (end && layer) {
+        mode = layer.backdrop ? 4 : layer.blend !== "normal" ? 3 : 1;
+        if (layer.mode === "mask-group") mask = 3 + (layer.maskType === "luminance" ? 1 : 0);
+      } else if (e.texture) mode = 2;
+      const tex = e.texture ?? e.sampled;
+      const im = e.image;
+      const flags = (tex ? 1 : 0) | (im ? 2 : 0) | (e.shape ? 4 : 0);
+      data.set([mode, layer ? blendCode(layer.blend) : 0, mask, flags], k + 12);
+      if (tex) {
+        const node = tex.node;
+        data.set([tex.x, tex.y, node.rect.width, node.rect.height], k + 16);
+      }
+      if (im) {
+        data.set([im.atlasX, im.atlasY, im.rectX, im.rectY, im.rectWidth, im.rectHeight, im.levelWidth, im.levelHeight, im.pixelsPerTexel, 0, 0, 0], k + 20);
+      }
     });
     gl.bindTexture(gl.TEXTURE_2D, this.entryTexture);
     if (rows > this.entryRows) {
@@ -663,7 +852,8 @@ export class WebGL2Backend implements Backend {
     const cached = this.paintCache.get(record.key);
     if (cached && cached.uploadId === record.uploadId) return 0;
     const paint = record.paint;
-    const stopCount = paint.stops.length / 5;
+    const params = paint.params.length > 0 ? paramsWithImageMatrix(paint) : null;
+    const stopCount = params ? Math.ceil(params.length / 8) : paint.stops.length / 5;
     const slot = cached?.slot ?? this.allocate(this.paintAlloc, 1);
     if (cached) this.stopAlloc.release(cached.stops);
     const stops = this.allocate(this.stopAlloc, stopCount);
@@ -674,7 +864,11 @@ export class WebGL2Backend implements Backend {
       m[0], m[1], m[2], m[3],
       m[4], m[5], 0, 0,
     ));
-    if (stopCount > 0) {
+    if (params) {
+      const sd = new Float32Array(stopCount * 8);
+      sd.set(params);
+      this.stops.write(stops.offset * 2, sd);
+    } else if (stopCount > 0) {
       const sd = new Float32Array(stopCount * 8);
       for (let i = 0; i < stopCount; i++) {
         sd[i * 8] = paint.stops[i * 5]!;
@@ -704,6 +898,12 @@ export class WebGL2Backend implements Backend {
     const gl = this.gl;
     for (const t of this.targets) deleteTarget(gl, t);
     this.targets = [];
+    for (const t of [...this.maskTargets, ...(this.backdrop ? [this.backdrop] : [])]) {
+      gl.deleteFramebuffer(t.fbo);
+      gl.deleteTexture(t.texture);
+    }
+    this.maskTargets = [];
+    this.backdrop = null;
     this.capacityWidth = Math.max(width, this.capacityWidth);
     this.capacityHeight = Math.max(height, this.capacityHeight);
     this.target(0);
@@ -720,6 +920,16 @@ export class WebGL2Backend implements Backend {
     while (this.targets.length <= depth) this.targets.push(createTarget(this.gl, this.capacityWidth, this.capacityHeight, this.samples));
     return this.targets[depth]!;
   }
+}
+
+/** Shaders reading an image get its image-to-local matrix after their parameters (vec4s 6 and 7). */
+function paramsWithImageMatrix(paint: { readonly kind: number; readonly params: Float32Array; readonly imageMatrix: readonly number[]; readonly image: { width: number; height: number } | null }): Float32Array {
+  if (paint.kind !== PaintKind.Shader || !paint.image) return paint.params;
+  const m = paint.imageMatrix;
+  const out = new Float32Array(Math.max(paint.params.length, 24) + 8);
+  out.set(paint.params);
+  out.set([m[0]!, m[1]!, m[2]!, m[3]!, m[4]!, m[5]!, paint.image.width, paint.image.height], 24);
+  return out;
 }
 
 function scissorRect(e: FrameEntry, height: number): [number, number, number, number] {
@@ -739,6 +949,11 @@ function scissorRect(e: FrameEntry, height: number): [number, number, number, nu
 const LAYER_UNIT = 3;
 /** Texture unit of the glyph atlas (R8 coverage). */
 const GLYPH_UNIT = 4;
+/** Units of the image atlas, an entry's effect texture, a blend backdrop and a mask. */
+const IMAGE_UNIT = 5;
+const TEX_UNIT = 6;
+const BACKDROP_UNIT = 7;
+const MASK_UNIT = 8;
 /** Floats per glyph instance: device rect, atlas origin, entry index. */
 const GLYPH_FLOATS = 7;
 
