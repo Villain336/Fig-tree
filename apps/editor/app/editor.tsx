@@ -1,54 +1,20 @@
 "use client";
 
-import { multiply, scaling, translation, type Mat2D } from "@fig-tree/geometry";
+import { multiply, scaling, translation } from "@fig-tree/geometry";
 import { Renderer, Scene, backendFromSearch, type FrameStats } from "@fig-tree/renderer";
-import { CommandError, SceneBridge, cssDeclarations, type Command, type ComputedBox, type FigDocument, type NodeType } from "@fig-tree/document";
-import {
-  Circle,
-  Component,
-  Diamond,
-  File,
-  Frame,
-  Group,
-  Hexagon,
-  Image as ImageIcon,
-  Maximize,
-  Minus,
-  PenTool,
-  Square,
-  Star,
-  TriangleAlert,
-  Type,
-  type LucideIcon,
-} from "lucide-react";
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { AssetStore, CommandError, SceneBridge, type Command, type FigDocument } from "@fig-tree/document";
+import { deletePage, Editor as CoreEditor, paste, placeImage, textSession, copySelection, cutSelection, type AnchorRect, type ClipboardIn } from "@fig-tree/editor-core";
+import type { FontRegistry } from "@fig-tree/text";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Canvas, isPrintable, keyInput, takeInputs, type FrameSample } from "./editor/canvas";
+import { PanelBoundary } from "./editor/boundary";
+import { DesignPanel } from "./editor/design";
+import { LayersPanel, PagesPanel } from "./editor/layers";
+import { ContextMenu, PageMenu, ShortcutsSheet } from "./editor/menus";
+import { EditorContext } from "./editor/state";
+import { Toolbar } from "./editor/toolbar";
 import { editorFonts } from "./fonts";
-import { GRID_BOUNDS, SAMPLE_BOUNDS, buildGridDocument, buildLayoutDocument, buildSampleDocument, buildTextDocument } from "./sample-document";
-
-const ICONS: Record<NodeType, LucideIcon> = {
-  page: File,
-  frame: Frame,
-  group: Group,
-  rectangle: Square,
-  ellipse: Circle,
-  polygon: Hexagon,
-  star: Star,
-  line: Minus,
-  vector: PenTool,
-  text: Type,
-  image: ImageIcon,
-  component: Component,
-  instance: Diamond,
-};
-
-interface Layer {
-  readonly id: string;
-  readonly type: NodeType;
-  readonly name: string;
-  readonly depth: number;
-  readonly unsupported: readonly string[];
-  readonly visible: boolean;
-}
+import { BLANK_BOUNDS, GRID_BOUNDS, SAMPLE_BOUNDS, buildBlankDocument, buildGridDocument, buildLayoutDocument, buildSampleDocument, buildTextDocument } from "./sample-document";
 
 export interface EditorPixels {
   readonly backend: string;
@@ -63,6 +29,8 @@ export interface EditorHarness {
   readonly backend: string;
   readonly doc: FigDocument;
   readonly bridge: SceneBridge;
+  /** The framework-free editor (selection, tools, history, anchors). */
+  readonly editor: CoreEditor;
   /** Applies commands as the local user; returns affected ids or an error message. */
   apply(commands: Command[]): { affected: readonly string[] } | { error: string };
   /** Renders the current view, waits for the GPU and returns the frame. */
@@ -79,10 +47,13 @@ export interface EditorHarness {
   box(id: string): { x: number; y: number; width: number; height: number } | null;
   /** Resolves when every font the document asked for has loaded and its text was laid out again. */
   fontsReady(): Promise<void>;
+  /** Every registered UI anchor with its current rect (null when off screen). */
+  anchors(): { id: string; kind: string; label: string; rect: AnchorRect | null }[];
+  /** Input-to-frame samples recorded since the last call. */
+  takeSamples(): FrameSample[];
+  /** Selected node ids. */
+  selection(): readonly string[];
 }
-
-/** Layer rows shown in the dev panel; large documents are truncated. */
-const MAX_LAYER_ROWS = 400;
 
 declare global {
   interface Window {
@@ -90,171 +61,127 @@ declare global {
   }
 }
 
-function layersOf(doc: FigDocument, bridge: SceneBridge): Layer[] {
-  const out: Layer[] = [];
-  const walk = (id: string, depth: number): void => {
-    // Top of the stack first, as layer panels list it.
-    for (const c of [...doc.tree.childrenOf(id)].reverse()) {
-      if (out.length >= MAX_LAYER_ROWS) return;
-      out.push({
-        id: c,
-        type: doc.typeOf(c)!,
-        name: doc.get<string>(c, "name"),
-        depth,
-        unsupported: [...(bridge.unsupported.get(c) ?? [])],
-        visible: doc.get<boolean>(c, "visible"),
-      });
-      walk(c, depth + 1);
-    }
-  };
-  walk(bridge.page, 0);
-  return out;
+function initialDocument(which: string | null): { doc: FigDocument; bounds: { x: number; y: number; width: number; height: number } } {
+  switch (which) {
+    case "grid10k":
+      return { doc: buildGridDocument(), bounds: GRID_BOUNDS };
+    case "layout10k":
+      return { doc: buildLayoutDocument(), bounds: GRID_BOUNDS };
+    case "text10k":
+      return { doc: buildTextDocument(), bounds: GRID_BOUNDS };
+    case "blank":
+      return { doc: buildBlankDocument(), bounds: BLANK_BOUNDS };
+    default:
+      return { doc: buildSampleDocument(), bounds: SAMPLE_BOUNDS };
+  }
 }
 
-const fmt = (v: number): string => String(Math.round(v * 100) / 100);
+const isField = (t: EventTarget | null): boolean => t instanceof HTMLElement && (t.tagName === "INPUT" || t.tagName === "SELECT" || (t.tagName === "TEXTAREA" && !t.hasAttribute("data-text-input")) || t.isContentEditable);
 
-/** The computed box as inspector rows: position relative to the parent, size, and non-zero padding and border. */
-function boxRows(b: ComputedBox): [string, string][] {
-  const rows: [string, string][] = [
-    ["x", fmt(b.x)],
-    ["y", fmt(b.y)],
-    ["w", fmt(b.width)],
-    ["h", fmt(b.height)],
-  ];
-  const sides = (e: ComputedBox["padding"]): string => [e.top, e.right, e.bottom, e.left].map(fmt).join(" ");
-  if (b.padding.top || b.padding.right || b.padding.bottom || b.padding.left) rows.push(["padding", sides(b.padding)]);
-  if (b.border.top || b.border.right || b.border.bottom || b.border.left) rows.push(["border", sides(b.border)]);
-  return rows;
-}
-
-/** Editor shell: the sample document rendered through the document bridge, a layer tree and a small inspector. */
+/**
+ * The editor app: toolbar, pages and layers, the canvas (GPU renderer plus
+ * overlay), and the design panel. The editor state and behaviour live in
+ * `@fig-tree/editor-core`; this component wires it to the DOM.
+ */
 export function Editor() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [layers, setLayers] = useState<Layer[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [inspect, setInspect] = useState<{ css: Record<string, string>; box: ComputedBox | undefined; unsupported: readonly string[] } | null>(null);
+  const gpuRef = useRef<HTMLCanvasElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [core, setCore] = useState<CoreEditor | null>(null);
+  const [fonts, setFonts] = useState<FontRegistry | null>(null);
   const [status, setStatus] = useState("loading");
-  const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const docRef = useRef<{ doc: FigDocument; bridge: SceneBridge; fit: () => void } | null>(null);
+  const [menu, setMenu] = useState<{ where: "canvas" | "layers"; at: { x: number; y: number } } | null>(null);
+  const [pageMenu, setPageMenu] = useState<{ page: string; at: { x: number; y: number } } | null>(null);
+  const [shortcuts, setShortcuts] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const renderRef = useRef<() => void>(() => {});
 
   useEffect(() => {
-    const canvas = canvasRef.current!;
-    const which = new URLSearchParams(window.location.search).get("doc");
-    const doc = which === "grid10k" ? buildGridDocument() : which === "layout10k" ? buildLayoutDocument() : which === "text10k" ? buildTextDocument() : buildSampleDocument();
-    const bounds = which === "grid10k" || which === "layout10k" || which === "text10k" ? GRID_BOUNDS : SAMPLE_BOUNDS;
+    const canvas = gpuRef.current!;
+    const params = new URLSearchParams(window.location.search);
+    const { doc, bounds } = initialDocument(params.get("doc"));
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const scene = new Scene();
-    // Created once HarfBuzz is ready (text is laid out as the bridge builds the scene).
     let bridge!: SceneBridge;
-    const user = doc.actor("local-user");
+    let editor!: CoreEditor;
     let renderer: Renderer | null = null;
-    let view: Mat2D = [1, 0, 0, 1, 0, 0];
     let disposed = false;
     let scheduled = false;
-    let dragging: { x: number; y: number } | null = null;
-    let lastCpu = 0;
+    let samples: FrameSample[] = [];
+    const assets = new AssetStore();
 
-    let panelsScheduled = false;
-    const refreshPanels = (): void => {
-      setLayers(layersOf(doc, bridge));
-      setTotal(doc.tree.size - 1);
-    };
-    // Panels refresh on the next animation frame, outside the document change itself.
-    const schedulePanels = (): void => {
-      if (panelsScheduled || disposed) return;
-      panelsScheduled = true;
-      requestAnimationFrame(() => {
-        panelsScheduled = false;
-        if (!disposed) refreshPanels();
-      });
+    const renderNow = (): FrameStats | null => {
+      if (!renderer || disposed) return null;
+      renderer.background = bridge.background;
+      const inputs = takeInputs();
+      const stats = renderer.render({ transform: editor.viewport.matrix });
+      const now = performance.now();
+      if (inputs.length) samples.push({ latency: now - Math.min(...inputs), frameCpu: stats.cpuMs, compiled: bridge.lastCompiled });
+      if (samples.length > 5000) samples = samples.slice(-5000);
+      setStatus(`${renderer.backendKind} · ${doc.tree.size} nodes · last update compiled ${bridge.lastCompiled} · frame cpu ${stats.cpuMs.toFixed(1)} ms · ${Math.round(editor.viewport.scale * 100)}%`);
+      return stats;
     };
     const schedule = (): void => {
       if (scheduled || disposed) return;
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        if (!renderer || disposed) return;
-        renderer.background = bridge.background;
-        lastCpu = renderer.render({ transform: view }).cpuMs;
-        setStatus(`${renderer.backendKind} · ${doc.tree.size} nodes · last update compiled ${bridge.lastCompiled} · frame cpu ${lastCpu.toFixed(1)} ms`);
+        renderNow();
       });
     };
+    renderRef.current = schedule;
     const fit = (): void => {
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
       const s = Math.min(w / bounds.width, h / bounds.height) * 0.92;
-      view = multiply(translation(Math.round((w - bounds.width * s) / 2), Math.round((h - bounds.height * s) / 2)), scaling(s));
-      schedule();
+      const m = multiply(translation(Math.round((w - bounds.width * s) / 2), Math.round((h - bounds.height * s) / 2)), scaling(s));
+      editor.viewport.set(m[0], m[4], m[5]);
     };
     const resize = (): void => {
-      renderer?.setSize(canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio || 1);
-      fit();
-    };
-    const unsubscribe = doc.onChange(() => {
-      schedulePanels();
+      if (!renderer) return;
+      renderer.setSize(canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio || 1);
+      editor.viewport.resize(canvas.clientWidth, canvas.clientHeight);
       schedule();
-    });
-
-    const onWheel = (e: WheelEvent): void => {
-      e.preventDefault();
-      const r = canvas.getBoundingClientRect();
-      const x = e.clientX - r.left;
-      const y = e.clientY - r.top;
-      if (e.ctrlKey || e.metaKey) {
-        const f = Math.exp(-e.deltaY * 0.01);
-        view = multiply(multiply(translation(x, y), scaling(f)), multiply(translation(-x, -y), view));
-      } else {
-        view = multiply(translation(-e.deltaX, -e.deltaY), view);
-      }
-      schedule();
-    };
-    const onDown = (e: PointerEvent): void => {
-      dragging = { x: e.clientX, y: e.clientY };
-      canvas.setPointerCapture(e.pointerId);
-    };
-    const onMove = (e: PointerEvent): void => {
-      if (!dragging) return;
-      view = multiply(translation(e.clientX - dragging.x, e.clientY - dragging.y), view);
-      dragging = { x: e.clientX, y: e.clientY };
-      schedule();
-    };
-    const onUp = (e: PointerEvent): void => {
-      const start = dragging;
-      dragging = null;
-      if (!renderer || !start) return;
-      // A click (no drag) selects the node under the cursor.
-      if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < 3) {
-        const r = canvas.getBoundingClientRect();
-        setSelected(bridge.nodeIdFor(renderer.hitTest({ x: e.clientX - r.left, y: e.clientY - r.top })) ?? null);
-      }
     };
 
     (async () => {
-      const fonts = await editorFonts();
+      const registry = await editorFonts();
       if (disposed) return;
-      bridge = new SceneBridge(doc, scene, { fonts });
+      bridge = new SceneBridge(doc, scene, { fonts: registry });
+      editor = new CoreEditor(doc, bridge, { platform: mac ? "mac" : "other", assets });
+      editor.subscribe((changes) => {
+        if (changes.has("view") || changes.has("document") || changes.has("page")) schedule();
+      });
       // Fonts arriving lay text out again without a document change.
       bridge.onSync = () => {
-        schedulePanels();
+        editor.emit("document");
         schedule();
       };
-      docRef.current = { doc, bridge, fit };
+      editor.onRequest = (r) => {
+        if (r.kind === "place-image") fileRef.current?.click();
+        else if (r.kind === "rename") setRenaming(r.id);
+        else if (r.kind === "shortcuts") setShortcuts(true);
+      };
       renderer = await Renderer.create(canvas, { backend: backendFromSearch(window.location.search), background: bridge.background });
       if (disposed) {
         renderer.destroy();
         return;
       }
       renderer.setScene(scene);
+      editor.viewport.resize(canvas.clientWidth, canvas.clientHeight);
       resize();
-      refreshPanels();
+      fit();
+      setFonts(registry);
+      setCore(editor);
       const r = renderer;
       window.__figtree = {
         backend: r.backendKind,
         doc,
         bridge,
+        editor,
         apply(commands) {
           try {
-            return { affected: doc.apply(commands, user).affected };
+            return { affected: editor.history.applyOrThrow(commands).affected };
           } catch (err) {
             if (err instanceof CommandError) return { error: err.message };
             throw err;
@@ -262,158 +189,191 @@ export function Editor() {
         },
         async renderPixels() {
           r.background = bridge.background;
-          await r.renderComplete({ transform: view });
+          await r.renderComplete({ transform: editor.viewport.matrix });
           const px = await r.readPixels();
           let binary = "";
           for (let i = 0; i < px.data.length; i += 0x8000) binary += String.fromCharCode(...px.data.subarray(i, i + 0x8000));
           return { backend: r.backendKind, width: px.width, height: px.height, pixels: btoa(binary) };
         },
         toCanvas(x, y) {
-          return { x: view[0] * x + view[2] * y + view[4], y: view[1] * x + view[3] * y + view[5] };
+          return editor.viewport.toScreen({ x, y });
         },
         renderFrame() {
-          r.background = bridge.background;
-          return r.render({ transform: view });
+          return renderNow()!;
         },
         finish() {
           return r.finish();
         },
         setView(scale, x, y) {
-          view = [scale, 0, 0, scale, x, y];
-          schedule();
+          editor.viewport.set(scale, x, y);
+          editor.emit("view");
         },
         box(id) {
           const b = bridge.box(id);
           return b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null;
         },
         async fontsReady() {
-          // Loads finishing lay text out again (on a microtask), which may ask for more fonts.
           for (;;) {
-            await fonts.whenIdle();
+            await registry.whenIdle();
             await new Promise((resolve) => setTimeout(resolve, 0));
-            if (!fonts.entries().some((e) => e.state === "loading")) return;
+            if (!registry.entries().some((e) => e.state === "loading")) return;
           }
+        },
+        anchors() {
+          return editor.anchors.list().map((a) => ({ ...a, rect: editor.anchors.rect(a.id) }));
+        },
+        takeSamples() {
+          const out = samples;
+          samples = [];
+          return out;
+        },
+        selection() {
+          return editor.selection;
         },
       };
     })().catch((err: unknown) => setError(String(err)));
 
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-    canvas.addEventListener("pointerdown", onDown);
-    canvas.addEventListener("pointermove", onMove);
-    canvas.addEventListener("pointerup", onUp);
-    window.addEventListener("resize", resize);
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
+
+    // Keyboard: shortcuts go to the editor unless a panel field has focus; typed text goes through the canvas textarea.
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (!editor || isField(e.target)) return;
+      if (e.isComposing || e.key === "Process") return;
+      if (textSession(editor) && isPrintable(e, mac)) return;
+      if (editor.keyDown(keyInput(e, mac))) {
+        e.preventDefault();
+        schedule();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (!editor) return;
+      editor.keyUp(keyInput(e, mac));
+    };
+    const onBlur = (): void => editor?.blur();
+    const onCopy = (e: ClipboardEvent): void => {
+      if (!editor || isField(e.target)) return;
+      const out = e.type === "cut" ? cutSelection(editor) : copySelection(editor);
+      if (!out) return;
+      e.preventDefault();
+      e.clipboardData?.setData("text/plain", out.text);
+      if (out.html) e.clipboardData?.setData("text/html", out.html);
+      schedule();
+    };
+    const onPaste = (e: ClipboardEvent): void => {
+      if (!editor || isField(e.target)) return;
+      e.preventDefault();
+      void readTransfer(e.clipboardData).then((data) => paste(editor, data)).then(schedule);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCopy);
+    document.addEventListener("paste", onPaste);
     return () => {
       disposed = true;
-      unsubscribe();
-      canvas.removeEventListener("wheel", onWheel);
-      canvas.removeEventListener("pointerdown", onDown);
-      canvas.removeEventListener("pointermove", onMove);
-      canvas.removeEventListener("pointerup", onUp);
-      window.removeEventListener("resize", resize);
+      ro.disconnect();
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCopy);
+      document.removeEventListener("paste", onPaste);
+      editor?.dispose();
       bridge?.dispose();
       renderer?.destroy();
       delete window.__figtree;
     };
   }, []);
 
-  useEffect(() => {
-    const ctx = docRef.current;
-    if (!ctx || !selected || !ctx.doc.has(selected)) {
-      setInspect(null);
-      return;
-    }
-    setInspect({ css: cssDeclarations(ctx.doc, selected), box: ctx.bridge.box(selected), unsupported: [...(ctx.bridge.unsupported.get(selected) ?? [])] });
-  }, [selected, layers]);
-
-  const fitView = useCallback(() => docRef.current?.fit(), []);
+  const render = useCallback(() => renderRef.current(), []);
+  const openCanvasMenu = useCallback((at: { x: number; y: number }) => setMenu({ where: "canvas", at }), []);
 
   return (
-    <div className="flex h-dvh flex-col bg-neutral-100 text-neutral-900">
-      <header className="flex h-11 shrink-0 items-center justify-between border-b border-neutral-200 bg-white px-4">
-        <span className="text-sm font-semibold tracking-tight">Fig Tree</span>
-        <nav className="flex items-center gap-4 text-sm text-neutral-600">
-          <button type="button" onClick={fitView} className="flex items-center gap-1 hover:text-neutral-900" title="Fit the page in view">
-            <Maximize size={14} aria-hidden /> Fit
-          </button>
-          <a className="hover:text-neutral-900" href="/bench">
-            Renderer benchmark
-          </a>
-        </nav>
-      </header>
-      <div className="flex min-h-0 flex-1">
-        <aside className="w-64 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white py-2" aria-label="Layers">
-          <h2 className="px-3 pb-1 text-xs font-medium text-neutral-500">Layers</h2>
-          <ul className="text-[13px]" data-testid="layers">
-            {layers.map((l) => {
-              const Icon = ICONS[l.type];
-              return (
-                <li key={l.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelected(l.id)}
-                    className={`flex w-full items-center gap-1.5 py-1 pr-2 text-left ${selected === l.id ? "bg-sky-100" : "hover:bg-neutral-100"} ${l.visible ? "" : "text-neutral-400"}`}
-                    style={{ paddingLeft: 12 + l.depth * 14 }}
-                    data-node={l.id}
-                  >
-                    <Icon size={13} className="shrink-0 text-neutral-500" aria-hidden />
-                    <span className="truncate">{l.name}</span>
-                    {l.unsupported.length > 0 && (
-                      <span className="ml-auto shrink-0 text-amber-600" title={`Not rendered yet: ${l.unsupported.join(", ")}`}>
-                        <TriangleAlert size={12} aria-label="has unsupported features" />
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          {total > layers.length && <p className="px-3 py-1 text-[12px] text-neutral-400">{(total - layers.length).toLocaleString()} more layers not listed</p>}
-        </aside>
-        <main className="relative min-w-0 flex-1">
-          <canvas ref={canvasRef} className="block h-full w-full touch-none" data-testid="canvas" />
-          {error && <p className="absolute left-3 top-3 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{error}</p>}
-        </main>
-        <aside className="w-64 shrink-0 overflow-y-auto border-l border-neutral-200 bg-white p-3 text-[12px]" aria-label="Inspector">
-          {inspect?.box && (
-            <>
-              <h2 className="pb-1 text-xs font-medium text-neutral-500">Layout</h2>
-              <dl className="mb-3 grid grid-cols-[auto_1fr] gap-x-3 font-mono text-[11px] leading-5 text-neutral-700" data-testid="box">
-                {boxRows(inspect.box).map(([k, v]) => (
-                  <Fragment key={k}>
-                    <dt className="text-neutral-400">{k}</dt>
-                    <dd>{v}</dd>
-                  </Fragment>
-                ))}
-              </dl>
-            </>
-          )}
-          <h2 className="pb-1 text-xs font-medium text-neutral-500">CSS</h2>
-          {inspect ? (
-            <>
-              <pre className="whitespace-pre-wrap break-all font-mono text-[11px] leading-5 text-neutral-700" data-testid="css">
-                {Object.entries(inspect.css)
-                  .map(([k, v]) => `${k}: ${v};`)
-                  .join("\n")}
-              </pre>
-              {inspect.unsupported.length > 0 && (
-                <>
-                  <h2 className="pb-1 pt-3 text-xs font-medium text-neutral-500">Not rendered yet</h2>
-                  <ul className="list-inside list-disc text-neutral-600">
-                    {inspect.unsupported.map((u) => (
-                      <li key={u}>{u}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-            </>
+    <EditorContext.Provider value={core}>
+      <div className="flex h-dvh flex-col bg-stone-100 text-stone-900" onDragOver={(e) => e.preventDefault()} onDrop={(e) => {
+        e.preventDefault();
+        if (!core) return;
+        const host = (e.target as HTMLElement).closest("[data-testid=canvas-host]");
+        const r = host?.getBoundingClientRect();
+        void readTransfer(e.dataTransfer).then(async (data) => {
+          const at = r ? core.viewport.toWorld({ x: e.clientX - r.left, y: e.clientY - r.top }) : undefined;
+          const image = data.files?.find((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type));
+          if (image && at) await placeImage(core, image.bytes, image.name, at);
+          else await paste(core, data);
+          render();
+        });
+      }}>
+        {core ? (
+          <PanelBoundary name="Toolbar">
+            <Toolbar onShortcuts={() => setShortcuts(true)} />
+          </PanelBoundary>
+        ) : (
+          <header className="h-11 shrink-0 border-b border-stone-200 bg-white" />
+        )}
+        <div className="flex min-h-0 flex-1">
+          <aside className="flex w-64 shrink-0 flex-col border-r border-stone-200 bg-white" aria-label="Pages and layers">
+            {core && (
+              <PanelBoundary name="Layers">
+                <PagesPanel onPageMenu={(page, at) => setPageMenu({ page, at })} />
+                <LayersPanel onContextMenu={(at) => setMenu({ where: "layers", at })} renaming={renaming} setRenaming={setRenaming} />
+              </PanelBoundary>
+            )}
+          </aside>
+          <main className="relative min-w-0 flex-1">
+            <canvas ref={gpuRef} className="block h-full w-full" data-testid="canvas" />
+            {core && <Canvas onContextMenu={openCanvasMenu} render={render} />}
+            {error && <p className="absolute left-3 top-3 rounded bg-red-50 px-2 py-1 text-xs text-red-700">{error}</p>}
+          </main>
+          {core ? (
+            <PanelBoundary name="Design panel">
+              <DesignPanel fonts={fonts} />
+            </PanelBoundary>
           ) : (
-            <p className="text-neutral-400">Select a layer.</p>
+            <aside className="w-64 shrink-0 border-l border-stone-200 bg-white" />
           )}
-        </aside>
+        </div>
+        <footer className="h-7 shrink-0 border-t border-stone-200 bg-white px-4 font-mono text-[11px] leading-7 text-stone-500" data-testid="status">
+          {status}
+        </footer>
+        {core && menu && <ContextMenu where={menu.where} at={menu.at} onClose={() => setMenu(null)} />}
+        {core && pageMenu && (
+          <PageMenu page={pageMenu.page} at={pageMenu.at} onClose={() => setPageMenu(null)} onRename={() => setRenaming(pageMenu.page)} onDelete={() => deletePage(core, pageMenu.page)} />
+        )}
+        {core && shortcuts && <ShortcutsSheet onClose={() => setShortcuts(false)} />}
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+          className="hidden"
+          data-testid="image-input"
+          aria-label="Image file"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (!core) return;
+            if (!file) {
+              core.setTool("select");
+              return;
+            }
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            if (file.type === "image/svg+xml") await paste(core, { files: [{ type: file.type, name: file.name, bytes }] });
+            else await placeImage(core, bytes, file.name);
+            core.setTool("select");
+            render();
+          }}
+        />
       </div>
-      <footer className="h-7 shrink-0 border-t border-neutral-200 bg-white px-4 font-mono text-[11px] leading-7 text-neutral-500" data-testid="status">
-        {status}
-      </footer>
-    </div>
+    </EditorContext.Provider>
   );
+}
+
+async function readTransfer(dt: DataTransfer | null): Promise<ClipboardIn> {
+  if (!dt) return {};
+  const files: { type: string; name: string; bytes: Uint8Array }[] = [];
+  for (const f of Array.from(dt.files)) files.push({ type: f.type, name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+  const html = dt.getData("text/html");
+  const text = dt.getData("text/plain");
+  return { ...(html ? { html } : {}), ...(text ? { text } : {}), ...(files.length ? { files } : {}) };
 }

@@ -337,27 +337,29 @@ test("backends agree on the sample document", async ({ page }) => {
 test("lists layers and inspects a selected node's CSS", async ({ page }) => {
   await openEditor(page, "webgl2");
   const layers = page.getByTestId("layers");
-  await expect(layers.locator("button[data-node]")).toHaveCount(59);
+  await expect(layers.locator("[data-node]")).toHaveCount(59);
   // Everything in the sample renders, text included.
   await expect(layers.locator('[aria-label="has unsupported features"]')).toHaveCount(0);
-  await layers.locator('button[data-node="shapes"]').click();
+  // The CSS view is a tab of the design panel.
+  await page.getByTestId("tab-css").click();
+  await layers.locator('[data-node="shapes"]').click();
   await expect(page.getByTestId("css")).toContainText("left: 480px;");
   await expect(page.getByTestId("css")).toContainText("overflow: hidden;");
-  // Clicking the canvas hit-tests through the bridge.
+  // Clicking the canvas hit-tests through the bridge and selects the layer.
   const c = await page.evaluate(() => window.__figtree!.toCanvas(660, 118));
   const box = (await page.getByTestId("canvas").boundingBox())!;
   await page.mouse.click(box.x + c.x, box.y + c.y);
-  await expect(layers.locator('button[data-node="star"]')).toHaveClass(/bg-sky-100/);
+  await expect(layers.locator('[data-node="star"]').locator("xpath=..")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByTestId("css")).toContainText("width: 88px;");
   // The inspector shows the computed layout box of a grid item and the frame's padding.
-  await layers.locator('button[data-node="cell-tall"]').click();
+  await layers.locator('[data-node="cell-tall"]').click();
   await expect(page.getByTestId("box")).toContainText("x241.33y12w106.67h236");
   await expect(page.getByTestId("css")).toContainText("align-self: stretch;");
-  await layers.locator('button[data-node="gallery"]').click();
+  await layers.locator('[data-node="gallery"]').click();
   await expect(page.getByTestId("box")).toContainText("padding12 12 12 12");
   await expect(page.getByTestId("css")).toContainText("grid-template-columns: repeat(3, 1fr);");
   // A text node's typography is CSS, and its box is the text engine's measurement.
-  await layers.locator('button[data-node="type-heading"]').click();
+  await layers.locator('[data-node="type-heading"]').click();
   await expect(page.getByTestId("css")).toContainText("font-weight: 700;");
   await expect(page.getByTestId("css")).toContainText("width: max-content;");
   await expect(page.getByTestId("box")).toContainText("h39");

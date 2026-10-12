@@ -2,13 +2,15 @@ import { AssetStore, type FigDocument, type SceneBridge } from "@fig-tree/docume
 import type { Point } from "@fig-tree/geometry";
 import { AnchorRegistry, type AnchorRect } from "./anchors";
 import type { ClipPayload } from "./clipboard/format";
+import { MAX_STOP_ANCHORS, gradientHandles, type PaintTarget } from "./gradient";
+import { selectionHandles } from "./handles";
 import { runAction, actionEnabled } from "./actions";
 import { CanvasGeometry } from "./geometry";
 import { History } from "./history";
 import { actionFor, type KeyInput, type Platform } from "./keymap";
 import { LocalPresence } from "./presence";
 import { normalizeSelection } from "./selection";
-import { handleRect, type OverlayItem } from "./overlay";
+import type { OverlayItem } from "./overlay";
 import { buildOverlay } from "./overlay-build";
 import { EditModeRegistry, ToolRegistry, type Cursor, type EditSession, type Tool, type ToolPointer } from "./tools/tool";
 import { registerBuiltinTools } from "./tools/builtin";
@@ -81,7 +83,7 @@ export class Editor {
   readonly editModes = new EditModeRegistry();
   readonly platform: Platform;
   readonly assets: AssetStore;
-  readonly measureText: (text: string) => number;
+  measureText: (text: string) => number;
   settings: EditorSettings = { snapping: true, pixelSnap: true, pixelGrid: true, rulers: false };
 
   private _tool: Tool;
@@ -105,6 +107,8 @@ export class Editor {
   overlayVersion = 0;
   /** Bumped on document changes seen by the editor. */
   docVersion = 0;
+  /** The gradient paint whose handles show on the canvas (set while the color picker edits it). */
+  paintEdit: PaintTarget | null = null;
   /** The last copied nodes, for pasting when the system clipboard is unavailable. */
   internalClipboard: ClipPayload | null = null;
   /** Called when the user asks for something the host provides (file picker, rename field, shortcuts sheet). */
@@ -238,6 +242,12 @@ export class Editor {
       next.activate?.(this);
       this.emit("tool", "overlay");
     });
+  }
+
+  /** Shows (or hides, with null) the on-canvas handles of a gradient paint. */
+  setPaintEdit(target: PaintTarget | null): void {
+    this.paintEdit = target;
+    this.emit("overlay");
   }
 
   updateSettings(patch: Partial<EditorSettings>): void {
@@ -480,6 +490,7 @@ export class Editor {
       "canvas.handle.gradient.center",
       "canvas.handle.gradient.radiusX",
       "canvas.handle.gradient.radiusY",
+      ...Array.from({ length: MAX_STOP_ANCHORS }, (_, i) => `canvas.handle.gradient.stop.${i}`),
     ];
     for (const id of ids) {
       const label = id.split(".").slice(2).join(" ");
@@ -487,12 +498,14 @@ export class Editor {
     }
   }
 
+  /** A canvas handle's rect from the current state (not the last drawn overlay, which may be a frame behind). */
   private handleClientRect(id: string): AnchorRect | null {
-    const h = this.lastOverlay.find((i): i is Extract<OverlayItem, { kind: "handle" }> => i.kind === "handle" && i.id === id);
+    const all = [...(this._session ? [] : selectionHandles(this)), ...gradientHandles(this)];
+    const h = all.find((x) => x.id === id);
     if (!h) return null;
-    const r = handleRect(h);
+    const size = Math.max("size" in h ? h.size : 10, 10);
     const o = this.canvasOrigin();
-    return { x: r.x + o.x, y: r.y + o.y, width: r.width, height: r.height };
+    return { x: h.center.x - size / 2 + o.x, y: h.center.y - size / 2 + o.y, width: size, height: size };
   }
 }
 

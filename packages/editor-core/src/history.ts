@@ -49,6 +49,12 @@ export class History {
     }
   }
 
+  /** Like {@link apply}, but throws the CommandError of a rejected batch. */
+  applyOrThrow(commands: readonly (Command | TypedCommand)[]): ReturnType<FigDocument["apply"]> {
+    if (this.soft !== null) this.closeSoftGroup();
+    return this.doc.apply(commands, this.actor);
+  }
+
   /** Ends the open soft group, if any (the next typing starts a new undo step). */
   closeSoftGroup(): void {
     if (this.soft === null) return;

@@ -2,6 +2,7 @@ import { flattenPath, type Point } from "@fig-tree/geometry";
 import type { Editor } from "./editor";
 import { frameBox, selectionFrame, selectionHandles } from "./handles";
 import { frameLabels } from "./labels";
+import { gradientOverlay } from "./gradient";
 import { boxContainsBox, boxesIntersect, transformPoint, type Box } from "./math";
 import type { OverlayItem } from "./overlay";
 import { formatNumber } from "./tools/select";
@@ -44,10 +45,11 @@ export function buildOverlay(editor: Editor): OverlayItem[] {
       const b = frameBox(frame);
       const bottom = vp.toScreen({ x: b.x + b.width / 2, y: b.y + b.height });
       const label = frame.kind === "line" ? formatNumber(frame.width) : `${formatNumber(frame.width)} × ${formatNumber(frame.height)}`;
-      if (gesture !== "marquee") out.push({ kind: "label", role: "size", at: { x: bottom.x, y: bottom.y + 16 }, text: label });
+      if (gesture !== "marquee") out.push({ kind: "label", role: "size", at: { x: bottom.x, y: bottom.y + 20 }, text: label });
     }
   }
   if (editor.measuring && !busy && ids.length > 0 && hover && !selected.has(hover)) measure(editor, ids, hover, out);
+  gradientOverlay(editor, out);
   editor.tool.overlay?.(editor, out);
   session?.overlay(out);
   return out;

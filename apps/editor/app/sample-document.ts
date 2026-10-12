@@ -416,3 +416,12 @@ export function buildTextDocument(): FigDocument {
   doc.apply(commands, doc.actor("sample", "system"));
   return doc;
 }
+
+/** An empty document with one page (`/?doc=blank`), for drawing from scratch. */
+export function buildBlankDocument(): FigDocument {
+  const doc = FigDocument.create({ random: seededRandom(7), clientId: 1, name: "Untitled", pageName: "Page 1" });
+  doc.apply([{ type: "updateProps", id: doc.pages[0]!, props: { backgroundColor: rgb(238, 238, 234) } }], doc.actor("sample", "system"));
+  return doc;
+}
+
+export const BLANK_BOUNDS = { x: 0, y: 0, width: 1000, height: 700 };

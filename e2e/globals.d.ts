@@ -18,9 +18,16 @@ interface BenchHarness {
   stopRecording(): { frameIntervals: number[]; cpuMs: number[]; uploadedBytes: number };
 }
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
 interface EditorHarness {
   readonly backend: string;
-  readonly doc: { readonly tree: { readonly size: number } };
+  /** The document (FigDocument); tests read it inside page.evaluate. */
+  readonly doc: any;
+  /** The framework-free editor (packages/editor-core Editor). */
+  readonly editor: any;
+  anchors(): { id: string; kind: string; label: string; rect: { x: number; y: number; width: number; height: number } | null }[];
+  takeSamples(): { latency: number; frameCpu: number; compiled: number }[];
+  selection(): readonly string[];
   readonly bridge: { readonly lastCompiled: number };
   apply(commands: unknown[]): { affected: readonly string[] } | { error: string };
   renderPixels(): Promise<RenderTestResult>;

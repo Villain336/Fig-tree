@@ -1,4 +1,4 @@
-import { newId, type Command, type FigDocument } from "@fig-tree/document";
+import { hasProp, newId, type Command, type FigDocument } from "@fig-tree/document";
 import type { Editor } from "./editor";
 import { boxContainsPoint, clean, invert, transformPoint, unionBoxes, type Box } from "./math";
 import { boxFromMatrix } from "@fig-tree/document";
@@ -6,7 +6,7 @@ import { multiply, type Mat2D } from "@fig-tree/geometry";
 import { layoutDisplay, reparentCommands } from "./placement";
 import { isBoard, isContainer, normalizeSelection, selectableChildren, selectionScope, sortByPaintOrder } from "./selection";
 import { textSession } from "./text/mode";
-import { boxedNodes, capture, isInFlow, moveProps, placementProps } from "./transform";
+import { boxedNodes, capture, constrainChild, isInFlow, moveProps, placementProps, resizeProps, rotateProps, scaleProps } from "./transform";
 
 /**
  * Editor actions: what menus, shortcuts and panel buttons do. Each returns
@@ -631,3 +631,130 @@ export function moveInTree(editor: Editor, ids: readonly string[], parent: strin
 }
 
 export { boxContainsPoint };
+
+// ── Panel edits of geometry ────────────────────────────────────────────
+
+export type GeometryKey = "x" | "y" | "width" | "height" | "rotation";
+
+/**
+ * The value the design panel shows for a node: x/y are the laid-out box's
+ * position in its parent (groups: their bounds in the parent's space),
+ * width/height the laid-out size, rotation the stored clockwise degrees.
+ */
+export function geometryValue(editor: Editor, id: string, key: GeometryKey): number {
+  const doc = editor.doc;
+  const geom = editor.geometry;
+  if (key === "rotation") return doc.typeOf(id) === "group" ? 0 : doc.get<number>(id, "rotation");
+  if (doc.typeOf(id) === "group") {
+    const b = geom.bounds(id);
+    const inv = invert(parentSpaceOf(editor, doc.tree.parentOf(id)!))!;
+    const p = transformPoint(inv, b.x, b.y);
+    return clean(key === "x" ? p.x : key === "y" ? p.y : key === "width" ? b.width : b.height, 100);
+  }
+  const box = editor.bridge.box(id);
+  if (key === "width" || key === "height") return clean(box ? box[key] : doc.get<number>(id, key), 100);
+  return clean(box ? box[key] : doc.get<number>(id, key), 100);
+}
+
+/**
+ * Sets x, y, width, height or rotation of nodes from the design panel. `fn`
+ * maps each node's current value to its new one (so "+10" and mixed values
+ * work per node). Sizes keep the top-left corner in place (on rotated nodes
+ * too), switch the dimension to fixed, apply frames' children constraints,
+ * and respect a locked aspect ratio; rotation turns about the center.
+ */
+export function setGeometry(editor: Editor, ids: readonly string[], key: GeometryKey, fn: (old: number) => number): boolean {
+  const doc = editor.doc;
+  const geom = editor.geometry;
+  const cmds: Command[] = [];
+  for (const id of normalizeSelection(doc, ids, editor.page)) {
+    const old = geometryValue(editor, id, key);
+    const next = fn(old);
+    if (!Number.isFinite(next) || Math.abs(next - old) < 1e-9) continue;
+    if (doc.typeOf(id) === "group") {
+      const kids = boxedNodes(doc, [id]);
+      const b = geom.bounds(id);
+      if (key === "x" || key === "y") {
+        const space = parentSpaceOf(editor, doc.tree.parentOf(id)!);
+        const d = key === "x" ? { x: space[0] * (next - old), y: space[1] * (next - old) } : { x: space[2] * (next - old), y: space[3] * (next - old) };
+        for (const k of kids) {
+          const c = capture(geom, k);
+          if (!c.inFlow) cmds.push({ type: "updateProps", id: k, props: moveProps(c, d.x, d.y) as Record<string, unknown> });
+        }
+      } else if (key === "width" || key === "height") {
+        if (next <= 0) continue;
+        const to = { x: b.x, y: b.y, width: key === "width" ? next : b.width, height: key === "height" ? next : b.height };
+        for (const k of kids) cmds.push({ type: "updateProps", id: k, props: scaleProps(capture(geom, k), b, to) as Record<string, unknown> });
+      } else {
+        const pivot = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        for (const k of kids) cmds.push({ type: "updateProps", id: k, props: rotateProps(capture(geom, k), next - old, pivot) as Record<string, unknown> });
+      }
+      continue;
+    }
+    const c = capture(geom, id);
+    if (key === "x" || key === "y") {
+      if (c.inFlow) continue;
+      cmds.push({ type: "updateProps", id, props: { [key]: clean(doc.get<number>(id, key) + next - old) } });
+    } else if (key === "rotation") {
+      const center = transformPoint(c.world, c.width / 2, c.height / 2);
+      cmds.push({ type: "updateProps", id, props: rotateProps(c, next - old, center) as Record<string, unknown> });
+    } else {
+      if (next < 0) continue;
+      let w = key === "width" ? next : c.width;
+      let h = key === "height" ? next : c.height;
+      const ratio = doc.stored(id, "aspectRatio");
+      if (typeof ratio === "number" && ratio > 0) {
+        if (key === "width") h = clean(w / ratio, 1e4);
+        else w = clean(h * ratio, 1e4);
+      }
+      const p = resizeProps(c, { x: 0, y: 0, width: w, height: h }) as Record<string, unknown>;
+      const modes: Record<string, unknown> = {};
+      const type = doc.typeOf(id);
+      if (p.width !== undefined && doc.get(id, "widthMode") !== "fixed") modes.widthMode = "fixed";
+      if (p.height !== undefined && doc.get(id, "heightMode") !== "fixed" && type !== "text") modes.heightMode = "fixed";
+      if (type === "text" && p.width !== undefined && p.height === undefined && doc.get(id, "heightMode") === "hug") modes.heightMode = "hug";
+      if (type === "text" && p.height !== undefined) modes.heightMode = "fixed";
+      cmds.push({ type: "updateProps", id, props: { ...p, ...modes } });
+      if (["frame", "component", "instance"].includes(type!)) {
+        for (const k of boxedNodes(doc, doc.tree.childrenOf(id))) {
+          if (isInFlow(doc, k)) continue;
+          const child = { x: doc.get<number>(k, "x"), y: doc.get<number>(k, "y"), width: doc.get<number>(k, "width"), height: doc.get<number>(k, "height") };
+          const n = constrainChild(child, doc.get(k, "constraints"), { width: c.width, height: c.height }, { width: w, height: h });
+          const out: Record<string, number> = {};
+          for (const kk of ["x", "y", "width", "height"] as const) if (n[kk] !== child[kk]) out[kk] = n[kk];
+          if (Object.keys(out).length) cmds.push({ type: "updateProps", id: k, props: out });
+        }
+      }
+    }
+  }
+  if (cmds.length === 0) return false;
+  return editor.history.apply(cmds) !== null;
+}
+
+/** Sets properties on several nodes in one undo step, skipping nodes whose type lacks a property. */
+export function setProps(editor: Editor, ids: readonly string[], props: Record<string, unknown> | ((id: string) => Record<string, unknown> | null)): boolean {
+  const cmds: Command[] = [];
+  for (const id of ids) {
+    if (!editor.doc.has(id)) continue;
+    const p = typeof props === "function" ? props(id) : props;
+    if (!p) continue;
+    const type = editor.doc.typeOf(id)!;
+    const ok = Object.fromEntries(Object.entries(p).filter(([k]) => hasProp(type, k)));
+    if (Object.keys(ok).length) cmds.push({ type: "updateProps", id, props: ok });
+  }
+  if (cmds.length === 0) return false;
+  return editor.history.apply(cmds) !== null;
+}
+
+/** Creates a frame of a size centered in the view (frame presets), selected, and returns to the select tool. */
+export function newFrameAt(editor: Editor, width: number, height: number, name: string): string | null {
+  const v = editor.viewport.visibleWorld;
+  const id = newId(editor.doc.random);
+  const r = editor.history.apply([
+    { type: "createNode", node: { id, type: "frame", props: { name, x: Math.round(v.x + v.width / 2 - width / 2), y: Math.round(v.y + v.height / 2 - height / 2), width, height, fills: [{ type: "solid", color: { r: 1, g: 1, b: 1, a: 1 } }] } }, parent: editor.page },
+  ]);
+  if (!r) return null;
+  editor.setTool("select");
+  editor.select([id]);
+  return id;
+}

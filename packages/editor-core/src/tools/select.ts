@@ -6,6 +6,7 @@ import { frameBox, hitHandle, selectionFrame, type HandleInfo, type SelectionFra
 import { pickPath } from "../hit-test";
 import type { KeyInput } from "../keymap";
 import { labelAt } from "../labels";
+import { dragGradientHandle, hitGradientHandle, type GradientHandle } from "../gradient";
 import { angleOf, boxContainsPoint, boxFromCorners, clean, distance, toLocal, transformPoint, type Box } from "../math";
 import type { OverlayItem } from "../overlay";
 import { containerAt, flowInsertIndex, layoutDisplay, reparentCommands, snapTargets } from "../placement";
@@ -37,6 +38,7 @@ interface Press {
   readonly target: string | null;
   readonly wasSelected: boolean;
   readonly handle: HandleInfo | null;
+  readonly gradient?: GradientHandle;
 }
 
 interface ChildCapture {
@@ -76,7 +78,8 @@ type Gesture =
     }
   | { readonly kind: "rotate"; readonly pivot: Point; readonly startAngle: number; readonly baseRotation: number; readonly captured: Captured[]; angle: number }
   | { readonly kind: "endpoint"; readonly captured: Captured; readonly endpoint: 0 | 1; readonly fixed: Point }
-  | { readonly kind: "marquee"; readonly start: Point; readonly base: readonly string[]; rect: Box };
+  | { readonly kind: "marquee"; readonly start: Point; readonly base: readonly string[]; rect: Box }
+  | { readonly kind: "gradient"; readonly handle: GradientHandle };
 
 /**
  * The select tool: click, shift-click and Cmd/Ctrl deep select, double-click
@@ -125,6 +128,11 @@ export class SelectTool implements Tool {
       return;
     }
     if (e.button !== 0) return;
+    const gradient = e.clickCount === 1 ? hitGradientHandle(editor, e.screen) : null;
+    if (gradient) {
+      this.press = { start: e, target: null, wasSelected: true, handle: null, gradient };
+      return;
+    }
     const frame = selectionFrame(editor);
     const handle = e.clickCount === 1 ? hitHandle(editor, e.screen, frame) : null;
     if (handle) {
@@ -210,7 +218,7 @@ export class SelectTool implements Tool {
       editor.emit("overlay");
       return;
     }
-    if (!p || p.handle) return;
+    if (!p || p.handle || p.gradient) return;
     // A click without a drag.
     if (p.target === SELECTION) {
       editor.select([]);
@@ -237,6 +245,7 @@ export class SelectTool implements Tool {
     if (g?.kind === "rotate") return "rotate";
     if (g?.kind === "move") return editor.lastPointer?.alt ? "copy" : "default";
     if (this.press?.handle) return this.press.handle.cursor;
+    if (this.press?.gradient) return "move";
     if (this.hoverHandle) return this.hoverHandle.cursor;
     return "default";
   }
@@ -246,6 +255,11 @@ export class SelectTool implements Tool {
   private begin(editor: Editor, p: Press, e: ToolPointer): void {
     const doc = editor.doc;
     const geom = editor.geometry;
+    if (p.gradient) {
+      editor.history.begin();
+      this.gesture = { kind: "gradient", handle: p.gradient };
+      return;
+    }
     if (p.handle) {
       const frame = selectionFrame(editor);
       if (!frame) return;
@@ -337,6 +351,12 @@ export class SelectTool implements Tool {
       }
       case "move":
         return this.updateMove(editor, g, e);
+      case "gradient": {
+        const t = editor.paintEdit;
+        const paints = dragGradientHandle(editor, g.handle, e.world);
+        if (t && paints) editor.history.apply([{ type: "updateProps", id: t.id, props: { [t.key]: paints } }]);
+        return;
+      }
       case "resize":
         return this.updateResize(editor, g, e);
       case "rotate": {

@@ -31,3 +31,4 @@ export { CLIPBOARD_FORMAT, payloadFromHtml, payloadText, payloadToHtml, pasteCom
 export { looksLikeSvg, parseColor, parseTransform, svgToPayload } from "./clipboard/svg";
 export { parsePathData, subpathsToNetwork, arcToCubics, type Subpath } from "./clipboard/svg-path";
 export { parseXml, type XmlElement } from "./clipboard/xml";
+export { dragGradientHandle, editedGradient, gradientHandles, hitGradientHandle, type GradientHandle, type PaintTarget } from "./gradient";
