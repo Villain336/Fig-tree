@@ -163,6 +163,28 @@ What the tests assert, and what the numbers show:
 
 Unit tests (`packages/renderer/test/glyphs.test.ts`) check the coverage rasterizer against exact polygon areas (within 8-bit rounding), caching (a glyph is rasterized once per size bucket and subpixel phase), eviction (least recently used first, never a glyph of the current frame), that panning re-rasterizes nothing, and that rotated or zoomed-in runs draw as outline paths.
 
+## Editing (Module 5a)
+
+Measured on 2026-10-12 on the machine above (`e2e/editing-bench.spec.ts`, part of `npm run bench`; `packages/editor-core/test/perf.test.ts` for Node). Real mouse and keyboard input through Playwright on 10,000-node documents, zoomed in so a few frames are on screen. Each input waits for the frame that shows it. Ranges are over three runs; p95 varies most (an occasional garbage collection or SwiftShader stall lands on a frame).
+
+**Input-to-frame latency (CPU)** is the CPU work from an input event to the end of the frame that shows it: handling the input (the editor's state machine, the command with its zod validation and Yjs transaction, layout, the bridge recompiling what changed) plus the frame's render CPU (draw-list update, frame planning, encoding). GPU time is not in it: here every frame is rasterized by SwiftShader on the CPU, and the wall clock from input to the end of the frame's CPU work is dominated by waiting for SwiftShader to finish the previous frame (both are reported).
+
+| Scenario | Backend | Input-to-frame CPU, median / p95 | Input handling (median) | Frame CPU (median) | Wall clock (median) | Nodes recompiled per frame (max, counted per frame) |
+|---|---|---|---|---|---|---|
+| Drag one shape (`/?doc=grid10k`, 30 steps) | WebGPU | 6.6–7.3 / 9–27 ms | 3.0–3.7 ms | 2.7–2.8 ms | 300–390 ms | 1 |
+| | WebGL2 | 5.4–6.3 / 10–13 ms | 2.6–3.1 ms | 2.5–3.1 ms | 165–187 ms | 1 |
+| Resize one shape with its corner handle | WebGPU | 2.9–3.3 / 6–9 ms | 1.2–1.4 ms | 1.5–1.8 ms | 287–349 ms | 1 |
+| | WebGL2 | 3.7–5.0 / 8–9 ms | 1.1–1.2 ms | 2.1–3.0 ms | 166–188 ms | 1 |
+| Type 45 characters into a paragraph (`/?doc=text10k`, 2,000 texts) | WebGPU | 14.5–15.8 / 28–30 ms | 2.4–3.3 ms | 11.9–12.3 ms | 292–373 ms | 1 |
+| | WebGL2 | 8.5–10.7 / 19–29 ms | 2.8–3.4 ms | 5.2–6.8 ms | 212–236 ms | 1 |
+
+What the numbers and the assertions show:
+- **Edits touch one node.** A drag or resize step recompiles exactly the dragged node, and a keystroke the edited text (asserted: at most 2 for gestures and well under the card's size for typing; measured 1 in every frame). Gestures write to the document on every pointer move (that is what collaborators see), and all the steps of a gesture are one undo step.
+- **Where the time goes.** Handling one pointer move takes about 1–4 ms (the command layer and layout dominate; hit-testing is not involved during a drag). Typing pays for shaping and laying out the paragraph again (about 3 ms with the editor around it) and a frame with more glyph work (5–13 ms CPU, the WebGPU encoder doing more per glyph entry than WebGL2's instanced draw).
+- **Wall clock.** Between 0.17 and 0.4 s per frame here, almost all of it SwiftShader. When the GPU is idle at the moment of input (the first measurements, which waited for the GPU between inputs) the wall clock was 6–12 ms for drags and resizes.
+
+In Node (`perf.test.ts`, 100 frames × 99 shapes): picking the node under the pointer (hover) takes 0.8 ms median, a marquee over seven frames 3 ms, and a drag step through the editor 3–4 ms (no rendering). Hover runs on every pointer move, so this is the budget that matters at 10k nodes.
+
 ## Pending: real-GPU numbers
 
 The architecture is aimed at real GPUs:
