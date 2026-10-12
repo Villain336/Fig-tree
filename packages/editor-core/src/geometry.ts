@@ -62,7 +62,9 @@ export class CanvasGeometry {
    * its parent's box, or for children of groups, the group's parent space.
    */
   parentSpace(id: string): Mat2D {
-    const parent = this.doc.tree.parentOf(id);
+    let parent = this.doc.tree.parentOf(id);
+    // Groups have no space of their own (a boolean group's scene node sits at its result's bounds).
+    while (parent !== undefined && this.doc.typeOf(parent) === "group") parent = this.doc.tree.parentOf(parent);
     if (parent === undefined || parent === "root") return IDENTITY;
     return this.worldMatrix(parent);
   }

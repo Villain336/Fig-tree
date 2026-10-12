@@ -103,6 +103,28 @@ describe("boolean actions", () => {
     expect(groupArea(s.editor, g)).toBeGreaterThan(100);
   });
 
+  it("keeps operands where they are drawn, so a child's points are edited in place and the result follows", () => {
+    const s = setup(scene);
+    s.editor.select(["a", "b"]);
+    s.editor.run("boolean.union");
+    const g = s.editor.selection[0]!;
+    // The group draws its result at the result's bounds; its children keep their own place.
+    expect(s.editor.geometry.bounds("b")).toEqual({ x: 150, y: 100, width: 100, height: 100 });
+    const area = groupArea(s.editor, g);
+    // Edit b's points: it becomes a vector (same id inside the group), and the union grows.
+    s.editor.select(["b"]);
+    key(s.editor, "Enter");
+    const v = vectorSession(s.editor)!;
+    s.editor.updateSettings({ snapping: false });
+    // The ellipse's right point is at (250, 150).
+    click(s.editor, 250, 150);
+    expect(v.selectedVertices).toHaveLength(1);
+    drag(s.editor, [250, 150], [330, 150]);
+    expect(s.doc.tree.parentOf(v.nodeId)).toBe(g);
+    expect(groupArea(s.editor, g)).toBeGreaterThan(area + 1000);
+    expect(s.editor.history.undoDepth).toBe(2);
+  });
+
   it("lists the boolean operations, flatten, outline stroke and copy as SVG in the context menu", () => {
     const s = setup(scene);
     s.editor.select(["a", "b"]);

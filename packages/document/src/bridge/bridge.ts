@@ -414,6 +414,9 @@ export class SceneBridge {
       if (b.minX <= b.maxX) booleanBox = { x: b.minX, y: b.minY, width: b.maxX - b.minX, height: b.maxY - b.minY };
       const m: Mat2D = [1, 0, 0, 1, -booleanBox.x, -booleanBox.y];
       booleanOutline = contoursToPath(contours.map((c) => c.map((q) => transformCubic(q, m))));
+      // The operands' host undoes the result's offset, so the operands keep their own place
+      // (their world matrices are what editing and hit-testing read).
+      if (e.host && e.host !== e.main && !sameMatrix(e.host.transform, m)) e.host.transform = m;
     }
 
     // Transform, visibility, opacity. The box is the computed layout box.
