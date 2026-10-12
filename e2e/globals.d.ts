@@ -32,8 +32,18 @@ interface EditorHarness {
   fontsReady(): Promise<void>;
 }
 
+/** A laid-out text case for the text render page (packages/text/conformance/visual.ts). */
+interface GlyphSceneData {
+  readonly width: number;
+  readonly height: number;
+  readonly sources: Record<string, { readonly unitsPerEm: number; readonly glyphs: Record<number, number[]> }>;
+  readonly runs: readonly { readonly source: string; readonly size: number; readonly glyphs: readonly number[]; readonly skew: number; readonly embolden: number }[];
+  readonly rects: readonly { readonly x: number; readonly y: number; readonly width: number; readonly height: number }[];
+}
+
 interface Window {
   __renderTest?: RenderTestResult | { error: string };
+  __renderGlyphScene?: (scene: GlyphSceneData) => Promise<{ backend: string; width: number; height: number; pixels: string }>;
   __bench?: BenchHarness;
   __figtree?: EditorHarness;
 }
