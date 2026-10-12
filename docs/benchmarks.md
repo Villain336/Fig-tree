@@ -165,18 +165,18 @@ Unit tests (`packages/renderer/test/glyphs.test.ts`) check the coverage rasteriz
 
 ## Editing (Module 5a)
 
-Measured on 2026-10-12 on the machine above (`e2e/editing-bench.spec.ts`, part of `npm run bench`; `packages/editor-core/test/perf.test.ts` for Node). Real mouse and keyboard input through Playwright on 10,000-node documents, zoomed in so a few frames are on screen. Each input waits for the frame that shows it. Ranges are over three runs; p95 varies most (an occasional garbage collection or SwiftShader stall lands on a frame).
+Measured on 2026-10-12 on the machine above (`e2e/editing-bench.spec.ts`, part of `npm run bench`; `packages/editor-core/test/perf.test.ts` for Node). Real mouse and keyboard input through Playwright on 10,000-node documents, zoomed in so a few frames are on screen. Each input waits for the frame that shows it. Ranges are over four runs; p95 varies most (an occasional garbage collection or SwiftShader stall lands on a frame).
 
 **Input-to-frame latency (CPU)** is the CPU work from an input event to the end of the frame that shows it: handling the input (the editor's state machine, the command with its zod validation and Yjs transaction, layout, the bridge recompiling what changed) plus the frame's render CPU (draw-list update, frame planning, encoding). GPU time is not in it: here every frame is rasterized by SwiftShader on the CPU, and the wall clock from input to the end of the frame's CPU work is dominated by waiting for SwiftShader to finish the previous frame (both are reported).
 
 | Scenario | Backend | Input-to-frame CPU, median / p95 | Input handling (median) | Frame CPU (median) | Wall clock (median) | Nodes recompiled per frame (max, counted per frame) |
 |---|---|---|---|---|---|---|
-| Drag one shape (`/?doc=grid10k`, 30 steps) | WebGPU | 6.6–7.3 / 9–27 ms | 3.0–3.7 ms | 2.7–2.8 ms | 300–390 ms | 1 |
-| | WebGL2 | 5.4–6.3 / 10–13 ms | 2.6–3.1 ms | 2.5–3.1 ms | 165–187 ms | 1 |
-| Resize one shape with its corner handle | WebGPU | 2.9–3.3 / 6–9 ms | 1.2–1.4 ms | 1.5–1.8 ms | 287–349 ms | 1 |
-| | WebGL2 | 3.7–5.0 / 8–9 ms | 1.1–1.2 ms | 2.1–3.0 ms | 166–188 ms | 1 |
-| Type 45 characters into a paragraph (`/?doc=text10k`, 2,000 texts) | WebGPU | 14.5–15.8 / 28–30 ms | 2.4–3.3 ms | 11.9–12.3 ms | 292–373 ms | 1 |
-| | WebGL2 | 8.5–10.7 / 19–29 ms | 2.8–3.4 ms | 5.2–6.8 ms | 212–236 ms | 1 |
+| Drag one shape (`/?doc=grid10k`, 30 steps) | WebGPU | 5.4–7.3 / 9–27 ms | 3.0–3.7 ms | 2.3–2.8 ms | 300–390 ms | 1 |
+| | WebGL2 | 5.4–6.3 / 10–13 ms | 2.5–3.1 ms | 2.4–3.1 ms | 165–187 ms | 1 |
+| Resize one shape with its corner handle | WebGPU | 2.9–4.0 / 6–9 ms | 1.2–1.4 ms | 1.5–2.6 ms | 287–349 ms | 1 |
+| | WebGL2 | 3.6–5.0 / 7–9 ms | 1.1–1.2 ms | 2.1–3.0 ms | 166–188 ms | 1 |
+| Type 45 characters into a paragraph (`/?doc=text10k`, 2,000 texts) | WebGPU | 14.5–15.8 / 25–30 ms | 2.4–3.3 ms | 11.9–12.5 ms | 292–373 ms | 1 |
+| | WebGL2 | 8.5–10.7 / 19–29 ms | 2.7–3.4 ms | 5.2–7.1 ms | 201–236 ms | 1 |
 
 What the numbers and the assertions show:
 - **Edits touch one node.** A drag or resize step recompiles exactly the dragged node, and a keystroke the edited text (asserted: at most 2 for gestures and well under the card's size for typing; measured 1 in every frame). Gestures write to the document on every pointer move (that is what collaborators see), and all the steps of a gesture are one undo step.
