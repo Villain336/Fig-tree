@@ -165,6 +165,25 @@ describe("shaping across style and line boundaries (as Chromium does it)", () =>
   });
 });
 
+describe("characters no font has", () => {
+  it("draw the first available font's missing-glyph box with its advance (emoji without an emoji font)", () => {
+    const b = block("a\u{1F642}b");
+    const line = b.layout(500).paragraphs[0]!.layout.lines[0]!;
+    const emoji = line.chars.find((c) => c.index === 1)!;
+    expect(emoji.right - emoji.left).toBeGreaterThan(4);
+    const gids = line.runs.flatMap((r) => Array.from({ length: r.glyphs.length / 3 }, (_, i) => r.glyphs[i * 3]!));
+    expect(gids).toContain(0);
+    expect(line.chars.find((c) => c.index === 3)!.left).toBeCloseTo(emoji.right, 6);
+  });
+
+  it("keep an emoji ZWJ sequence one grapheme for carets and hit-testing", () => {
+    const family = "\u{1F469}\u200D\u{1F469}\u200D\u{1F467}";
+    const b = block(`x${family}y`);
+    const line = b.layout(500).paragraphs[0]!.layout.lines[0]!;
+    expect(line.chars.map((c) => c.index)).toEqual([0, 1, 1 + family.length]);
+  });
+});
+
 describe("hit-testing", () => {
   it("maps points to caret positions and back", () => {
     const text = "hello world";

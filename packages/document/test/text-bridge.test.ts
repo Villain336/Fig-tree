@@ -220,4 +220,19 @@ describe("text in the bridge", () => {
     await Promise.resolve();
     expect(bridge2.box("t")!.width).toBeCloseTo(uploadedWidth, 6);
   });
+
+  it("hit-tests text: points to caret indices and indices to caret rects, across paragraphs", () => {
+    const d = doc((p) => [text("t", p, "First line\nSecond paragraph", { x: 0, y: 0, width: 300, widthMode: "fixed", paragraphSpacing: 10 })]);
+    const bridge = new SceneBridge(d, new Scene(), { fonts });
+    const a = bridge.textCaretRect("t", 0)!;
+    expect(a).toMatchObject({ x: 0, y: 0, height: 20 });
+    const second = bridge.textCaretRect("t", 11)!;
+    expect(second.x).toBe(0);
+    expect(second.y).toBe(30); // 20 px line + 10 px paragraph spacing
+    const mid = bridge.textCaretRect("t", 14)!;
+    expect(bridge.textCaretAt("t", mid.x + 0.5, mid.y + 5)).toBe(14);
+    expect(bridge.textCaretAt("t", 1000, 5)).toBe(10); // end of the first line
+    expect(bridge.textCaretAt("t", -5, 35)).toBe(11);
+    expect(bridge.textCaretAt("missing", 0, 0)).toBeNull();
+  });
 });

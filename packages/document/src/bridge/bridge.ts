@@ -92,6 +92,41 @@ export class SceneBridge {
     return this.layout.box(id);
   }
 
+  /**
+   * Hit-testing a text node: the caret index (into its text content) nearest
+   * a point in the node's local coordinates (its box's top-left is 0, 0).
+   * Null for nodes that are not laid out text.
+   */
+  textCaretAt(id: string, x: number, y: number): number | null {
+    const g = this.textGeometry(id);
+    if (!g) return null;
+    const pos = g.block.hitTest(g.layout, x - g.x, y - g.y);
+    return (g.starts[pos.paragraph] ?? 0) + pos.index;
+  }
+
+  /** The caret before `index` of a text node's content: x, top and height in the node's local coordinates. */
+  textCaretRect(id: string, index: number): { x: number; y: number; height: number } | null {
+    const g = this.textGeometry(id);
+    if (!g) return null;
+    let paragraph = 0;
+    while (paragraph + 1 < g.starts.length && g.starts[paragraph + 1]! <= index) paragraph++;
+    const r = g.block.caretRect(g.layout, { paragraph, index: index - g.starts[paragraph]! });
+    return r ? { x: r.x + g.x, y: r.top + g.y, height: r.height } : null;
+  }
+
+  private textGeometry(id: string) {
+    const t = this.layout.text(id);
+    const box = this.layout.box(id);
+    if (!t || !box) return null;
+    const valign = this.doc.get<string>(id, "verticalAlign");
+    const inner = box.height - box.padding.top - box.padding.bottom - box.border.top - box.border.bottom;
+    const dy = valign === "center" ? (inner - t.layout.height) / 2 : valign === "bottom" ? inner - t.layout.height : 0;
+    const starts: number[] = [0];
+    const content = this.doc.text(id).content;
+    for (let i = content.indexOf("\n"); i >= 0; i = content.indexOf("\n", i + 1)) starts.push(i + 1);
+    return { block: t.block, layout: t.layout, starts, x: box.padding.left + box.border.left, y: box.padding.top + box.border.top + dy };
+  }
+
   get page(): string {
     return this._page;
   }

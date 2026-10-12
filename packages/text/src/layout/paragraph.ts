@@ -171,7 +171,13 @@ export class ShapedParagraph {
       let m = fontCache.get(key);
       if (m === undefined) {
         const st = spans[spanIndex]!.style;
-        m = this.fonts.fontFor(cp, { families: st.fontFamily, request: requestOf(st) }, pending);
+        const loading = { value: false };
+        m = this.fonts.fontFor(cp, { families: st.fontFamily, request: requestOf(st) }, loading);
+        if (loading.value) pending.value = true;
+        // No font has the character (an emoji without an emoji font, say): like browsers,
+        // draw the first available font's missing-glyph box, with its advance. While a
+        // font that may have it is loading, the character waits instead.
+        else if (!m && cp >= 0x20 && !isDefaultIgnorable(cp)) m = this.spanBoxes[spanIndex]!.match ?? null;
         fontCache.set(key, m);
       }
       return m;
