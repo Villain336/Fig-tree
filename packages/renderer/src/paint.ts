@@ -131,7 +131,7 @@ export function gradientParameter(kind: PaintKind, gx: number, gy: number): numb
 }
 
 /**
- * Reference gradient evaluation (premultiplied). Shaders implement the same
+ * Reference gradient evaluation (premultiplied colors, interpolated premultiplied like CSS gradients). Shaders implement the same
  * math; this version backs tests and keeps the semantics in one readable place.
  */
 export function sampleStops(stops: Float32Array, t: number): [number, number, number, number] {
@@ -144,9 +144,10 @@ export function sampleStops(stops: Float32Array, t: number): [number, number, nu
   const b = read(Math.min(i + 1, n - 1));
   const span = b[0]! - a[0]!;
   const u = span > 0 ? clamp01((tt - a[0]!) / span) : tt >= b[0]! ? 1 : 0;
-  const mix = (k: number): number => a[k]! + (b[k]! - a[k]!) * u;
-  const alpha = mix(4);
-  return [mix(1) * alpha, mix(2) * alpha, mix(3) * alpha, alpha];
+  // CSS Images 4 §3.5.2: stops interpolate in premultiplied space.
+  const pre = (s: number[], k: number): number => (k === 4 ? s[4]! : s[k]! * s[4]!);
+  const mix = (k: number): number => pre(a, k) + (pre(b, k) - pre(a, k)) * u;
+  return [mix(1), mix(2), mix(3), mix(4)];
 }
 
 function clamp01(v: number): number {

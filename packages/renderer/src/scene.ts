@@ -325,8 +325,12 @@ function sameStrokeStyle(a: Stroke, b: Stroke): boolean {
  * A retained scene: a tree of {@link SceneNode}s under `root`. The scene keeps
  * coarse change counters that renderers poll once per frame.
  */
+let nextSceneId = 1;
+
 export class Scene {
   readonly root: SceneNode;
+  /** Unique per scene in this process. */
+  readonly id = nextSceneId++;
   private nextId = 1;
   /** @internal Tree shape, visibility, opacity, clipping or fill presence changed. */
   structureVersion = 0;

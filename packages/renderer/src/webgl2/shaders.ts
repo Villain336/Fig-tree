@@ -113,8 +113,10 @@ vec4 gradientStops(int base, int count, float u) {
   float o0 = stopTexel(base + i, 0).x;
   float o1 = stopTexel(base + j, 0).x;
   float s = o1 > o0 ? clamp((u - o0) / (o1 - o0), 0.0, 1.0) : (u >= o1 ? 1.0 : 0.0);
-  vec4 c = mix(stopTexel(base + i, 1), stopTexel(base + j, 1), s);
-  return vec4(c.rgb * c.a, c.a);
+  vec4 c0 = stopTexel(base + i, 1);
+  vec4 c1 = stopTexel(base + j, 1);
+  // Premultiplied interpolation, like CSS gradients.
+  return mix(vec4(c0.rgb * c0.a, c0.a), vec4(c1.rgb * c1.a, c1.a), s);
 }
 vec4 rawPaint(int id) {
   vec4 t = entryTexel(id, 1);

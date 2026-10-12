@@ -2,6 +2,7 @@
 
 import { multiply, scaling, translation } from "@fig-tree/geometry";
 import { Renderer, Scene, backendFromSearch, type FrameStats } from "@fig-tree/renderer";
+import { BrowserImages } from "./images";
 import { AssetStore, CommandError, SceneBridge, type Command, type FigDocument } from "@fig-tree/document";
 import { deletePage, Editor as CoreEditor, paste, placeImage, selectionToSvg, textSession, copySelection, cutSelection, type AnchorRect, type ClipboardIn } from "@fig-tree/editor-core";
 import type { FontRegistry } from "@fig-tree/text";
@@ -122,13 +123,19 @@ export function Editor() {
     let compiledSinceFrame = 0;
     let copiedSvg: string | null = null;
     const assets = new AssetStore();
+    const clockStart = performance.now();
+    /** `?animate=0` freezes animated paints (tests and benchmarks of static frames). */
+    const paused = (): boolean => new URLSearchParams(window.location.search).get("animate") === "0";
 
     const renderNow = (): FrameStats | null => {
       if (!renderer || disposed) return null;
       renderer.background = bridge.background;
       const inputs = takeInputs();
       const overlay = takeOverlay();
+      // Animated shader paints follow the clock; static scenes ignore it.
+      renderer.time = (performance.now() - clockStart) / 1000;
       const stats = renderer.render({ transform: editor.viewport.matrix });
+      if (stats.animated && !paused()) requestAnimationFrame(() => schedule());
       const now = performance.now();
       if (inputs.length) {
         const input = inputs.reduce((sum, i) => sum + i.cpu, 0);
@@ -167,7 +174,8 @@ export function Editor() {
     (async () => {
       const registry = await editorFonts();
       if (disposed) return;
-      bridge = new SceneBridge(doc, scene, { fonts: registry });
+      const images = new BrowserImages((id) => assets.get(id), (id) => doc.assets().get(id));
+      bridge = new SceneBridge(doc, scene, { fonts: registry, images });
       registry.onLoad((entry) => fontEvents.push(`${entry.family} ${entry.state}`));
       editor = new CoreEditor(doc, bridge, { platform: mac ? "mac" : "other", assets });
       editor.subscribe((changes) => {

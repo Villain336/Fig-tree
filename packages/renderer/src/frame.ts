@@ -169,10 +169,12 @@ export interface FramePlan {
   readonly time: number;
 }
 
+/** Upload ids are unique per process, so GPU caches never confuse paints of different scenes. */
+let nextUploadId = 1;
+
 /** Caches encoded paints across frames, keyed by node and role. */
 export class PaintCache {
   private records = new Map<number, { version: number; record: PaintRecord }>();
-  private nextUploadId = 1;
 
   get(item: DrawItem): PaintRecord | null {
     const role = item.paintRole;
@@ -182,7 +184,7 @@ export class PaintCache {
     const key = item.node.id * 2 + (role === "stroke" ? 1 : 0);
     const cached = this.records.get(key);
     if (cached && cached.version === item.node.paintVersion) return cached.record;
-    const record: PaintRecord = { key, uploadId: this.nextUploadId++, paint: encodePaint(paint) };
+    const record: PaintRecord = { key, uploadId: nextUploadId++, paint: encodePaint(paint) };
     this.records.set(key, { version: item.node.paintVersion, record });
     return record;
   }
@@ -197,6 +199,8 @@ export interface PlanOptions {
   readonly contentVersion?: number;
   /** Renderer clock in seconds. */
   readonly time?: number;
+  /** Identifies the scene (effect textures of different scenes never share cache keys). */
+  readonly sceneId?: number;
 }
 
 /**
@@ -248,7 +252,7 @@ export function planFrame(
     graph: [],
     nextId: 1,
     background: premultiply(options.background ?? { r: 1, g: 1, b: 1, a: 1 }),
-    frameKey: `${list.generation}:${options.contentVersion ?? 0}:${view.slice(0, 4).join(",")}${list.animated ? `:t${time}` : ""}`,
+    frameKey: `${options.sceneId ?? 0}:${list.generation}:${options.contentVersion ?? 0}:${view.slice(0, 4).join(",")}${list.animated ? `:t${time}` : ""}`,
     time,
   };
   if (width <= 0 || height <= 0 || !invert(view)) return emptyPlan(ctx, width, height);

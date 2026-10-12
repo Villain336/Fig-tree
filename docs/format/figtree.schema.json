@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:fig-tree:format:document:2",
+  "$id": "urn:fig-tree:format:document:3",
   "title": "Fig Tree document (document.json)",
-  "description": "The document.json entry of a .figtree archive, format version 2. Additional rules checked by Fig Tree but not expressible here: node ids are unique; every asset a node references is listed in `assets`; vector network segments reference existing vertices and region loops close; text runs are sorted, non-overlapping and inside the content.",
+  "description": "The document.json entry of a .figtree archive, format version 3. Additional rules checked by Fig Tree but not expressible here: node ids are unique; every asset a node references is listed in `assets`; vector network segments reference existing vertices and region loops close; text runs are sorted, non-overlapping and inside the content.",
   "type": "object",
   "properties": {
     "format": {
@@ -11,7 +11,7 @@
     },
     "version": {
       "type": "number",
-      "const": 2
+      "const": 3
     },
     "name": {
       "type": "string",
@@ -184,6 +184,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -1209,53 +1218,7 @@
           "additionalProperties": false
         },
         {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "shader"
-            },
-            "shader": {
-              "type": "string",
-              "minLength": 1
-            },
-            "uniforms": {
-              "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "maxItems": 16,
-                    "type": "array",
-                    "items": {
-                      "type": "number"
-                    }
-                  }
-                ]
-              }
-            },
-            "visible": {
-              "type": "boolean"
-            },
-            "opacity": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "blendMode": {
-              "$ref": "#/$defs/BlendMode"
-            }
-          },
-          "required": [
-            "type",
-            "shader"
-          ],
-          "additionalProperties": false
+          "$ref": "#/$defs/ShaderPaint"
         }
       ]
     },
@@ -1280,6 +1243,542 @@
     "AssetId": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "ShaderPaint": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "mesh-gradient"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "columns": {
+                  "type": "integer",
+                  "minimum": 2,
+                  "maximum": 6
+                },
+                "rows": {
+                  "type": "integer",
+                  "minimum": 2,
+                  "maximum": 6
+                },
+                "points": {
+                  "minItems": 4,
+                  "maxItems": 36,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/MeshPoint"
+                  }
+                },
+                "motion": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 0.5
+                }
+              },
+              "required": [
+                "columns",
+                "rows",
+                "points"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "grain"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "colorBack": {
+                  "$ref": "#/$defs/Color"
+                },
+                "colorFront": {
+                  "$ref": "#/$defs/Color"
+                },
+                "size": {
+                  "type": "number",
+                  "minimum": 0.25,
+                  "maximum": 256
+                },
+                "density": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "softness": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "colorBack",
+                "colorFront",
+                "size",
+                "density"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "halftone"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "style": {
+                  "type": "string",
+                  "enum": [
+                    "dots",
+                    "lines"
+                  ]
+                },
+                "cmyk": {
+                  "type": "boolean"
+                },
+                "colorBack": {
+                  "$ref": "#/$defs/Color"
+                },
+                "colorFront": {
+                  "$ref": "#/$defs/Color"
+                },
+                "cellSize": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 256
+                },
+                "angle": {
+                  "type": "number"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "linear",
+                    "radial",
+                    "noise",
+                    "image"
+                  ]
+                },
+                "sourceAngle": {
+                  "type": "number"
+                },
+                "contrast": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                },
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                }
+              },
+              "required": [
+                "style",
+                "cmyk",
+                "colorBack",
+                "colorFront",
+                "cellSize",
+                "angle",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "fluted-glass"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "fluteWidth": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 512
+                },
+                "angle": {
+                  "type": "number"
+                },
+                "distortion": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "shading": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "frost": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 256
+                },
+                "tint": {
+                  "$ref": "#/$defs/Color"
+                }
+              },
+              "required": [
+                "fluteWidth",
+                "angle",
+                "distortion",
+                "shading",
+                "frost",
+                "tint"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "liquid"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "colors": {
+                  "minItems": 2,
+                  "maxItems": 5,
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Color"
+                  }
+                },
+                "scale": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 4096
+                },
+                "warp": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "detail": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                }
+              },
+              "required": [
+                "colors",
+                "scale",
+                "warp",
+                "detail"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "shader"
+            },
+            "seed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "time": {
+              "type": "number"
+            },
+            "speed": {
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "blendMode": {
+              "$ref": "#/$defs/BlendMode"
+            },
+            "shader": {
+              "type": "string",
+              "const": "dithering"
+            },
+            "params": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string",
+                  "enum": [
+                    "bayer2",
+                    "bayer4",
+                    "bayer8",
+                    "noise"
+                  ]
+                },
+                "pixelSize": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 256
+                },
+                "colorBack": {
+                  "$ref": "#/$defs/Color"
+                },
+                "colorFront": {
+                  "$ref": "#/$defs/Color"
+                },
+                "source": {
+                  "type": "string",
+                  "enum": [
+                    "linear",
+                    "radial",
+                    "noise",
+                    "image"
+                  ]
+                },
+                "sourceAngle": {
+                  "type": "number"
+                },
+                "contrast": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                },
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                }
+              },
+              "required": [
+                "pattern",
+                "pixelSize",
+                "colorBack",
+                "colorFront",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "type",
+            "shader",
+            "params"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "MeshPoint": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "color": {
+          "$ref": "#/$defs/Color"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "color"
+      ],
+      "additionalProperties": false
     },
     "StrokeWeight": {
       "anyOf": [
@@ -1777,6 +2276,15 @@
         "effects": {
           "$ref": "#/$defs/EffectStack"
         },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
+        },
         "componentRef": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{1,64}$"
@@ -2001,6 +2509,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -2266,6 +2783,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -2538,6 +3064,15 @@
         "effects": {
           "$ref": "#/$defs/EffectStack"
         },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
+        },
         "componentRef": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{1,64}$"
@@ -2804,6 +3339,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -3077,6 +3621,15 @@
         "effects": {
           "$ref": "#/$defs/EffectStack"
         },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
+        },
         "componentRef": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{1,64}$"
@@ -3331,6 +3884,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -3714,6 +4276,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -4331,6 +4902,15 @@
         "effects": {
           "$ref": "#/$defs/EffectStack"
         },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
+        },
         "componentRef": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{1,64}$"
@@ -4608,6 +5188,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",
@@ -5109,6 +5698,15 @@
         },
         "effects": {
           "$ref": "#/$defs/EffectStack"
+        },
+        "mask": {
+          "type": "string",
+          "enum": [
+            "none",
+            "alpha",
+            "luminance",
+            "vector"
+          ]
         },
         "componentRef": {
           "type": "string",

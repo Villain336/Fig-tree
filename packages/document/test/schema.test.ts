@@ -134,7 +134,7 @@ const invalid: Record<string, Case[]> = {
     { type: "rectangle", props: { fills: [{ type: "conic", color: red }] }, error: /^fills\.0\.type: Invalid discriminator value/ },
     { type: "rectangle", props: { fills: [{ type: "image", asset: "not-a-hash", fit: "cover" }] }, error: /^fills\.0\.asset: asset ids are lowercase hex SHA-256 digests/ },
     { type: "rectangle", props: { fills: [{ type: "image", asset: "a".repeat(64), fit: "cover", rotation: 45 }] }, error: /^fills\.0\.rotation: Invalid input/ },
-    { type: "rectangle", props: { fills: [{ type: "shader", shader: "" }] }, error: /^fills\.0\.shader: Too small/ },
+    { type: "rectangle", props: { fills: [{ type: "shader", shader: "" }] }, error: /^fills\.0\.shader: Invalid discriminator/ },
     { type: "rectangle", props: { fills: [{ type: "solid", color: red, opacity: -0.1 }] }, error: /^fills\.0\.opacity: Too small/ },
   ],
   strokes: [
@@ -219,10 +219,19 @@ describe("value schemas", () => {
       { type: "angular-gradient", center: { x: 0.5, y: 0.5 }, radiusX: { x: 1, y: 0.5 }, radiusY: { x: 0.5, y: 1 }, stops },
       { type: "diamond-gradient", center: { x: 0.5, y: 0.5 }, radiusX: { x: 1, y: 0.5 }, radiusY: { x: 0.5, y: 1 }, stops },
       { type: "image", asset: "f".repeat(64), fit: "tile", tileScale: 0.5 },
-      { type: "shader", shader: "noise", uniforms: { scale: 2, offset: [1, 2] } },
+      { type: "shader", shader: "grain", seed: 4, speed: 1, params: { colorBack: red, colorFront: { ...red, r: 0 }, size: 2, density: 0.5 } },
+      { type: "shader", shader: "mesh-gradient", params: { columns: 2, rows: 2, points: [0, 1, 2, 3].map((i) => ({ x: i % 2, y: i >> 1, color: red })) } },
+      { type: "shader", shader: "halftone", params: { style: "dots", cmyk: true, colorBack: red, colorFront: red, cellSize: 6, angle: 45, source: "image", asset: "e".repeat(64) } },
+      { type: "shader", shader: "fluted-glass", params: { fluteWidth: 12, angle: 0, distortion: 0.5, shading: 0.3, frost: 4, tint: red } },
+      { type: "shader", shader: "liquid", params: { colors: [red, red, red], scale: 80, warp: 1, detail: 4 } },
+      { type: "shader", shader: "dithering", params: { pattern: "bayer8", pixelSize: 2, colorBack: red, colorFront: red, source: "radial" } },
     ]) {
       expect(Paint.safeParse(p).success, p.type).toBe(true);
     }
+    // Reserved free-form shaders are gone, and parameters are checked per shader.
+    expect(Paint.safeParse({ type: "shader", shader: "noise", uniforms: { scale: 2 } }).success).toBe(false);
+    expect(firstIssue(Paint, { type: "shader", shader: "mesh-gradient", params: { columns: 3, rows: 2, points: [0, 1, 2, 3].map((i) => ({ x: i, y: 0, color: red })) } })).toMatch(/columns × rows points/);
+    expect(firstIssue(Paint, { type: "shader", shader: "grain", params: { colorBack: red, colorFront: red, size: 0, density: 0.5 } })).toMatch(/^params\.size: /);
     for (const e of [
       { type: "drop-shadow", color: red, offset: { x: 0, y: 2 }, blur: 4, spread: 0, showBehindNode: true },
       { type: "inner-shadow", color: red, offset: { x: 0, y: 2 }, blur: 4, spread: -1 },

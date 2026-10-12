@@ -658,8 +658,8 @@ fn gradientStops(p: Paint, t: f32) -> vec4<f32> {
   let c1 = stops[(p.stopOffset + j) * 2u + 1u];
   var u = select(0.0, 1.0, t >= o1);
   if (o1 > o0) { u = clamp((t - o0) / (o1 - o0), 0.0, 1.0); }
-  let c = mix(c0, c1, u);
-  return vec4<f32>(c.rgb * c.a, c.a);
+  // Premultiplied interpolation, like CSS gradients.
+  return mix(vec4<f32>(c0.rgb * c0.a, c0.a), vec4<f32>(c1.rgb * c1.a, c1.a), u);
 }
 
 fn paintColor(e: Entry, pos: vec2<f32>) -> vec4<f32> {

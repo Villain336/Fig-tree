@@ -48,3 +48,5 @@ export {
   type GeometrySource,
 } from "./vector-geometry";
 export { textToVectorNetwork } from "./bridge/vector";
+export { cssAppearance, cssMask, cssPaintLayer, type CssAppearance, type CssOptions } from "./css-paint";
+export { exportShaderPaint, type ShaderExport, type ShaderExportOptions } from "./shader-export";

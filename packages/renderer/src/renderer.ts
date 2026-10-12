@@ -43,7 +43,7 @@ export function backendFromSearch(search: string): BackendPreference {
 export class Renderer {
   private scene = new Scene();
   private list = new DrawList();
-  private readonly paints = new PaintCache();
+  private paints = new PaintCache();
   /** Coverage bitmaps of small, axis-aligned glyphs, shared by every frame. */
   readonly glyphAtlas = new GlyphAtlas();
   /** Visible regions of images at the mip level each draw needs. */
@@ -97,6 +97,7 @@ export class Renderer {
     if (scene === this.scene) return;
     this.scene = scene;
     this.list = new DrawList();
+    this.paints = new PaintCache();
     this.lastSceneVersion = -1;
   }
 
@@ -152,7 +153,7 @@ export class Renderer {
 
   /** Plans a frame; if the image atlas had to start over while planning, plans it again once. */
   private plan(view: Mat2D, width: number, height: number, retry = true): FramePlan {
-    const options = { images: this.imageAtlas, background: this.background, contentVersion: this.scene.version, time: this.time };
+    const options = { images: this.imageAtlas, background: this.background, contentVersion: this.scene.version, time: this.time, sceneId: this.scene.id };
     let plan = planFrame(this.list, this.paints, view, width, height, this.glyphAtlas, options);
     if (retry && this.imageAtlas.repeatFrame) {
       this.imageAtlas.beginFrame(true);

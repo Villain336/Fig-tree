@@ -521,7 +521,8 @@ export class SceneBridge {
     for (const n of e.paintNotes) notes.add(n);
     if (type !== "page") {
       const fx = get<Effect[]>("effects");
-      const fxKey = JSON.stringify([fx, e.geometryKey]);
+      // Spread shapes depend on the geometry; otherwise effects are independent of it.
+      const fxKey = fx.length === 0 ? "" : JSON.stringify([fx, fx.some((f) => "spread" in f && f.spread !== 0) ? e.geometryKey : ""]);
       if (fxKey !== e.effectsKey) {
         e.effectsKey = fxKey;
         e.main.effects = renderEffects(this.doc, id, type, fx, width, height);

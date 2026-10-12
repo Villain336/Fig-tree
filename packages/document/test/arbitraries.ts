@@ -25,6 +25,33 @@ export const FUZZ_ASSET_BYTES: Record<string, string> = {
 export const FUZZ_ASSETS = Object.keys(FUZZ_ASSET_BYTES);
 
 const paintBase = { visible: fc.boolean(), opacity: unit, blendMode: blend };
+const tone = fc.constantFrom("linear", "radial", "noise", "image");
+const size = (lo: number, hi: number) => fc.double({ min: lo, max: hi, noNaN: true });
+
+/** Typed parameters of every built-in shader. */
+function shaderSpec(): fc.Arbitrary<Record<string, unknown>> {
+  const opt = <T extends Record<string, fc.Arbitrary<unknown>>>(r: T) => fc.record(r, optional);
+  return fc.oneof(
+    fc.tuple(fc.integer({ min: 2, max: 4 }), fc.integer({ min: 2, max: 4 })).chain(([columns, rows]) =>
+      fc.tuple(fc.array(fc.record({ x: num, y: num, color }), { minLength: columns * rows, maxLength: columns * rows }), opt({ motion: size(0, 0.5) }))
+        .map(([points, m]) => ({ shader: "mesh-gradient", params: { columns, rows, points, ...m } })),
+    ),
+    fc.tuple(fc.record({ colorBack: color, colorFront: color, size: size(0.25, 256), density: unit }), opt({ softness: unit }))
+      .map(([a, b]) => ({ shader: "grain", params: { ...a, ...b } })),
+    fc.tuple(
+      fc.record({ style: fc.constantFrom("dots", "lines"), cmyk: fc.boolean(), colorBack: color, colorFront: color, cellSize: size(1, 256), angle: num, source: tone }),
+      opt({ sourceAngle: num, contrast: signedUnit, asset: fc.constantFrom(...FUZZ_ASSETS) }),
+    ).map(([a, b]) => ({ shader: "halftone", params: { ...a, ...b } })),
+    fc.record({ fluteWidth: size(1, 512), angle: num, distortion: unit, shading: unit, frost: size(0, 256), tint: color })
+      .map((params) => ({ shader: "fluted-glass", params })),
+    fc.record({ colors: fc.array(color, { minLength: 2, maxLength: 5 }), scale: size(1, 4096), warp: size(0, 2), detail: fc.integer({ min: 1, max: 6 }) })
+      .map((params) => ({ shader: "liquid", params })),
+    fc.tuple(
+      fc.record({ pattern: fc.constantFrom("bayer2", "bayer4", "bayer8", "noise"), pixelSize: size(1, 256), colorBack: color, colorFront: color, source: tone }),
+      opt({ sourceAngle: num, contrast: signedUnit, asset: fc.constantFrom(...FUZZ_ASSETS) }),
+    ).map(([a, b]) => ({ shader: "dithering", params: { ...a, ...b } })),
+  );
+}
 const optional = { requiredKeys: [] as never[] };
 const withBase = <T extends Record<string, fc.Arbitrary<unknown>>>(required: T) =>
   fc.tuple(fc.record(required), fc.record(paintBase, optional)).map(([r, b]) => ({ ...r, ...b }));
@@ -49,9 +76,8 @@ export const paint = fc.oneof(
     ),
     fc.record(paintBase, optional),
   ).map(([a, b, c]) => ({ ...a, ...b, ...c })),
-  withBase({ type: fc.constant("shader"), shader: fc.string({ minLength: 1, maxLength: 12 }) }).chain((p) =>
-    fc.record({ uniforms: fc.dictionary(fc.string({ maxLength: 6 }), fc.oneof(num, fc.array(num, { maxLength: 4 })), { maxKeys: 3 }) }, optional).map((u) => ({ ...p, ...u })),
-  ),
+  fc.tuple(shaderSpec(), fc.record({ seed: fc.integer({ min: 0, max: 0xffffff }), time: num, speed: fc.double({ min: -100, max: 100, noNaN: true }) }, optional), fc.record(paintBase, optional))
+    .map(([a, b, c]) => ({ type: "shader", ...a, ...b, ...c })),
 );
 const paints = fc.array(paint, { maxLength: 3 });
 
@@ -122,6 +148,7 @@ const PROP_ARBS: Record<string, fc.Arbitrary<unknown>> = {
   blendMode: blend,
   isolation: fc.constantFrom("auto", "isolate"),
   effects: fc.array(effect, { maxLength: 2 }),
+  mask: fc.constantFrom("none", "alpha", "luminance", "vector"),
   componentRef: fc.constantFrom("main-1", "main-2"),
   overrides: fc.array(fc.constantFrom("fills", "geometry", "text-content"), { maxLength: 2 }),
   x: num,

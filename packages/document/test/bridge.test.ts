@@ -218,25 +218,26 @@ describe("SceneBridge structure", () => {
       { type: "createNode", node: { id: "t", type: "text", text: { content: "Hi", runs: [] } }, parent: "PAGE" },
       { type: "createNode", node: { id: "f", type: "frame", props: { overflowX: "hidden", overflowY: "visible" } }, parent: "PAGE" },
     ]);
-    expect([...bridge.unsupported.get("x")!].sort()).toEqual([
-      "blend-mode:multiply",
-      "effect:drop-shadow",
-      "fill:angular-gradient",
-      "fill:image",
-      "paint-blend-mode:screen",
-      "stroke-weight-per-side",
-    ]);
+    // Without an image provider, image paints are not drawn.
+    expect([...bridge.unsupported.get("x")!].sort()).toEqual(["image", "stroke-weight-per-side"]);
     expect([...bridge.unsupported.get("t")!]).toEqual(["text"]);
     expect([...bridge.unsupported.get("f")!]).toEqual(["overflow-single-axis"]);
-    // Only the solid fill is drawn; the per-side stroke is not drawn at all.
+    // The angular gradient and the screen-blended solid draw in an isolated fill group; the per-side stroke is not drawn at all.
     const x = scene.root.children[0]!.children[0]!;
-    expect(x.fill).toEqual({ type: "solid", color: RED.color });
-    expect(x.children).toEqual([]);
+    expect(x.blendMode).toBe("multiply");
+    expect(x.effects).toHaveLength(1);
+    expect(x.fill).toBeNull();
+    expect(x.children).toHaveLength(1);
+    expect(x.children[0]!.isolate).toBe(true);
+    expect(x.children[0]!.children.map((n) => [n.fill?.type, n.blendMode])).toEqual([["angular-gradient", "normal"], ["solid", "screen"]]);
     expect(x.stroke).toBeNull();
     // Fixing the node clears its notes.
     const { doc, user } = { doc: bridge.doc, user: bridge.doc.actor("alice") };
     doc.apply([{ type: "updateProps", id: "x", props: { blendMode: null, effects: null, fills: [RED], strokeWeight: 2 } }], user);
     expect(bridge.unsupported.has("x")).toBe(false);
+    expect(x.blendMode).toBe("normal");
+    expect(x.effects).toEqual([]);
+    expect(x.fill).toEqual({ type: "solid", color: RED.color });
   });
 });
 

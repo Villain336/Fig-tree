@@ -159,7 +159,7 @@ export class DrawList {
   /** Items recompiled or updated by the last {@link sync} (for tests and stats). */
   lastSync: { readonly kind: "none" | "full" | "incremental"; readonly items: number } = { kind: "none", items: 0 };
   private nodeInfo = new Map<SceneNode, NodeInfo>();
-  /** Incremented on every recompile; backends use it to sweep caches of removed nodes. */
+  /** Changes on every recompile (unique per process); backends use it to sweep caches of removed nodes. */
   generation = 0;
   /** Geometry slots and paint-owning node ids referenced by the current items. */
   liveSlots: ReadonlySet<GeometrySlot> = new Set();
@@ -449,7 +449,7 @@ export class DrawList {
     this.spreadSlots = spreadSlots;
     this.animated = animated;
     this.hasEffects = hasEffects;
-    this.generation++;
+    this.generation = nextGeneration++;
     const slots = new Set<GeometrySlot>();
     const ids = new Set<number>();
     for (const it of items) {
@@ -593,6 +593,8 @@ export class DrawList {
     console.warn(`fig-tree renderer: layers nested deeper than ${MAX_LAYER_DEPTH} are rendered without isolation`);
   }
 }
+
+let nextGeneration = 1;
 
 interface Root {
   readonly first: number;

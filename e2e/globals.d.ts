@@ -51,7 +51,29 @@ interface GlyphSceneData {
   readonly rects: readonly { readonly x: number; readonly y: number; readonly width: number; readonly height: number }[];
 }
 
+/** The document render page (apps/editor/app/doc-render). */
+interface DocRenderRequest {
+  readonly json: unknown;
+  readonly assets: Record<string, string>;
+  readonly width: number;
+  readonly height: number;
+  readonly time?: number;
+  readonly tiled?: boolean;
+}
+
+interface DocRenderResult {
+  readonly backend: string;
+  readonly width: number;
+  readonly height: number;
+  readonly pixels: string;
+  readonly mode: string;
+  readonly cpuMs: number;
+  readonly textureBytes: number;
+  readonly unsupported: Record<string, string[]>;
+}
+
 interface Window {
+  __renderDocument?: (req: DocRenderRequest) => Promise<DocRenderResult>;
   __renderTest?: RenderTestResult | { error: string };
   __renderGlyphScene?: (scene: GlyphSceneData) => Promise<{ backend: string; width: number; height: number; pixels: string }>;
   __bench?: BenchHarness;

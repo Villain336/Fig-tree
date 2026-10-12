@@ -184,7 +184,19 @@ describe("migrations", () => {
     const v1 = { format: "figtree", version: 1, name: "One", pages: [{ id: "p", type: "page", children: [{ id: "g", type: "group", children: [{ id: "r", type: "rectangle" }] }] }], assets: {} };
     const doc = fromFigtreeJson(v1);
     expect(doc.get("g", "booleanOperation")).toBe("none");
-    expect(toFigtreeJson(doc).version).toBe(2);
+    expect(toFigtreeJson(doc).version).toBe(FORMAT_VERSION);
+  });
+
+  it("reads version 2 files, dropping reserved shader paints", () => {
+    const red = { r: 1, g: 0, b: 0, a: 1 };
+    const v2 = {
+      format: "figtree", version: 2, name: "Two", assets: {},
+      pages: [{ id: "p", type: "page", children: [{ id: "r", type: "rectangle", fills: [{ type: "solid", color: red }, { type: "shader", shader: "noise", uniforms: { scale: 2 } }], effects: [{ type: "layer-blur", radius: 4 }] }] }],
+    };
+    const doc = fromFigtreeJson(v2);
+    expect(doc.get("r", "fills")).toEqual([{ type: "solid", color: red }]);
+    expect(doc.get("r", "effects")).toEqual([{ type: "layer-blur", radius: 4 }]);
+    expect(doc.get("r", "mask")).toBe("none");
   });
 
   it("refuses files it cannot read", () => {
