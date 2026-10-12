@@ -147,9 +147,9 @@ Inter 16 px with about 40 style runs (alternating regular and bold), laid out at
 | Node | Building the bridge: layout (2,000 paragraphs shaped once each) and the scene | 2.1–2.4 s (build), then 0.10–0.18 s for the first draw-list compile | |
 | Node | A paragraph edit: command, Yjs, text layout, layout, bridge, `DrawList.sync` | 2.4–3.0 ms | 7–11 ms |
 | Node | A label edit (the row and its card reflow) | 2.3–3.2 ms | 4–6 ms |
-| Chromium WebGPU / WebGL2 | A paragraph edit through the page harness | 2.1–2.3 / 2.2–2.6 ms | 5.6–15.7 / 12–14 ms |
-| Chromium WebGPU / WebGL2 | A label edit | 2.2–2.4 / 2.5–2.9 ms | 4.5 / 7.3–8.4 ms |
-| Chromium WebGPU / WebGL2 | The next frame's CPU after an edit, zoomed in on four cards | 3.6–5.5 / 3.8–4.6 ms | |
+| Chromium WebGPU / WebGL2 | A paragraph edit through the page harness | 2.0–2.3 / 2.2–2.6 ms | 5.6–15.7 / 12–14 ms |
+| Chromium WebGPU / WebGL2 | A label edit | 2.2–2.4 / 2.5–2.9 ms | 3.8–4.5 / 5.3–8.4 ms |
+| Chromium WebGPU / WebGL2 | The next frame's CPU after an edit, zoomed in on four cards | 3.5–5.5 / 2.5–4.6 ms | |
 | Chromium WebGPU / WebGL2 | A steady-state pan frame's CPU (second sweep over the same ground, 40 frames) | 0.3–0.4 / 0.1–0.2 ms | 3.0–8.2 / 0.6–1.8 ms |
 
 What the tests assert, and what the numbers show:
@@ -157,7 +157,7 @@ What the tests assert, and what the numbers show:
 - **Typing changes geometry, not structure.** A text node draws one glyph run per font, size and paint, merged across its lines, and reuses its scene nodes, so typing (even when it rewraps lines) updates geometry and the draw list syncs incrementally. Before this, every keystroke recompiled the draw list (60 ms per edit at this size).
 - **Panning rasterizes no glyphs.** On a second sweep over the same ground at a fixed zoom, both backends rasterize **0** glyphs (asserted); after the edits above, the first sweep needed none either, because the cards share their glyphs. Zooming rasterizes each glyph once per size bucket and subpixel phase (the editor test asserts this too).
 - **The overview.** Rendering the whole document directly at 12.5% zoom (all 2,000 texts, 168 glyph bitmaps at that size) takes 139–200 ms of CPU on WebGPU, mostly frame planning (glyph placement for about 150,000 glyphs). On WebGL2 the same frame blocks for 2.7–2.8 s, about as long without drawing any glyphs (measured by skipping them): it is SwiftShader rendering 100 clipping cards and 7,700 swatches through the MSAA path, as in the other 10k-node documents. Consecutive glyph entries draw as one instanced draw.
-- **Opening.** The editor page is ready, with its fonts loaded and every text laid out, in 3.4–3.8 s on WebGPU and 4.7–5.6 s on WebGL2. Shaping is about a quarter of the build: 2,000 paragraphs at about 0.25 ms each.
+- **Opening.** The editor page is ready, with its fonts loaded and every text laid out, in 3.4–3.8 s on WebGPU and 4.4–5.6 s on WebGL2. Shaping is about a quarter of the build: 2,000 paragraphs at about 0.25 ms each.
 
 ### Glyph atlas
 
